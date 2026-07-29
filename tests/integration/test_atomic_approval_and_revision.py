@@ -1,0 +1,202 @@
+import asyncio
+import json
+from datetime import UTC, datetime
+
+from newsbot.ai.fake import FakeGenerationProvider
+from newsbot.approval.scripted import ScriptedAction, ScriptedApprovalAdapter
+from newsbot.candidates import CandidateApprovalService
+from newsbot.exports import generation_claim_payload
+from newsbot.pipeline import NewsPipeline
+from newsbot.runtime import FixtureClock
+from newsbot.storage import Storage
+
+
+def _review_state(storage: Storage, *, pages: int = 2) -> tuple[int, int, int]:
+    with storage.transaction() as connection:
+        connection.execute("INSERT INTO runs(run_key, mode, status) VALUES ('atomic', 'fixture', 'done')")
+        connection.execute("INSERT INTO source_posts(channel_id, external_post_id) VALUES ('channel', '1')")
+        post_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
+        connection.execute(
+            "INSERT INTO source_post_versions(source_post_id, version_key, body) VALUES (?, 'v1', 'source')",
+            (post_id,),
+        )
+        source_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
+        connection.execute(
+            "INSERT INTO source_post_observations("
+            "source_post_id, source_post_version_id, observation_key, observed_at, engagement_json"
+            ") VALUES (?, ?, 'obs-v1', '2026-07-29T00:00:00+00:00', '{}')",
+            (post_id, source_id),
+        )
+        source_record = {
+            "channel_id": "channel",
+            "external_post_id": "1",
+            "source_url": None,
+            "version_key": "v1",
+            "body": "source",
+            "media": [],
+            "kind": "message",
+            "sponsored": False,
+            "urls": [],
+            "conflicts": [],
+            "observation_key": "obs-v1",
+            "captured_at": "2026-07-29T00:00:00+00:00",
+            "engagement": {},
+            "uncertainty": [],
+        }
+        claim = generation_claim_payload(source_record, source_id)
+        connection.execute(
+            "INSERT INTO candidate_evaluations(run_id, source_post_version_id, evaluator_version, score) "
+            "VALUES (1, ?, 'policy', '1.000000')",
+            (source_id,),
+        )
+        evaluation_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
+        connection.execute(
+            "INSERT INTO candidates(evaluation_id, status, rank) VALUES (?, 'pending_review', 1)", (evaluation_id,)
+        )
+        candidate_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
+        connection.execute(
+            "INSERT INTO candidate_sources(candidate_id, source_post_version_id) VALUES (?, ?)",
+            (candidate_id, source_id),
+        )
+        connection.execute("INSERT INTO digests(run_id, digest_key, status) VALUES (1, 'review', 'selected')")
+        digest_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
+        connection.execute(
+            "INSERT INTO selections(digest_id, candidate_id, position) VALUES (?, ?, 1)", (digest_id, candidate_id)
+        )
+        selection_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
+        connection.execute(
+            "INSERT INTO generation_jobs(selection_id, job_kind, status, requested_page_count) VALUES (?, 'initial', 'succeeded', ?)",
+            (selection_id, pages),
+        )
+        job_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
+        content = {
+            "draft": True,
+            "source_reported": True,
+            "cover": {
+                "title": "Title",
+                "subtitle": "",
+                "factual_units": [
+                    {
+                        "text": "Source fact",
+                        "references": [{"claim_id": claim["claim_id"], "source_version_id": source_id}],
+                    }
+                ],
+            },
+            "bodies": [
+                {
+                    "subtitle": str(index),
+                    "body": "Body",
+                    "factual_units": [
+                        {
+                            "text": "Source fact",
+                            "references": [{"claim_id": claim["claim_id"], "source_version_id": source_id}],
+                        }
+                    ],
+                }
+                for index in range(2, pages + 1)
+            ],
+            "caption": {
+                "hook": "Caption",
+                "context": "Context",
+                "details": "Details",
+                "implications": "Implications",
+                "questions": "Questions",
+                "hashtags": ["#news"],
+            },
+            "claim_manifest": [claim],
+        }
+        connection.execute(
+            "INSERT INTO generations(generation_job_id, attempt, status, content_json) VALUES (?, 1, 'current', ?)",
+            (job_id, json.dumps(content)),
+        )
+        generation_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
+        connection.execute(
+            "INSERT INTO generation_sources(generation_job_id, generation_id, source_post_version_id) VALUES (?, ?, ?)",
+            (job_id, generation_id, source_id),
+        )
+    return candidate_id, generation_id, source_id
+
+
+def _service(storage: Storage) -> CandidateApprovalService:
+    return CandidateApprovalService(
+        storage, chat_id=1, authorized_user_ids={2}, now=FixtureClock(datetime(2026, 7, 29, tzinfo=UTC)).now
+    )
+
+
+def _button(
+    service: CandidateApprovalService, candidate_id: int, generation_id: int, source_id: int, action: str
+) -> str:
+    return next(
+        button.token
+        for button in service.review_buttons(candidate_id, generation_id, actor_id=2, source_version_ids=(source_id,))
+        if button.action.value == action
+    )
+
+
+def test_approval_commits_recoverable_outbox_before_files(tmp_path) -> None:
+    storage = Storage.open(":memory:")
+    candidate_id, generation_id, source_id = _review_state(storage)
+    service = _service(storage)
+    assert (
+        ScriptedApprovalAdapter(service)
+        .apply(ScriptedAction(_button(service, candidate_id, generation_id, source_id, "approve_handoff"), 1, 2))
+        .status
+        == "approved"
+    )
+    assert storage.fetch_one("SELECT status FROM candidates WHERE id=?", (candidate_id,))["status"] == "approved"
+    assert (
+        storage.fetch_one(
+            "SELECT COUNT(*) AS n FROM export_outbox WHERE generation_id=? AND status='pending'", (generation_id,)
+        )["n"]
+        == 2
+    )
+    assert not list(tmp_path.iterdir())
+
+
+def test_regenerate_supersedes_old_review_and_keeps_one_current_generation() -> None:
+    storage = Storage.open(":memory:")
+    candidate_id, generation_id, source_id = _review_state(storage)
+    service = _service(storage)
+    old_approval = _button(service, candidate_id, generation_id, source_id, "approve_handoff")
+    regenerate = _button(service, candidate_id, generation_id, source_id, "regenerate")
+    assert service.apply(regenerate, chat_id=1, user_id=2).status == "queued"
+    assert service.apply(old_approval, chat_id=1, user_id=2).status == "stale"
+    assert storage.fetch_one("SELECT status FROM generations WHERE id=?", (generation_id,))["status"] == "superseded"
+    assert storage.fetch_one("SELECT COUNT(*) AS n FROM generations WHERE status='current'")["n"] == 0
+
+
+def test_page_successor_persists_the_bounded_intent_across_retry() -> None:
+    storage = Storage.open(":memory:")
+    candidate_id, generation_id, source_id = _review_state(storage, pages=2)
+    service = _service(storage)
+    increment = _button(service, candidate_id, generation_id, source_id, "page_increment")
+    assert service.apply(increment, chat_id=1, user_id=2).status == "queued"
+    with storage.transaction() as connection:
+        connection.execute("UPDATE generation_jobs SET status='failed_recoverable' WHERE status='queued'")
+    pipeline = NewsPipeline(storage, object(), ".", FakeGenerationProvider(), FixtureClock())
+    generated = asyncio.run(pipeline.generate_selected(candidate_id, page_count=1))
+    assert generated.draft.page_count == 3
+    assert (
+        storage.fetch_one(
+            "SELECT requested_page_count FROM generation_jobs WHERE status='succeeded' ORDER BY id DESC LIMIT 1"
+        )["requested_page_count"]
+        == 3
+    )
+
+
+def test_terminal_edit_retains_approved_attempt_and_allows_one_new_attempt() -> None:
+    storage = Storage.open(":memory:")
+    candidate_id, generation_id, source_id = _review_state(storage)
+    with storage.transaction() as connection:
+        connection.execute("UPDATE candidates SET status='approved' WHERE id=?", (candidate_id,))
+        post_id = connection.execute(
+            "SELECT source_post_id FROM source_post_versions WHERE id=?", (source_id,)
+        ).fetchone()[0]
+        connection.execute(
+            "INSERT INTO source_post_versions(source_post_id, version_key, body) VALUES (?, 'v2', 'edited')", (post_id,)
+        )
+        replacement = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
+    pipeline = NewsPipeline(storage, object(), ".", lambda: None, FixtureClock())
+    pipeline._invalidate_revised_candidates(1, {("channel", "1"): replacement})
+    assert storage.fetch_one("SELECT status FROM candidates WHERE id=?", (candidate_id,))["status"] == "approved"
+    assert storage.fetch_one("SELECT status FROM generations WHERE id=?", (generation_id,))["status"] == "current"

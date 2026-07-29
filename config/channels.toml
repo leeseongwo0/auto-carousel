@@ -1,0 +1,122 @@
+# Audited source and candidate policy configuration.
+[[channels]]
+id = "testingcatalog"
+name = "Testing Catalog"
+handle = "testingcatalog"
+enabled = true
+priority = 60
+source_quality = 0.65
+classification = "community"
+official_domains = []
+original_domains = []
+
+[[channels]]
+id = "ai_masters_community"
+name = "AI Masters Community"
+handle = "ai_masters_community"
+enabled = true
+priority = 55
+source_quality = 0.60
+classification = "community"
+official_domains = []
+original_domains = []
+
+[[channels]]
+id = "aipost"
+name = "AI Post"
+handle = "aipost"
+enabled = true
+priority = 80
+source_quality = 0.85
+classification = "original_publisher"
+official_domains = []
+original_domains = ["aipost.kr"]
+
+[[channels]]
+id = "coinnesskr"
+name = "Coinness Korea"
+handle = "coinnesskr"
+enabled = true
+priority = 65
+source_quality = 0.70
+classification = "aggregator"
+official_domains = []
+original_domains = []
+
+[[channels]]
+id = "exilist_official"
+name = "Exilist Official"
+handle = "exilist_official"
+enabled = true
+priority = 90
+source_quality = 1.00
+classification = "official"
+official_domains = ["exilist.ai"]
+original_domains = []
+
+[[channels]]
+id = "dolbikong"
+name = "Dolbikong"
+handle = "dolbikong"
+enabled = true
+priority = 50
+source_quality = 0.55
+classification = "community"
+official_domains = []
+original_domains = []
+
+[policy]
+version = "candidate_policy_v1"
+locale = "ko-KR"
+initial_lookback_hours = 24
+max_candidate_age_hours = 72
+future_tolerance_hours = 2
+min_semantic_chars = 80
+min_material_sentence_chars = 40
+freshness_horizon_hours = 48
+novelty_window_days = 7
+min_topic_relevance = 0.20
+min_total_score = 0.55
+disclosure_markers = ["[광고]", "(광고)", "광고:", "유료광고", "협찬", "sponsored", "sponsored:", "advertisement", "ad:"]
+referral_markers = ["추천인", "레퍼럴", "referral", "affiliate", "promo code", "쿠폰"]
+
+[policy.weights]
+source_quality = 0.15
+freshness = 0.15
+engagement = 0.10
+topic_relevance = 0.25
+novelty = 0.15
+official_evidence = 0.15
+certainty = 0.05
+
+[policy.topic_positive_phrases]
+ai = 0.60
+"artificial intelligence" = 0.40
+"인공지능" = 0.60
+technology = 0.20
+crypto = 0.20
+
+[policy.topic_exclusion_phrases]
+
+[policy.engagement_weights]
+views = 0.60
+reactions = 0.25
+forwards = 0.15
+
+[policy.engagement_saturation]
+views = 100000
+reactions = 5000
+forwards = 1000
+
+[policy.certainty_markers]
+rumor = 0.30
+alleged = 0.30
+"루머" = 0.30
+"설" = 0.30
+anonymous = 0.20
+unattributed = 0.20
+"익명" = 0.20
+
+[policy.certainty_penalties]
+conflicts = 0.50
+missing_url = 0.20
