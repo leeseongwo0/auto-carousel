@@ -22,6 +22,13 @@ def status(storage: Storage) -> dict[str, int]:
         "provider_calls": _provider_calls(storage),
         "provider_attempts": _count(storage, "generation_provider_attempts"),
         "provider_calls_before_selection": _provider_calls_before_selection(storage),
+        "codex_paused": _count(
+            storage, "generation_provider_controls", "provider_name = 'codex_cli' AND paused_at IS NOT NULL"
+        ),
+        "codex_held": _count(storage, "generation_job_retry_state", "held_at IS NOT NULL"),
+        "codex_safe_code_events": _count(storage, "generation_provider_attempt_classifications"),
+        "codex_control_events": _count(storage, "generation_provider_control_events"),
+        "codex_retry_events": _count(storage, "generation_job_retry_events"),
     }
 
 
@@ -83,6 +90,7 @@ def _run_sheet_handoffs(storage: Storage, run_id: int) -> int:
     )
     assert row is not None
     return int(row["count"])
+
 
 def _provider_calls(storage: Storage, run_id: int | None = None) -> int:
     condition = "event_kind = 'provider_call'"

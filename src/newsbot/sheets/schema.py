@@ -26,12 +26,100 @@ _CATEGORY_VALUES = ("AI", "Blockchain")
 _UPLOAD_VALUES = ("O", "X")
 
 _CELLS: tuple[tuple[str | None, ...], ...] = (
-    (None, "기본 정보", None, None, None, None, None, None, "p2", None, None, None, None, None, None, None, None, None, None, None, None, None),
-    (None, None, None, None, None, "캡션", "p1", None, None, None, "p3", None, "p4", None, "p5", None, "p6", None, "p7", None, "p8", None),
-    (None, "일자", "페이지 수", "분류(AI/Blockchain)", "업로드여부", None, "제목", "부제", "소제목", "본문", "소제목", "본문", "소제목", "본문", "소제목", "본문", "소제목", "본문", "소제목", "본문", "소제목", "본문"),
+    (
+        None,
+        "기본 정보",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        "p2",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    ),
+    (
+        None,
+        None,
+        None,
+        None,
+        None,
+        "캡션",
+        "p1",
+        None,
+        None,
+        None,
+        "p3",
+        None,
+        "p4",
+        None,
+        "p5",
+        None,
+        "p6",
+        None,
+        "p7",
+        None,
+        "p8",
+        None,
+    ),
+    (
+        None,
+        "일자",
+        "페이지 수",
+        "분류(AI/Blockchain)",
+        "업로드여부",
+        None,
+        "제목",
+        "부제",
+        "소제목",
+        "본문",
+        "소제목",
+        "본문",
+        "소제목",
+        "본문",
+        "소제목",
+        "본문",
+        "소제목",
+        "본문",
+        "소제목",
+        "본문",
+        "소제목",
+        "본문",
+    ),
 )
-_MERGES = ((0, 2, 1, 5), (0, 2, 8, 10), (1, 3, 5, 6), (1, 2, 6, 8), (1, 2, 10, 12), (1, 2, 12, 14), (1, 2, 14, 16), (1, 2, 16, 18), (1, 2, 18, 20), (1, 2, 20, 22))
-_ORACLE = {"schema": WORKPLACE_SCHEMA, "title": WORKPLACE_TITLE, "sheet_id": 0, "cells": _CELLS, "merges": sorted(_MERGES), "notes_policy": "absent", "formulas_policy": "absent"}
+_MERGES = (
+    (0, 2, 1, 5),
+    (0, 2, 8, 10),
+    (1, 3, 5, 6),
+    (1, 2, 6, 8),
+    (1, 2, 10, 12),
+    (1, 2, 12, 14),
+    (1, 2, 14, 16),
+    (1, 2, 16, 18),
+    (1, 2, 18, 20),
+    (1, 2, 20, 22),
+)
+_ORACLE = {
+    "schema": WORKPLACE_SCHEMA,
+    "title": WORKPLACE_TITLE,
+    "sheet_id": 0,
+    "cells": _CELLS,
+    "merges": sorted(_MERGES),
+    "notes_policy": "absent",
+    "formulas_policy": "absent",
+}
 _ORACLE_BYTES = json.dumps(_ORACLE, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
 WORKPLACE_ORACLE_FINGERPRINT = hashlib.sha256(_ORACLE_BYTES).hexdigest()
 
@@ -48,7 +136,11 @@ def _require_string(value: object, field: str) -> str:
 
 def delivery_metadata_value(export_id: str, canonical_sha256: str) -> str:
     _require_string(export_id, "export_id")
-    if len(export_id) != 36 or not export_id.startswith("exp_") or any(char not in "0123456789abcdef" for char in export_id[4:]):
+    if (
+        len(export_id) != 36
+        or not export_id.startswith("exp_")
+        or any(char not in "0123456789abcdef" for char in export_id[4:])
+    ):
         raise ValueError("export_id must be exp_ followed by 32 lowercase hexadecimal characters")
     if len(canonical_sha256) != 64 or any(char not in "0123456789abcdef" for char in canonical_sha256):
         raise ValueError("canonical_sha256 must be lowercase SHA-256")
@@ -56,6 +148,7 @@ def delivery_metadata_value(export_id: str, canonical_sha256: str) -> str:
     if len(value.encode()) > MAX_METADATA_VALUE_BYTES or len(DELIVERY_METADATA_KEY.encode()) > MAX_METADATA_KEY_BYTES:
         raise ValueError("metadata value exceeds limit")
     return value
+
 
 def schema_metadata_value() -> str:
     value = f"{WORKPLACE_ORACLE_FINGERPRINT}{SCHEMA_METADATA_VALUE_SUFFIX}"
@@ -71,9 +164,27 @@ def build_bootstrap_request(
     _require_string(service_account_email, "service_account_email")
     if not service_account_email:
         raise ValueError("service_account_email is required")
-    category_range = {"sheetId": WORKPLACE_SHEET_ID, "startRowIndex": 3, "endRowIndex": MAX_VALUE_ROW, "startColumnIndex": 3, "endColumnIndex": 4}
-    upload_range = {"sheetId": WORKPLACE_SHEET_ID, "startRowIndex": 3, "endRowIndex": MAX_VALUE_ROW, "startColumnIndex": 4, "endColumnIndex": 5}
-    protected_range = {"sheetId": WORKPLACE_SHEET_ID, "startRowIndex": 3, "endRowIndex": MAX_VALUE_ROW, "startColumnIndex": 0, "endColumnIndex": 4}
+    category_range = {
+        "sheetId": WORKPLACE_SHEET_ID,
+        "startRowIndex": 3,
+        "endRowIndex": MAX_VALUE_ROW,
+        "startColumnIndex": 3,
+        "endColumnIndex": 4,
+    }
+    upload_range = {
+        "sheetId": WORKPLACE_SHEET_ID,
+        "startRowIndex": 3,
+        "endRowIndex": MAX_VALUE_ROW,
+        "startColumnIndex": 4,
+        "endColumnIndex": 5,
+    }
+    protected_range = {
+        "sheetId": WORKPLACE_SHEET_ID,
+        "startRowIndex": 3,
+        "endRowIndex": MAX_VALUE_ROW,
+        "startColumnIndex": 0,
+        "endColumnIndex": 4,
+    }
 
     def rule(options: tuple[str, ...]) -> dict[str, object]:
         return {
@@ -90,24 +201,44 @@ def build_bootstrap_request(
         )
     requests: list[dict[str, object]] = []
     if not metadata_present:
-        requests.append({"createDeveloperMetadata": {"developerMetadata": {
-            "metadataKey": SCHEMA_METADATA_KEY, "metadataValue": schema_metadata_value(),
-            "visibility": "DOCUMENT", "location": {"spreadsheet": True},
-        }}})
+        requests.append(
+            {
+                "createDeveloperMetadata": {
+                    "developerMetadata": {
+                        "metadataKey": SCHEMA_METADATA_KEY,
+                        "metadataValue": schema_metadata_value(),
+                        "visibility": "DOCUMENT",
+                        "location": {"spreadsheet": True},
+                    }
+                }
+            }
+        )
     if not validations_complete:
-        requests.extend((
-            {"setDataValidation": {"range": category_range, "rule": rule(_CATEGORY_VALUES)}},
-            {"setDataValidation": {"range": upload_range, "rule": rule(_UPLOAD_VALUES)}},
-        ))
+        requests.extend(
+            (
+                {"setDataValidation": {"range": category_range, "rule": rule(_CATEGORY_VALUES)}},
+                {"setDataValidation": {"range": upload_range, "rule": rule(_UPLOAD_VALUES)}},
+            )
+        )
     if not protection_present:
-        requests.append({"addProtectedRange": {"protectedRange": {
-            "range": protected_range, "description": PROTECTION_DESCRIPTION, "warningOnly": False,
-            "editors": {"users": [service_account_email], "groups": [], "domainUsersCanEdit": False},
-        }}})
+        requests.append(
+            {
+                "addProtectedRange": {
+                    "protectedRange": {
+                        "range": protected_range,
+                        "description": PROTECTION_DESCRIPTION,
+                        "warningOnly": False,
+                        "editors": {"users": [service_account_email], "groups": [], "domainUsersCanEdit": False},
+                    }
+                }
+            }
+        )
     return {"requests": requests}
 
 
-def project_handoff(*, approved_date: str, page_count: int, category: str, caption: str, pages: Sequence[tuple[str, str]]) -> tuple[str, ...]:
+def project_handoff(
+    *, approved_date: str, page_count: int, category: str, caption: str, pages: Sequence[tuple[str, str]]
+) -> tuple[str, ...]:
     """Return the literal 22-string A:V projection; unused page pairs are blank."""
     if not isinstance(approved_date, str):
         raise ValueError("approved_date must be YYYY-MM-DD")
@@ -135,11 +266,25 @@ def build_delivery_request(*, export_id: str, canonical_sha256: str, values: Seq
     marker = delivery_metadata_value(export_id, canonical_sha256)
     if len(values) != 22:
         raise ValueError("delivery projection must contain exactly 22 strings")
-    typed = [{"userEnteredValue": {"stringValue": _require_string(value, f"cell {index}")}} for index, value in enumerate(values)]
-    body: dict[str, object] = {"requests": [
-        {"createDeveloperMetadata": {"developerMetadata": {"metadataKey": DELIVERY_METADATA_KEY, "metadataValue": marker, "visibility": "DOCUMENT", "location": {"spreadsheet": True}}}},
-        {"appendCells": {"sheetId": WORKPLACE_SHEET_ID, "rows": [{"values": typed}], "fields": "userEnteredValue"}},
-    ]}
+    typed = [
+        {"userEnteredValue": {"stringValue": _require_string(value, f"cell {index}")}}
+        for index, value in enumerate(values)
+    ]
+    body: dict[str, object] = {
+        "requests": [
+            {
+                "createDeveloperMetadata": {
+                    "developerMetadata": {
+                        "metadataKey": DELIVERY_METADATA_KEY,
+                        "metadataValue": marker,
+                        "visibility": "DOCUMENT",
+                        "location": {"spreadsheet": True},
+                    }
+                }
+            },
+            {"appendCells": {"sheetId": WORKPLACE_SHEET_ID, "rows": [{"values": typed}], "fields": "userEnteredValue"}},
+        ]
+    }
     if len(json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode()) > MAX_REQUEST_BYTES:
         raise ValueError("request exceeds byte limit")
     return body
@@ -163,7 +308,11 @@ def validate_workplace(
         raise ValueError("missing sheets")
     target = _target_sheet(document)
     props = target.get("properties", {})
-    if props.get("title") != WORKPLACE_TITLE or props.get("gridProperties", {}).get("rowCount", 0) < 4 or props.get("gridProperties", {}).get("columnCount", 0) < 22:
+    if (
+        props.get("title") != WORKPLACE_TITLE
+        or props.get("gridProperties", {}).get("rowCount", 0) < 4
+        or props.get("gridProperties", {}).get("columnCount", 0) < 22
+    ):
         raise ValueError("workplace target drift")
     if sorted(_merge_tuple(item) for item in target.get("merges", [])) != sorted(_MERGES):
         raise ValueError("workplace merge drift")
@@ -194,7 +343,10 @@ def next_value_row(document: Mapping[str, Any]) -> int:
     sheets = document.get("sheets")
     if not isinstance(sheets, list):
         raise ValueError("missing sheets")
-    target = next((sheet for sheet in sheets if isinstance(sheet, Mapping) and sheet.get("properties", {}).get("sheetId") == 0), None)
+    target = next(
+        (sheet for sheet in sheets if isinstance(sheet, Mapping) and sheet.get("properties", {}).get("sheetId") == 0),
+        None,
+    )
     if not isinstance(target, Mapping):
         raise ValueError("workplace sheetId 0 missing")
     last = 0
@@ -228,7 +380,10 @@ def _sheet_rows(target: Mapping[str, Any]) -> list[object]:
     data = target.get("data", [])
     if not isinstance(data, list) or not data or not isinstance(data[0], Mapping):
         return []
-    if data[0].get("startRow", data[0].get("startRowIndex", 0)) != 0 or data[0].get("startColumn", data[0].get("startColumnIndex", 0)) != 0:
+    if (
+        data[0].get("startRow", data[0].get("startRowIndex", 0)) != 0
+        or data[0].get("startColumn", data[0].get("startColumnIndex", 0)) != 0
+    ):
         raise ValueError("oracle grid starts at unexpected offset")
     rows = data[0].get("rowData", [])
     return rows if isinstance(rows, list) else []
@@ -280,6 +435,7 @@ def _grid_validations(target: Mapping[str, Any]) -> dict[tuple[int, int], object
                     result[coordinate] = cell["dataValidation"]
     return result
 
+
 def _target_sheet(document: Mapping[str, Any]) -> Mapping[str, Any]:
     sheets = document.get("sheets")
     if not isinstance(sheets, list):
@@ -288,8 +444,7 @@ def _target_sheet(document: Mapping[str, Any]) -> Mapping[str, Any]:
         (
             sheet
             for sheet in sheets
-            if isinstance(sheet, Mapping)
-            and sheet.get("properties", {}).get("sheetId") == WORKPLACE_SHEET_ID
+            if isinstance(sheet, Mapping) and sheet.get("properties", {}).get("sheetId") == WORKPLACE_SHEET_ID
         ),
         None,
     )
@@ -308,7 +463,9 @@ def _validate_controls(
     metadata = document.get("developerMetadata", [])
     if not isinstance(metadata, list):
         raise ValueError("invalid developer metadata")
-    schema_entries = [item for item in metadata if isinstance(item, Mapping) and item.get("metadataKey") == SCHEMA_METADATA_KEY]
+    schema_entries = [
+        item for item in metadata if isinstance(item, Mapping) and item.get("metadataKey") == SCHEMA_METADATA_KEY
+    ]
     if schema_entries and (
         len(schema_entries) != 1
         or schema_entries[0].get("metadataKey") != SCHEMA_METADATA_KEY
@@ -325,10 +482,7 @@ def _validate_controls(
     }
     if not set(validations) <= set(expected_validations):
         raise ValueError("workplace validation range drift")
-    if any(
-        not _rule_is(rule, expected_validations[coordinate])
-        for coordinate, rule in validations.items()
-    ):
+    if any(not _rule_is(rule, expected_validations[coordinate]) for coordinate, rule in validations.items()):
         raise ValueError("workplace validation drift")
     validations_complete = set(validations) == set(expected_validations)
     metadata_present = bool(schema_entries)
@@ -361,11 +515,10 @@ def _validate_controls(
         or editors.get("domainUsersCanEdit", False) is not False
     ):
         raise ValueError("workplace protection drift")
-    if require_complete and not (
-        metadata_present and validations_complete and protection_present
-    ):
+    if require_complete and not (metadata_present and validations_complete and protection_present):
         raise ValueError("workplace controls incomplete")
     return metadata_present, validations_complete, protection_present
+
 
 def _document_location_is_spreadsheet(value: object) -> bool:
     return (
@@ -398,6 +551,11 @@ def _merge_tuple(value: object) -> tuple[int, int, int, int]:
     if not isinstance(value, Mapping):
         raise ValueError("invalid merge")
     try:
-        return (int(value["startRowIndex"]), int(value["endRowIndex"]), int(value["startColumnIndex"]), int(value["endColumnIndex"]))
+        return (
+            int(value["startRowIndex"]),
+            int(value["endRowIndex"]),
+            int(value["startColumnIndex"]),
+            int(value["endColumnIndex"]),
+        )
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("invalid merge") from exc

@@ -4,7 +4,7 @@
 
 로컬 우선 Python 3.12 모듈형 모놀리스는 SQLite를 유일한 내구성 권위로 사용한다. 고정 소스는 `testingcatalog`, `ai_masters_community`, `aipost`, `coinnesskr`, `exilist_official`, `dolbikong` 여섯 개다. 채널 품질·분류(`official`, `original_publisher`, `aggregator`, `community`)와 도메인은 `config/channels.toml`에 명시한다.
 
-fixture 수집, fixture `reconcile`, `rank`, scripted 승인은 credential-free다. `auth-telethon`만 interactive MTProto authorization을 수행하며, live collection은 Telethon/MTProto, 승인 알림은 Telegram Bot API, generation은 선택된 OpenAI-compatible API를 명시적으로 사용한다. Google Sheets 명령은 `sheets` extra와 service-account JSON을 명시적으로 요구한다. 선택하지 않은 capability는 해당 패키지를 import하거나 secret를 읽거나 네트워크를 열지 않는다.
+fixture 수집, fixture `reconcile`, `rank`, scripted 승인은 credential-free다. `auth-telethon`만 interactive MTProto authorization을 수행하며, live collection은 Telethon/MTProto, 승인 알림은 Telegram Bot API, generation은 명시적으로 선택한 `openai_compatible` 또는 ChatGPT device-auth `codex_cli`를 사용한다. `codex_cli`는 Newsbot API key/token 환경 변수를 요구하지 않으며 `newsbot-codex` 전용 device-auth 영역과 root-attested runner만 사용한다. fake/OpenAI-compatible fallback, token 추출·복사, OAuth gateway 대체는 없다. Google Sheets 명령은 `sheets` extra와 service-account JSON을 명시적으로 요구한다. 선택하지 않은 capability는 해당 패키지를 import하거나 secret를 읽거나 네트워크를 열지 않는다.
 
 ## 후보, 생성, 검토
 
@@ -14,6 +14,14 @@ fixture 수집, fixture `reconcile`, `rank`, scripted 승인은 credential-free�
 
 정확한 current draft만 별도 review에서 승인, 재생성, 페이지 `+/-`, 6/24/72시간 연기 또는 거절한다. review 최종 승인은 category·provenance·canonical 원고와 고정 target binding을 포함한 하나의 immutable Sheets handoff를 원자적으로 만든다. 승인 transaction은 원격 호출을 하지 않는다.
 `poll-approvals`는 due된 defer를 resume하여 원래 상태가 selection이면 candidate digest, review이면 정확한 current draft와 bound source-version callback을 다시 보낸다.
+## Codex generation, recovery, and containment
+
+production/manual/live/canary Codex generation은 `newsbot-generate-codex.service`의 one-job activation만 사용한다. unit은 exact frozen job ID를 current binding, due, hold, provider pause와 lease CAS로 다시 확인한다. `N>1`, `--max-jobs`, service loop, direct CLI/runner invocation은 금지한다. `codex_cli` failure는 `codex_auth_unavailable`, `codex_runner_config`, `codex_timeout`, `codex_input_limit`, `codex_output_limit`, `codex_busy`, `codex_nonzero`, `codex_supervisor`, `codex_unknown_exit`, `codex_outer_timeout`, `codex_invalid_draft`, `codex_runner_attestation` 중 하나의 stable safe code만 남긴다. raw stderr, prompt, device auth, secret은 durable record와 output에 없다.
+
+auth/config/supervisor/unknown-exit/outer-timeout/attestation failure는 Codex global pause다. busy, timeout, nonzero, input/output-limit, invalid draft만 Codex-local bounded retry 또는 hold가 될 수 있다. fake/OpenAI의 retry semantics는 바꾸지 않는다. pause/resume/hold/release 및 provider attempt classification은 immutable audit events이고 projection은 delete하지 않는다. system pause resume은 exact compatible reason과 expected control version을 요구하며, immutable resume operation에 FK-linked `provider_resumed` release event만 due-now로 한다. affected resume count의 oracle은 이 immutable release rows의 `COUNT(*)`이며 stored/mutable count는 권위가 아니다.
+
+durable containment authority는 항상 존재하는 `/var/lib/newsbot-containment/codex-state-v1`의 `dirty|clean` state file이다. `clean`은 attested durable clean/reset receipt reference가 있을 때만 유효하다. root pre-start가 state를 durable `dirty`로 만들지 못하면 Newsbot, SQLite, sudo runner, Codex는 시작하지 않는다. crash/reboot/residue/postcheck failure는 `dirty`를 유지하고 cgroup-empty proof와 immutable receipt를 남긴 정상 completion 또는 inspect/reset만 `clean`을 만들 수 있다. state/receipt absent, malformed, dirty 또는 cgroup residue는 다음 timer/manual/canary activation을 block한다.
+
 
 
 ## 카드, 캡션, 출처
@@ -42,7 +50,7 @@ SQLite binding mutex, random owner token과 monotonically increasing fence가 bo
 
 ## 범위 밖
 
-렌더링, 이미지/템플릿 제작, Figma 자동화, Instagram 로그인/API/예약/게시, 자동 승인, CI/CD, 배포, Docker/systemd, VPS 운영, push, release는 범위 밖이다.
+렌더링, 이미지/템플릿 제작, Figma 자동화, Instagram 로그인/API/예약/게시, 자동 승인, CI/CD, Docker, push는 범위 밖이다. Codex provider의 hardened VPS installation, one-job systemd activation, containment receipt/state, A/B release cutover와 forward-only audit rollback은 운영 요구사항에 포함된다.
 
 ## 결정론적 평가와 감사 oracle
 

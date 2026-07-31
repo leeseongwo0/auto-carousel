@@ -42,7 +42,6 @@ class GenerationResult:
     reused: bool
 
 
-
 class NewsPipeline:
     """Persist a deterministic candidate workflow; providers are called only after selection."""
 
@@ -369,6 +368,14 @@ class NewsPipeline:
                     source_ids,
                     True,
                 )
+            if (
+                connection.execute(
+                    "SELECT 1 FROM generation_job_provider_bindings WHERE generation_job_id=? AND provider_name='codex_cli'",
+                    (int(job["id"]),),
+                ).fetchone()
+                is not None
+            ):
+                raise ValueError("Codex-bound generation jobs require generate-codex-once")
             job_sources = tuple(
                 int(row["source_post_version_id"])
                 for row in connection.execute(
@@ -530,6 +537,386 @@ class NewsPipeline:
             )
         return GenerationResult(candidate_id, generation_id, draft, source_ids, False)
 
+    def select_codex_job_id(self) -> int | None:
+        """Bind and return the globally highest-priority admissible Codex job."""
+        now = _utc(self.clock.now()).isoformat()
+        with self.storage.transaction() as connection:
+            control = connection.execute(
+                "SELECT paused_at FROM generation_provider_controls WHERE provider_name='codex_cli'"
+            ).fetchone()
+            if control is None or control["paused_at"] is not None:
+                return None
+            selected = self._selected_codex_job_id(connection, now)
+            if selected is not None:
+                return selected
+            row = connection.execute(
+                "SELECT j.id FROM generation_jobs j "
+                "JOIN selections s ON s.id=j.selection_id "
+                "JOIN candidates c ON c.id=s.candidate_id "
+                "LEFT JOIN generation_job_provider_bindings b ON b.generation_job_id=j.id "
+                "WHERE b.generation_job_id IS NULL AND j.status='queued' "
+                "AND c.status IN ('selected_generation_pending','pending_review') "
+                "ORDER BY j.requested_at, j.id LIMIT 1"
+            ).fetchone()
+            if row is None:
+                return None
+            selected = int(row["id"])
+            connection.execute(
+                "INSERT INTO generation_job_provider_bindings(generation_job_id,provider_name) VALUES (?,'codex_cli')",
+                (selected,),
+            )
+            return selected
+
+    @staticmethod
+    def _selected_codex_job_id(connection: Any, now: str) -> int | None:
+        row = connection.execute(
+            "SELECT j.id FROM generation_jobs j "
+            "JOIN generation_job_provider_bindings b "
+            "ON b.generation_job_id=j.id AND b.provider_name='codex_cli' "
+            "JOIN selections s ON s.id=j.selection_id "
+            "JOIN candidates c ON c.id=s.candidate_id "
+            "LEFT JOIN generation_job_retry_state r ON r.generation_job_id=j.id "
+            "WHERE c.status IN ('selected_generation_pending','pending_review') "
+            "AND COALESCE(r.held_at,'')='' AND r.blocked_by_control_version IS NULL AND ("
+            "(j.status='running' AND j.lease_expires_at < ?) OR "
+            "(j.status='failed_recoverable' AND j.retry_at IS NOT NULL AND j.retry_at <= ?) OR "
+            "j.status='queued') "
+            "ORDER BY CASE WHEN j.status='running' AND j.lease_expires_at < ? THEN 0 "
+            "WHEN j.status='failed_recoverable' AND j.retry_at <= ? THEN 1 ELSE 2 END, "
+            "CASE WHEN j.status='running' THEN j.lease_expires_at "
+            "WHEN j.status='failed_recoverable' THEN j.retry_at ELSE j.requested_at END, "
+            "j.attempts, j.id LIMIT 1",
+            (now, now, now, now),
+        ).fetchone()
+        return None if row is None else int(row["id"])
+
+    async def generate_codex_job_exact(self, generation_job_id: int) -> GenerationResult | None:
+        """Generate exactly one pre-bound Codex job; never substitute another job."""
+        now = _utc(self.clock.now())
+        lease_token = token_hex(32)
+        with self.storage.transaction() as connection:
+            control = connection.execute(
+                "SELECT paused_at FROM generation_provider_controls WHERE provider_name='codex_cli'"
+            ).fetchone()
+            if control is None or control["paused_at"] is not None:
+                return None
+            job = connection.execute(
+                "SELECT j.id, j.selection_id, j.job_kind, j.requested_page_count, j.status, j.lease_expires_at, j.retry_at, s.candidate_id, ce.run_id "
+                "FROM generation_jobs j JOIN generation_job_provider_bindings b "
+                "ON b.generation_job_id=j.id AND b.provider_name='codex_cli' "
+                "JOIN selections s ON s.id=j.selection_id JOIN candidates c ON c.id=s.candidate_id "
+                "JOIN candidate_evaluations ce ON ce.id=c.evaluation_id "
+                "LEFT JOIN generation_job_retry_state r ON r.generation_job_id=j.id "
+                "WHERE j.id=? AND c.status IN ('selected_generation_pending','pending_review') "
+                "AND COALESCE(r.held_at,'')='' "
+                "AND r.blocked_by_control_version IS NULL",
+                (generation_job_id,),
+            ).fetchone()
+            if job is None:
+                return None
+            selected = self._selected_codex_job_id(connection, now.isoformat())
+            if selected != generation_job_id:
+                return None
+            source_ids = _candidate_source_ids(connection, int(job["candidate_id"]))
+            bound = tuple(
+                int(row["source_post_version_id"])
+                for row in connection.execute(
+                    "SELECT source_post_version_id FROM generation_sources "
+                    "WHERE generation_job_id=? AND generation_id IS NULL ORDER BY source_post_version_id",
+                    (generation_job_id,),
+                )
+            )
+            if not bound or bound != source_ids:
+                return None
+            due = (
+                (job["status"] == "running" and job["lease_expires_at"] < now.isoformat())
+                or (
+                    job["status"] == "failed_recoverable"
+                    and job["retry_at"] is not None
+                    and job["retry_at"] <= now.isoformat()
+                )
+                or job["status"] == "queued"
+            )
+            if not due:
+                return None
+            page_count = int(job["requested_page_count"])
+            if not 1 <= page_count <= 8:
+                return None
+            if job["status"] == "running":
+                connection.execute(
+                    "UPDATE generation_provider_attempts SET finished_at=?, terminal_outcome='abandoned', "
+                    "error_message='LeaseExpired: generation failed' WHERE generation_job_id=? AND terminal_outcome IS NULL",
+                    (now.isoformat(), generation_job_id),
+                )
+            lease_until = now + timedelta(minutes=5)
+            leased = connection.execute(
+                "UPDATE generation_jobs SET status='running', attempts=attempts+1, lease_token=?, "
+                "lease_expires_at=?, started_at=?, retry_at=NULL, error_message=NULL WHERE id=? "
+                "AND ((status='running' AND lease_expires_at < ?) OR "
+                "(status='failed_recoverable' AND retry_at <= ?) OR status='queued')",
+                (
+                    lease_token,
+                    lease_until.isoformat(),
+                    now.isoformat(),
+                    generation_job_id,
+                    now.isoformat(),
+                    now.isoformat(),
+                ),
+            )
+            if leased.rowcount != 1:
+                return None
+            attempt = int(
+                connection.execute("SELECT attempts FROM generation_jobs WHERE id=?", (generation_job_id,)).fetchone()[
+                    0
+                ]
+            )
+            connection.execute(
+                "INSERT INTO generation_provider_attempts(generation_job_id, attempt, started_at) VALUES (?, ?, ?)",
+                (generation_job_id, attempt, now.isoformat()),
+            )
+            provider_attempt_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
+            connection.execute(
+                "INSERT INTO pipeline_events(run_id, selection_id, generation_job_id, candidate_id, provider_attempt_id, event_kind, created_at) "
+                "VALUES (?, ?, ?, ?, ?, 'provider_call', ?)",
+                (
+                    int(job["run_id"]),
+                    int(job["selection_id"]),
+                    generation_job_id,
+                    int(job["candidate_id"]),
+                    provider_attempt_id,
+                    now.isoformat(),
+                ),
+            )
+        facts = self._facts(source_ids)
+        try:
+            from .ai.codex_cli import CodexCliProvider
+
+            draft = await CodexCliProvider().generate(
+                GenerationRequest(int(job["candidate_id"]), source_ids, page_count, facts)
+            )
+            validate_copy(
+                draft,
+                allowed_claim_sources={fact.id: fact.source_version_id for fact in facts},
+                expected_page_count=page_count,
+            )
+            payload = _draft_payload(draft)
+            payload["claim_manifest"] = [_fact_payload(fact) for fact in facts]
+        except Exception as exc:
+            await self._settle_codex_failure(generation_job_id, lease_token, provider_attempt_id, exc)
+            raise
+        with self.storage.transaction() as connection:
+            active = connection.execute(
+                "SELECT 1 FROM generation_jobs WHERE id=? AND status='running' AND lease_token=?",
+                (generation_job_id, lease_token),
+            ).fetchone()
+            if active is None:
+                return None
+            connection.execute(
+                "INSERT INTO generations(generation_job_id, attempt, status, content_json, created_at) VALUES (?, ?, 'current', ?, ?)",
+                (generation_job_id, attempt, json.dumps(payload, ensure_ascii=False, sort_keys=True), now.isoformat()),
+            )
+            generation_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
+            connection.executemany(
+                "INSERT INTO generation_sources(generation_job_id, generation_id, source_post_version_id) VALUES (?, ?, ?)",
+                ((generation_job_id, generation_id, source_id) for source_id in source_ids),
+            )
+            finished = _utc(self.clock.now()).isoformat()
+            connection.execute(
+                "UPDATE generation_provider_attempts SET finished_at=?, terminal_outcome='succeeded' WHERE id=? AND terminal_outcome IS NULL",
+                (finished, provider_attempt_id),
+            )
+            connection.execute(
+                "UPDATE generation_jobs SET status='succeeded', finished_at=?, lease_token=NULL, lease_expires_at=NULL WHERE id=? AND lease_token=?",
+                (finished, generation_job_id, lease_token),
+            )
+            retry = connection.execute(
+                "SELECT consecutive_failures, retry_version, held_at FROM generation_job_retry_state WHERE generation_job_id=?",
+                (generation_job_id,),
+            ).fetchone()
+            if retry is not None and (int(retry["consecutive_failures"]) or retry["held_at"] is not None):
+                connection.execute(
+                    "UPDATE generation_job_retry_state SET consecutive_failures=0, held_at=NULL, hold_reason_code=NULL, retry_version=retry_version+1, updated_at=? WHERE generation_job_id=?",
+                    (finished, generation_job_id),
+                )
+                connection.execute(
+                    "INSERT INTO generation_job_retry_events(generation_job_id, action, reason_code, actor_kind, resulting_held, resulting_consecutive_failures, previous_retry_version, resulting_retry_version) "
+                    "VALUES (?, 'release', 'recovery_succeeded', 'system', 0, 0, ?, ?)",
+                    (generation_job_id, int(retry["retry_version"]), int(retry["retry_version"]) + 1),
+                )
+            connection.execute(
+                "UPDATE candidates SET status='pending_review' WHERE id=? AND status='selected_generation_pending'",
+                (int(job["candidate_id"]),),
+            )
+        return GenerationResult(int(job["candidate_id"]), generation_id, draft, source_ids, False)
+
+    async def _settle_codex_failure(
+        self,
+        generation_job_id: int,
+        lease_token: str,
+        provider_attempt_id: int,
+        exc: Exception,
+    ) -> None:
+        safe_code = _codex_safe_code(exc)
+        pause_codes = frozenset(
+            {
+                "codex_auth_unavailable",
+                "codex_runner_config",
+                "codex_supervisor",
+                "codex_unknown_exit",
+                "codex_outer_timeout",
+                "codex_runner_attestation",
+            }
+        )
+        deterministic_codes = frozenset({"codex_input_limit", "codex_output_limit", "codex_invalid_draft"})
+        now = _utc(self.clock.now())
+        now_text = now.isoformat()
+        with self.storage.transaction() as connection:
+            finalized = connection.execute(
+                "UPDATE generation_provider_attempts SET finished_at=?, terminal_outcome='failed', "
+                "error_message=? WHERE id=? AND terminal_outcome IS NULL AND EXISTS ("
+                "SELECT 1 FROM generation_jobs WHERE id=? AND status='running' AND lease_token=?)",
+                (
+                    now_text,
+                    _codex_error_message(safe_code),
+                    provider_attempt_id,
+                    generation_job_id,
+                    lease_token,
+                ),
+            )
+            if finalized.rowcount != 1:
+                raise RuntimeError("Codex generation lease was lost during settlement")
+            connection.execute(
+                "INSERT INTO generation_provider_attempt_classifications("
+                "provider_attempt_id, provider_name, safe_code"
+                ") VALUES (?, 'codex_cli', ?)",
+                (provider_attempt_id, safe_code),
+            )
+            state = connection.execute(
+                "SELECT * FROM generation_job_retry_state WHERE generation_job_id=?",
+                (generation_job_id,),
+            ).fetchone()
+            if state is None:
+                connection.execute(
+                    "INSERT INTO generation_job_retry_state(generation_job_id) VALUES (?)",
+                    (generation_job_id,),
+                )
+                state = connection.execute(
+                    "SELECT * FROM generation_job_retry_state WHERE generation_job_id=?",
+                    (generation_job_id,),
+                ).fetchone()
+            assert state is not None
+            failures = int(state["consecutive_failures"]) + 1
+            previous_retry_version = int(state["retry_version"])
+            retry_version = previous_retry_version + 1
+            attempt_row = connection.execute(
+                "SELECT attempt FROM generation_provider_attempts WHERE id=?",
+                (provider_attempt_id,),
+            ).fetchone()
+            assert attempt_row is not None
+            jitter = (
+                int.from_bytes(
+                    sha256(f"{generation_job_id}:{int(attempt_row['attempt'])}".encode()).digest()[:2],
+                    "big",
+                )
+                % 31
+            )
+            if safe_code in pause_codes:
+                control = connection.execute(
+                    "SELECT control_version FROM generation_provider_controls "
+                    "WHERE provider_name='codex_cli' AND paused_at IS NULL"
+                ).fetchone()
+                if control is None:
+                    raise RuntimeError("Codex provider control changed during settlement")
+                control_version = int(control["control_version"]) + 1
+                updated = connection.execute(
+                    "UPDATE generation_provider_controls SET paused_at=?, pause_reason_code=?, "
+                    "resumed_at=NULL, control_version=?, updated_at=? "
+                    "WHERE provider_name='codex_cli' AND paused_at IS NULL",
+                    (now_text, safe_code, control_version, now_text),
+                )
+                if updated.rowcount != 1:
+                    raise RuntimeError("Codex provider control changed during settlement")
+                connection.execute(
+                    "UPDATE generation_job_retry_state SET consecutive_failures=?, "
+                    "blocked_by_control_version=?, blocked_by_safe_code=?, retry_version=?, updated_at=? "
+                    "WHERE generation_job_id=?",
+                    (
+                        failures,
+                        control_version,
+                        safe_code,
+                        retry_version,
+                        now_text,
+                        generation_job_id,
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO generation_provider_control_events("
+                    "operation_id, provider_name, action, reason_code, actor_kind, resulting_paused, "
+                    "previous_control_version, resulting_control_version, control_version"
+                    ") VALUES (?, 'codex_cli', 'pause', ?, 'system', 1, ?, ?, ?)",
+                    (
+                        "cxo_" + token_hex(16),
+                        safe_code,
+                        control_version - 1,
+                        control_version,
+                        control_version,
+                    ),
+                )
+                retry_at: str | None = None
+            else:
+                held = (
+                    (safe_code == "codex_busy" and failures >= 10)
+                    or (safe_code in {"codex_timeout", "codex_nonzero"} and failures >= 5)
+                    or (safe_code in deterministic_codes and failures >= 2)
+                )
+                if held:
+                    connection.execute(
+                        "UPDATE generation_job_retry_state SET consecutive_failures=?, held_at=?, "
+                        "hold_reason_code=?, retry_version=?, updated_at=? WHERE generation_job_id=?",
+                        (failures, now_text, safe_code, retry_version, now_text, generation_job_id),
+                    )
+                    connection.execute(
+                        "INSERT INTO generation_job_retry_events("
+                        "generation_job_id, action, reason_code, actor_kind, resulting_held, "
+                        "resulting_consecutive_failures, previous_retry_version, resulting_retry_version"
+                        ") VALUES (?, 'hold', ?, 'system', 1, ?, ?, ?)",
+                        (
+                            generation_job_id,
+                            safe_code,
+                            failures,
+                            previous_retry_version,
+                            retry_version,
+                        ),
+                    )
+                    retry_at = None
+                else:
+                    if safe_code == "codex_busy":
+                        delay = min(900, 30 * (2 ** (failures - 1))) + jitter
+                    elif safe_code in deterministic_codes:
+                        delay = 300 if failures == 1 else 1800
+                    else:
+                        delay = min(3600, 60 * (2 ** (failures - 1))) + jitter
+                    retry_at = (now + timedelta(seconds=delay)).isoformat()
+                    connection.execute(
+                        "UPDATE generation_job_retry_state SET consecutive_failures=?, "
+                        "retry_version=?, updated_at=? WHERE generation_job_id=?",
+                        (failures, retry_version, now_text, generation_job_id),
+                    )
+            settled = connection.execute(
+                "UPDATE generation_jobs SET status='failed_recoverable', finished_at=?, retry_at=?, "
+                "lease_token=NULL, lease_expires_at=NULL, error_message=? "
+                "WHERE id=? AND status='running' AND lease_token=?",
+                (
+                    now_text,
+                    retry_at,
+                    _codex_error_message(safe_code),
+                    generation_job_id,
+                    lease_token,
+                ),
+            )
+            if settled.rowcount != 1:
+                raise RuntimeError("Codex generation lease was lost during settlement")
+
     def _facts(self, source_ids: tuple[int, ...]) -> tuple[FactClaim, ...]:
         marks = ",".join("?" for _ in source_ids)
         rows = self.storage.fetch_all(
@@ -589,7 +976,6 @@ class NewsPipeline:
         if len(facts) != len(source_ids):
             raise ValueError("generation source binding is incomplete")
         return tuple(facts)
-
 
 
 def _candidate_source_ids(connection: Any, candidate_id: int) -> tuple[int, ...]:
@@ -673,6 +1059,44 @@ def _job_page_count(job_kind: str, fallback: int) -> int:
 def _redacted_error(exc: BaseException) -> str:
     """Persist a safe failure class, never provider response or credentials."""
     return f"{type(exc).__name__}: generation failed"
+
+
+def _codex_safe_code(exc: Exception) -> str:
+    names = {
+        "CodexAuthUnavailableError": "codex_auth_unavailable",
+        "CodexRunnerConfigError": "codex_runner_config",
+        "CodexTimeoutError": "codex_timeout",
+        "CodexInputLimitError": "codex_input_limit",
+        "CodexOutputLimitError": "codex_output_limit",
+        "CodexBusyError": "codex_busy",
+        "CodexNonzeroError": "codex_nonzero",
+        "CodexSupervisorError": "codex_supervisor",
+        "CodexUnknownExitError": "codex_unknown_exit",
+        "CodexOuterTimeoutError": "codex_outer_timeout",
+        "CodexInvalidDraftError": "codex_invalid_draft",
+        "CodexRunnerAttestationError": "codex_runner_attestation",
+    }
+    return names.get(type(exc).__name__, "codex_unknown_exit")
+
+
+_CODEX_ERROR_NAMES = {
+    "codex_auth_unavailable": "CodexAuthUnavailableError",
+    "codex_runner_config": "CodexRunnerConfigError",
+    "codex_timeout": "CodexTimeoutError",
+    "codex_input_limit": "CodexInputLimitError",
+    "codex_output_limit": "CodexOutputLimitError",
+    "codex_busy": "CodexBusyError",
+    "codex_nonzero": "CodexNonzeroError",
+    "codex_supervisor": "CodexSupervisorError",
+    "codex_unknown_exit": "CodexUnknownExitError",
+    "codex_outer_timeout": "CodexOuterTimeoutError",
+    "codex_invalid_draft": "CodexInvalidDraftError",
+    "codex_runner_attestation": "CodexRunnerAttestationError",
+}
+
+
+def _codex_error_message(safe_code: str) -> str:
+    return f"{_CODEX_ERROR_NAMES[safe_code]}: generation failed"
 
 
 def _safe_rationale(value: Any) -> Any:

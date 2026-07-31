@@ -20,6 +20,25 @@ uv sync --group dev --extra sheets  # 실계정 Sheets 명령 전용
 | `sheets-validate`, `sheets-bootstrap`, `sheets-deliver`, `sheets-reconcile` | `GOOGLE_SHEETS_SPREADSHEET_ID`, `GOOGLE_SERVICE_ACCOUNT_FILE` |
 
 `GOOGLE_SERVICE_ACCOUNT_FILE`은 소유자 전용 `0700` 디렉터리 안의 소유자 전용 `0600` 일반 JSON 파일이어야 한다. 심볼릭 링크, 그룹/기타 권한, 잘못된 service-account JSON은 Google import나 네트워크 전에 거부된다. 권한 범위는 Sheets 전용이다.
+## Codex provider 제어와 안전한 출력
+
+`codex_cli`는 credential-free application provider다. ChatGPT device login은 `newsbot-codex` 계정에서만 수행하며 Newsbot 환경 파일에는 Codex token/API key를 넣지 않는다. production 호출은 `sudo systemctl start newsbot-generate-codex.service` 하나뿐이다. `generate-pending`, Codex binary, runner를 직접 실행하거나 multi-job 옵션을 주지 않는다.
+
+```bash
+newsbot codex-provider-pause --db /var/lib/newsbot/newsbot.db \
+  --actor-id 42 --expected-control-version 1 --reason-code operator_security_hold
+newsbot codex-provider-resume --db /var/lib/newsbot/newsbot.db \
+  --actor-id 42 --expected-control-version 2 --reason-code security_reviewed
+newsbot codex-job-hold --db /var/lib/newsbot/newsbot.db \
+  --generation-job-id 17 --actor-id 42 --reason-code operator_review
+newsbot codex-job-release --db /var/lib/newsbot/newsbot.db \
+  --generation-job-id 17 --actor-id 42 --reason-code operator_reviewed
+```
+
+resume reason은 pause reason과 호환되어야 한다: `codex_auth_unavailable→auth_restored`, config/supervisor/unknown-exit/outer-timeout→`config_repaired`, attestation→`attestation_passed`, `operator_security_hold→security_reviewed`, `maintenance→maintenance_complete`다. pause/resume/hold/release는 immutable audit event만 append한다. resume stdout은 job ID, safe code, path, prompt, secret 없이 `changed`, `event_id`, `operation_id`, `affected_job_count`, `provider`, `resulting_control_version`, `status`만 낸다. replay는 같은 immutable operation/count/version을 `changed:false`로 반환한다.
+
+`affected_job_count`는 mutable/stored counter가 아니다. 그 resume `operation_id`를 FK로 참조하는 immutable `provider_resumed` release rows의 `COUNT(*)`만 operator가 확인하는 값이다. FK, unique job link, control/retry-version 또는 count 불일치는 fail closed하며 DB를 편집해 되돌리지 않는다.
+
 
 ## Fixture와 승인
 
@@ -64,13 +83,14 @@ Bootstrap과 delivery는 `workplace` binding 하나의 SQLite mutex/fence를 공
 
 `sheet_operation_leases`, events, probes와 terminal operation은 삭제하지 않는다. 복구는 probe 또는 명시적 운영자 판단만 사용한다.
 
-## Cutover와 rollback
+## Codex VPS A/B cutover와 forward-only rollback
 
-1. 구 materializer/poller를 중지하고 SQLite를 백업한다.
-2. 새 binary로 migration 003을 적용하고 `PRAGMA foreign_key_check` 및 legacy counter를 확인한다.
-3. `sheets-validate`, `sheets-bootstrap`, disposable spreadsheet append-placement canary를 통과시킨다.
-4. 새 승인/전달 worker만 활성화한다.
+1. production timer를 중지하고 `newsbot-generate-codex.service`가 inactive이며 cgroup residue가 없음을 증명한 뒤 SQLite backup을 만든다. `newsbot`과 login-shell 없는 `newsbot-codex`를 분리하고 `/var/lib/newsbot`, `/var/lib/newsbot-codex/.codex`, `/var/empty/newsbot-{provider,codex}`를 owner/mode대로 만든다.
+2. 새 release를 A/B slot에 pin한다. application/lockfile, Codex binary/model, runner, schema, `/etc/codex/requirements.toml`, sudoers, units/timer와 dependency version/checksum/owner/mode를 release manifest로 attest한다. root-owned regular non-symlink artifact 또는 effective permission profile 증거가 틀리거나 불명확/확장되면 중단한다.
+3. `newsbot-codex`로 pinned Codex의 `login --device-auth`를 수행하고 auth를 출력·복사하지 않는다. `login status`와 owner-only `CODEX_HOME`만 확인한다. exact sudoers no-argument runner 하나 외의 sudo, wildcard, inherited environment는 허용하지 않는다.
+4. 새 DB에 schema migration을 적용하고 installed schema/manifest를 대조한다. `PRAGMA foreign_key_check`와 migration version 불일치, secret/sentinel log leak은 BLOCK이다. containment genesis receipt를 durable하게 남기고 `/var/lib/newsbot-containment/codex-state-v1`을 receipt를 참조하는 `clean`으로 초기화한다. state/receipt 부재 또는 `dirty`는 activation 금지다.
+5. `systemctl daemon-reload` 후 provider-free Telegram/Sheets canary(기존 `sheets-validate`, `sheets-bootstrap` 절 포함)를 실행한다. 그 다음 effective profile과 `/proc`/FD/socket/descendant/web/MCP/plugin/remote-control deny canary, runner attestation, cgroup-empty canary를 통과시킨다.
+6. production timer를 멈춘 상태로 byte-identical canary unit 한 번, 이어 live `newsbot-generate-codex.service` 한 번만 실행한다. 각각 clean receipt와 empty cgroup을 확인한 뒤에만 `newsbot-generate-codex.timer`를 enable한다.
+7. rollback은 timer와 runner activation을 먼저 끄고 previous verified A/B pin으로만 되돌린다. attempts, generations, pause/resume/hold/release events, Sheets audit, receipt 또는 DB rows를 delete/update/restore하지 않는다. migration은 forward-only이며 교정 release와 새 immutable audit로 진행한다.
 
-Rollback은 원격 행·metadata·controls 또는 새 SQLite audit를 삭제하지 않는다. 효과를 중지하고 새 binary/DB를 고쳐 앞으로 진행한다. 구 binary/DB 복원이나 legacy outbox backfill은 금지한다.
-
-Figma 편집과 Instagram 게시는 수동이다. commit, push, 배포, VPS 스케줄링은 이 도구가 자동 수행하지 않는다.
+production rollout은 unproven effective permission profile, cgroup residue, bad/missing state 또는 receipt, migration mismatch, secret/sentinel leak, unknown/widened policy 중 하나라도 있으면 BLOCK이다. 기존 Sheets 행·metadata·controls와 Telegram/Sheets 운영 절차는 rollback으로 삭제·복원하지 않는다.

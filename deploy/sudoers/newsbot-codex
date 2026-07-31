@@ -1,0 +1,6 @@
+Defaults:newsbot env_reset
+Defaults:newsbot secure_path=/usr/bin:/bin
+Defaults:newsbot !set_home
+Defaults!/usr/local/libexec/newsbot-codex-runner-v1 set_home
+Cmnd_Alias NEWSBOT_CODEX_RUNNER = /usr/local/libexec/newsbot-codex-runner-v1
+newsbot ALL=(newsbot-codex) NOPASSWD: NEWSBOT_CODEX_RUNNER

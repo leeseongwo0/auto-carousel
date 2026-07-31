@@ -9,6 +9,7 @@ from typing import Literal
 
 Category = Literal["AI", "Blockchain"]
 
+
 class CopyValidationError(ValueError):
     """Raised when generated copy cannot enter human review."""
 

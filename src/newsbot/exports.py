@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, TypeGuard
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
 
+
 def canonical_json_bytes(value: Any) -> bytes:
     """Encode JSON once, with a stable representation suitable for hashing."""
     return (
@@ -398,7 +399,6 @@ def _content_addressed_units(
         }
         for unit in units
     ]
-
 
 
 def _json_default(value: object) -> object:

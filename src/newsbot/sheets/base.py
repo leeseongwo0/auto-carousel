@@ -68,6 +68,7 @@ class DispatchCredentialAttestation:
 @dataclass(frozen=True, slots=True)
 class PreparedSheetMutation:
     """A fully validated immutable request, ready for the post-marker send."""
+
     body: Mapping[str, object]
     request_sha256: str
     metadata: MetadataState = MetadataState.ABSENT
@@ -88,7 +89,6 @@ class SheetsAdapter(Protocol):
         self, *, export_id: str, canonical_sha256: str, values: Sequence[str]
     ) -> PreparedSheetMutation: ...
     def dispatch_prepared(self, prepared: PreparedSheetMutation) -> SheetDelivery: ...
-
 
 
 class SheetsService(Protocol):

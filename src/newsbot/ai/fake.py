@@ -95,6 +95,7 @@ def fixture_category(draft: CopyDraft) -> Category:
 def _is_word_character(value: str) -> bool:
     return value == "_" or value.isalnum()
 
+
 class FakeGenerationProvider:
     """Produce stable Korean copy without network, clocks, or randomness."""
 

@@ -1,0 +1,11 @@
+[Unit]
+Description=Schedule one-job Newsbot Codex generation
+
+[Timer]
+OnBootSec=5min
+OnUnitInactiveSec=5min
+Unit=newsbot-generate-codex.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

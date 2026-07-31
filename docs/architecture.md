@@ -37,3 +37,14 @@ Generation request의 fact packet은 stable claim/source/material/observation id
 `workplace` delivery worker는 고정 binding의 bootstrap과 delivery를 하나의 SQLite mutex로 직렬화한다. A1:V3 oracle과 controls를 검증한 뒤, document-scoped deterministic metadata 생성과 한 개의 typed `AppendCellsRequest`를 한 `spreadsheets.batchUpdate`에 넣는다. A는 빈 문자열이고 E는 `X`다. 정확한 metadata는 zero-write idempotency 증거이며 duplicate/conflict는 차단한다.
 
 원격 mutation 전에 lease token/fence와 request SHA를 사용해 `possibly_sent`를 커밋한다. 그 뒤에는 exact metadata 또는 신뢰 가능한 원자적 rejection만 상태를 확정한다. timeout, 5xx, redirect, malformed response, process death, 음성/unavailable probe는 영구 ambiguity이며 자동 재전송하지 않는다. Bootstrap과 delivery operation의 lease/event/probe/terminal history는 삭제하지 않는다.
+## Codex CLI 권한 경계와 실행
+
+`codex_cli`는 명시 선택한 generation provider이며 ChatGPT device auth를 사용한다. `newsbot`은 Codex token/API key를 가지지 않고 root-owned no-argument runner만 `newsbot-codex` UID로 실행한다. Codex auth는 `/var/lib/newsbot-codex/.codex`의 owner-only 영역에만 둔다. runner, pinned Codex binary, output schema, permission requirements, sudoers와 release manifest는 root-owned regular non-symlink artifact여야 한다. Telegram evidence와 model output은 capped canonical stdin data일 뿐 argv, env, path, config 또는 로그가 될 수 없다. fake/OpenAI-compatible provider의 동작은 바꾸지 않으며 이들로 fallback하지 않는다.
+
+한 `newsbot-generate-codex.service` activation은 frozen `generation_job_id` 하나만 common SQLite admission CAS로 처리한다. `N>1`, `--max-jobs`, service loop와 direct provider invocation은 없다. target-UID runner가 child process group의 deadline, TERM→KILL→reap를 소유하고 systemd cgroup이 최종 containment를 소유한다. 다음 activation은 recursive cgroup-empty proof 뒤에만 가능하다.
+
+## Durable containment와 Codex retry authority
+
+containment authority는 항상 존재하는 `/var/lib/newsbot-containment/codex-state-v1` durable state file의 `dirty|clean` 값이다. `clean`은 attested durable clean/reset receipt를 참조할 때만 유효하다. activation 전 root pre-helper는 state를 `dirty`로 write-ahead 생성·fsync하고, 실패하면 Newsbot/SQLite/runner/Codex admission은 0건이다. crash, reboot, residue, postcheck/receipt/unlink/fsync failure는 `dirty`를 보존한다. 정상 종료도 cgroup-empty proof와 immutable clean-completion receipt를 durable하게 남긴 뒤에만 `clean`으로 전환한다. state 또는 receipt의 부재는 blocked이며 inspect/reset 이외의 timer/manual/canary activation을 허용하지 않는다.
+
+Codex만 `generation_provider_attempt_classifications`, provider pause projection, job retry projection과 immutable control/retry events를 사용한다. `codex_auth_unavailable`, runner config/supervisor/unknown-exit/outer-timeout/attestation은 global pause이고 explicit compatible operator resume 전에는 retry하지 않는다. busy·timeout·nonzero·input/output-limit·invalid-draft는 bounded retry 또는 hold다. hold/release와 pause/resume은 append-only audit event를 남긴다. resume의 `affected_job_count`는 저장된 mutable counter가 아니라 해당 immutable resume `operation_id`에 FK로 연결된 `provider_resumed` release rows의 `COUNT(*)`만으로 재현한다; cardinality/version/link mismatch는 transaction을 abort한다.

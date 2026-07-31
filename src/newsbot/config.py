@@ -29,7 +29,9 @@ class Capability(StrEnum):
     NOTIFY_CANDIDATES = "notify-candidates"
     APPROVE_POLL = "approve-poll"
     GENERATE_OPENAI = "generate-openai"
+    GENERATE_CODEX = "generate-codex"
     LIVE_SHEETS = "live-sheets"
+
 
 _CHANNEL_KEYS = frozenset(
     {
@@ -187,6 +189,7 @@ class AppConfig:
     google_service_account_file: Path | None
     google_sheets_spreadsheet_id: str | None
     config_path: Path
+
     @property
     def enabled_channels(self) -> tuple[ChannelConfig, ...]:
         return tuple(channel for channel in self.channels if channel.enabled)
@@ -476,14 +479,8 @@ def load_config(
         or env.get("NEWSBOT_DATABASE")
         or "data/newsbot.sqlite"
     )
-    service_account_file = (
-        overrides.get("google_service_account_file")
-        or env.get("GOOGLE_SERVICE_ACCOUNT_FILE")
-    )
-    spreadsheet_id = (
-        overrides.get("google_sheets_spreadsheet_id")
-        or env.get("GOOGLE_SHEETS_SPREADSHEET_ID")
-    )
+    service_account_file = overrides.get("google_service_account_file") or env.get("GOOGLE_SERVICE_ACCOUNT_FILE")
+    spreadsheet_id = overrides.get("google_sheets_spreadsheet_id") or env.get("GOOGLE_SHEETS_SPREADSHEET_ID")
     if spreadsheet_id is not None:
         spreadsheet_id = str(spreadsheet_id).strip() or None
     return AppConfig(

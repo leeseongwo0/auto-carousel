@@ -1,0 +1,26 @@
+[Unit]
+Description=Newsbot one-job Codex generation
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=newsbot
+Group=newsbot
+WorkingDirectory=/var/empty/newsbot-provider
+UMask=0077
+ExecStartPre=+/usr/local/sbin/newsbot-codex-containment-v1 start
+ExecStart=/usr/local/bin/newsbot generate-codex-once --config /etc/newsbot/config.toml --db /var/lib/newsbot/newsbot.db
+ExecStopPost=+/usr/local/sbin/newsbot-codex-containment-v1 stop
+TimeoutStartSec=270
+TimeoutStopSec=15
+KillMode=control-group
+SendSIGKILL=yes
+TasksMax=64
+MemoryMax=2G
+MemorySwapMax=0
+CPUQuota=200%
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

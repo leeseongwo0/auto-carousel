@@ -6,10 +6,12 @@ import argparse
 import asyncio
 import json
 import os
+import stat
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
+from secrets import token_hex
 from typing import Any, Literal, cast
 from zoneinfo import ZoneInfo
 
@@ -604,6 +606,328 @@ def _approval_service(storage: Storage) -> CandidateApprovalService:
         now=clock.now,
         sheet_target_binding_id=target_binding_id,
     )
+
+
+def _attest_codex_activation() -> str:
+    credential = Path("/run/newsbot-codex-activation-v1")
+    manifest = Path("/usr/local/lib/newsbot-codex-manifest-v1.json")
+    try:
+        credential_status = credential.lstat()
+        manifest_status = manifest.lstat()
+        raw = credential.read_bytes()
+        value = json.loads(raw)
+        cgroup = Path("/proc/self/cgroup").read_text(encoding="ascii")
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ConfigError("Codex service attestation unavailable") from exc
+    if (
+        not stat.S_ISREG(credential_status.st_mode)
+        or credential_status.st_uid != 0
+        or credential_status.st_nlink != 1
+        or stat.S_IMODE(credential_status.st_mode) != 0o440
+        or not stat.S_ISREG(manifest_status.st_mode)
+        or manifest_status.st_uid != 0
+        or manifest_status.st_nlink != 1
+        or manifest_status.st_mode & 0o022
+        or not isinstance(value, dict)
+        or set(value) != {"activation", "manifest_sha256", "unit", "version"}
+        or value["version"] != 1
+        or value["unit"] not in {"newsbot-generate-codex.service", "newsbot-generate-codex-canary.service"}
+        or not isinstance(value["activation"], str)
+        or len(value["activation"]) != 32
+        or any(character not in "0123456789abcdef" for character in value["activation"])
+        or value["manifest_sha256"] != sha256(manifest.read_bytes()).hexdigest()
+        or f"/{value['unit']}" not in cgroup
+    ):
+        raise ConfigError("Codex service attestation failed")
+    return str(value["unit"])
+
+
+def generate_codex_once(args: argparse.Namespace) -> int:
+    """Systemd-only exact Codex activation; no user-controlled provider settings."""
+    unit = _attest_codex_activation()
+    expected_db = {
+        "newsbot-generate-codex.service": Path("/var/lib/newsbot/newsbot.db"),
+        "newsbot-generate-codex-canary.service": Path("/var/lib/newsbot-canary/newsbot.db"),
+    }[unit]
+    if args.config != Path("/etc/newsbot/config.toml") or _database(args) != expected_db:
+        raise ConfigError("Codex service paths are fixed")
+    validate_capabilities(Capability.GENERATE_CODEX)
+    config = _config(args)
+    with Storage.open(config.database_path) as storage:
+        pipeline = NewsPipeline(storage, config, _fixture_provider_factory, SystemClock())
+        job_id = pipeline.select_codex_job_id()
+        if job_id is None:
+            _print({"status": "no_job"})
+            return 0
+        result = asyncio.run(pipeline.generate_codex_job_exact(job_id))
+    _print({"status": "no_op" if result is None else "pending_review"})
+    return 0
+
+
+def _positive_actor(actor_id: int) -> int:
+    if actor_id <= 0:
+        raise ValueError("actor-id must be positive")
+    return actor_id
+
+
+def _control_operation(args: argparse.Namespace, action: str) -> int:
+    actor_id = _positive_actor(args.actor_id)
+    now = datetime.now(UTC).isoformat()
+    payload: dict[str, object]
+    with Storage.open(_database(args)) as storage, storage.transaction() as connection:
+        control = connection.execute(
+            "SELECT paused_at, pause_reason_code, control_version "
+            "FROM generation_provider_controls WHERE provider_name='codex_cli'"
+        ).fetchone()
+        if control is None:
+            raise ValueError("control conflict")
+        latest = connection.execute(
+            "SELECT id, operation_id, action, reason_code, actor_id, previous_control_version, "
+            "resulting_control_version, resulting_paused "
+            "FROM generation_provider_control_events WHERE provider_name='codex_cli' "
+            "ORDER BY resulting_control_version DESC LIMIT 1"
+        ).fetchone()
+        is_replay = (
+            latest is not None
+            and str(latest["action"]) == action
+            and latest["actor_id"] == actor_id
+            and str(latest["reason_code"]) == args.reason_code
+            and int(latest["previous_control_version"]) == args.expected_control_version
+            and (
+                (action == "pause" and control["paused_at"] is not None)
+                or (action == "resume" and control["paused_at"] is None)
+            )
+            and int(latest["resulting_control_version"]) == int(control["control_version"])
+        )
+        if is_replay:
+            operation_id = str(latest["operation_id"])
+            count = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM generation_job_retry_events "
+                    "WHERE action='release' AND reason_code='provider_resumed' AND operation_id=?",
+                    (operation_id,),
+                ).fetchone()[0]
+            )
+            payload = {
+                "affected_job_count": count,
+                "changed": False,
+                "event_id": int(latest["id"]),
+                "operation_id": operation_id,
+                "provider": "codex_cli",
+                "resulting_control_version": int(latest["resulting_control_version"]),
+                "status": "paused" if action == "pause" else "active",
+            }
+        else:
+            if int(control["control_version"]) != args.expected_control_version:
+                raise ValueError("control conflict")
+            operation_id = "cxo_" + token_hex(16)
+            if action == "pause":
+                if control["paused_at"] is not None:
+                    raise ValueError("control conflict")
+                version = int(control["control_version"]) + 1
+                connection.execute(
+                    "UPDATE generation_provider_controls SET paused_at=?, pause_reason_code=?, resumed_at=NULL, "
+                    "control_version=?, updated_at=? WHERE provider_name='codex_cli'",
+                    (now, args.reason_code, version, now),
+                )
+                cursor = connection.execute(
+                    "INSERT INTO generation_provider_control_events("
+                    "operation_id, provider_name, action, reason_code, actor_kind, actor_id, resulting_paused, "
+                    "previous_control_version, resulting_control_version, control_version"
+                    ") VALUES (?, 'codex_cli', 'pause', ?, 'operator', ?, 1, ?, ?, ?)",
+                    (operation_id, args.reason_code, actor_id, version - 1, version, version),
+                )
+                count = 0
+                status_value = "paused"
+            else:
+                compatibility = {
+                    "codex_auth_unavailable": "auth_restored",
+                    "codex_runner_config": "config_repaired",
+                    "codex_supervisor": "config_repaired",
+                    "codex_unknown_exit": "config_repaired",
+                    "codex_outer_timeout": "config_repaired",
+                    "codex_runner_attestation": "attestation_passed",
+                    "operator_security_hold": "security_reviewed",
+                    "maintenance": "maintenance_complete",
+                }
+                pause_reason = str(control["pause_reason_code"])
+                if control["paused_at"] is None or compatibility.get(pause_reason) != args.reason_code:
+                    raise ValueError("control conflict")
+                version = int(control["control_version"]) + 1
+                connection.execute(
+                    "UPDATE generation_provider_controls SET paused_at=NULL, pause_reason_code=NULL, resumed_at=?, "
+                    "control_version=?, updated_at=? WHERE provider_name='codex_cli'",
+                    (now, version, now),
+                )
+                cursor = connection.execute(
+                    "INSERT INTO generation_provider_control_events("
+                    "operation_id, provider_name, action, reason_code, actor_kind, actor_id, resulting_paused, "
+                    "previous_control_version, resulting_control_version, control_version"
+                    ") VALUES (?, 'codex_cli', 'resume', ?, 'operator', ?, 0, ?, ?, ?)",
+                    (operation_id, args.reason_code, actor_id, version - 1, version, version),
+                )
+                rows = connection.execute(
+                    "SELECT j.id, r.consecutive_failures, r.retry_version FROM generation_jobs j "
+                    "JOIN generation_job_provider_bindings b "
+                    "ON b.generation_job_id=j.id AND b.provider_name='codex_cli' "
+                    "JOIN generation_job_retry_state r ON r.generation_job_id=j.id "
+                    "WHERE j.status='failed_recoverable' AND j.retry_at IS NULL "
+                    "AND r.blocked_by_control_version=? AND r.blocked_by_safe_code=? "
+                    "ORDER BY j.id",
+                    (version - 1, pause_reason),
+                ).fetchall()
+                for row in rows:
+                    connection.execute(
+                        "UPDATE generation_job_retry_state SET blocked_by_control_version=NULL, "
+                        "blocked_by_safe_code=NULL, retry_version=retry_version+1, updated_at=? "
+                        "WHERE generation_job_id=?",
+                        (now, int(row["id"])),
+                    )
+                    connection.execute("UPDATE generation_jobs SET retry_at=? WHERE id=?", (now, int(row["id"])))
+                    connection.execute(
+                        "INSERT INTO generation_job_retry_events("
+                        "generation_job_id, operation_id, action, reason_code, actor_kind, actor_id, "
+                        "resulting_held, resulting_consecutive_failures, previous_retry_version, "
+                        "resulting_retry_version, control_version"
+                        ") VALUES (?, ?, 'release', 'provider_resumed', 'operator', ?, 0, ?, ?, ?, ?)",
+                        (
+                            int(row["id"]),
+                            operation_id,
+                            actor_id,
+                            int(row["consecutive_failures"]),
+                            int(row["retry_version"]),
+                            int(row["retry_version"]) + 1,
+                            version,
+                        ),
+                    )
+                count = int(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM generation_job_retry_events "
+                        "WHERE action='release' AND reason_code='provider_resumed' AND operation_id=?",
+                        (operation_id,),
+                    ).fetchone()[0]
+                )
+                status_value = "active"
+            event_id = cursor.lastrowid
+            assert event_id is not None
+            payload = {
+                "affected_job_count": count,
+                "changed": True,
+                "event_id": int(event_id),
+                "operation_id": operation_id,
+                "provider": "codex_cli",
+                "resulting_control_version": version,
+                "status": status_value,
+            }
+    _print(payload)
+    return 0
+
+
+def codex_provider_pause(args: argparse.Namespace) -> int:
+    return _control_operation(args, "pause")
+
+
+def codex_provider_resume(args: argparse.Namespace) -> int:
+    return _control_operation(args, "resume")
+
+
+def _retry_mutation(args: argparse.Namespace, action: str) -> int:
+    actor_id = _positive_actor(args.actor_id)
+    now = datetime.now(UTC).isoformat()
+    payload: dict[str, object]
+    with Storage.open(_database(args)) as storage, storage.transaction() as connection:
+        row = connection.execute(
+            "SELECT r.consecutive_failures, r.retry_version, r.held_at, j.status "
+            "FROM generation_job_retry_state r "
+            "JOIN generation_jobs j ON j.id=r.generation_job_id "
+            "JOIN generation_job_provider_bindings b "
+            "ON b.generation_job_id=j.id AND b.provider_name='codex_cli' "
+            "WHERE r.generation_job_id=? AND j.status IN ('queued','failed_recoverable','running')",
+            (args.generation_job_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("retry conflict")
+        already_applied = (action == "hold" and row["held_at"] is not None) or (
+            action == "release" and row["held_at"] is None
+        )
+        if already_applied:
+            latest = connection.execute(
+                "SELECT id, action, reason_code, actor_id FROM generation_job_retry_events "
+                "WHERE generation_job_id=? ORDER BY resulting_retry_version DESC LIMIT 1",
+                (args.generation_job_id,),
+            ).fetchone()
+            if (
+                latest is None
+                or latest["action"] != action
+                or latest["reason_code"] != args.reason_code
+                or latest["actor_id"] != actor_id
+            ):
+                raise ValueError("retry conflict")
+            payload = {
+                "changed": False,
+                "event_id": int(latest["id"]),
+                "generation_job_id": args.generation_job_id,
+                "status": "held" if action == "hold" else "released",
+            }
+        else:
+            previous_version = int(row["retry_version"])
+            version = previous_version + 1
+            if action == "hold":
+                failures = int(row["consecutive_failures"])
+                connection.execute(
+                    "UPDATE generation_job_retry_state SET held_at=?, hold_reason_code=?, retry_version=?, "
+                    "updated_at=? WHERE generation_job_id=?",
+                    (now, args.reason_code, version, now, args.generation_job_id),
+                )
+            else:
+                failures = 0
+                connection.execute(
+                    "UPDATE generation_job_retry_state SET held_at=NULL, hold_reason_code=NULL, "
+                    "consecutive_failures=0, retry_version=?, updated_at=? WHERE generation_job_id=?",
+                    (version, now, args.generation_job_id),
+                )
+                control = connection.execute(
+                    "SELECT paused_at FROM generation_provider_controls WHERE provider_name='codex_cli'"
+                ).fetchone()
+                if row["status"] == "failed_recoverable" and control is not None and control["paused_at"] is None:
+                    connection.execute(
+                        "UPDATE generation_jobs SET retry_at=? WHERE id=?",
+                        (now, args.generation_job_id),
+                    )
+            cursor = connection.execute(
+                "INSERT INTO generation_job_retry_events("
+                "generation_job_id, action, reason_code, actor_kind, actor_id, resulting_held, "
+                "resulting_consecutive_failures, previous_retry_version, resulting_retry_version"
+                ") VALUES (?, ?, ?, 'operator', ?, ?, ?, ?, ?)",
+                (
+                    args.generation_job_id,
+                    action,
+                    args.reason_code,
+                    actor_id,
+                    1 if action == "hold" else 0,
+                    failures,
+                    previous_version,
+                    version,
+                ),
+            )
+            event_id = cursor.lastrowid
+            assert event_id is not None
+            payload = {
+                "changed": True,
+                "event_id": int(event_id),
+                "generation_job_id": args.generation_job_id,
+                "status": "held" if action == "hold" else "released",
+            }
+    _print(payload)
+    return 0
+
+
+def codex_job_hold(args: argparse.Namespace) -> int:
+    return _retry_mutation(args, "hold")
+
+
+def codex_job_release(args: argparse.Namespace) -> int:
+    return _retry_mutation(args, "release")
 
 
 def notify_candidates(args: argparse.Namespace) -> int:
@@ -1283,6 +1607,49 @@ def build_parser() -> argparse.ArgumentParser:
     generate.add_argument("--fixture-only", action="store_true")
     generate.add_argument("--page-count", type=int, choices=range(1, 9))
     generate.set_defaults(handler=generate_pending)
+    codex_once = commands.add_parser("generate-codex-once", help="run one attested exact Codex generation job")
+    codex_once.add_argument("--config", type=Path, default=Path("/etc/newsbot/config.toml"))
+    codex_once.add_argument("--db", type=Path, default=Path("/var/lib/newsbot/newsbot.db"))
+    codex_once.set_defaults(handler=generate_codex_once)
+    provider_pause = commands.add_parser("codex-provider-pause")
+    provider_pause.add_argument("--db", type=Path)
+    provider_pause.add_argument("--actor-id", type=int, required=True)
+    provider_pause.add_argument("--expected-control-version", type=int, required=True)
+    provider_pause.add_argument(
+        "--reason-code", dest="reason_code", choices=("operator_security_hold", "maintenance"), required=True
+    )
+    provider_pause.set_defaults(handler=codex_provider_pause)
+    provider_resume = commands.add_parser("codex-provider-resume")
+    provider_resume.add_argument("--db", type=Path)
+    provider_resume.add_argument("--actor-id", type=int, required=True)
+    provider_resume.add_argument("--expected-control-version", type=int, required=True)
+    provider_resume.add_argument(
+        "--reason-code",
+        dest="reason_code",
+        choices=(
+            "auth_restored",
+            "config_repaired",
+            "attestation_passed",
+            "security_reviewed",
+            "maintenance_complete",
+        ),
+        required=True,
+    )
+    provider_resume.set_defaults(handler=codex_provider_resume)
+    for name, handler, reasons in (
+        ("codex-job-hold", codex_job_hold, ("operator_review", "poison_output")),
+        (
+            "codex-job-release",
+            codex_job_release,
+            ("operator_reviewed", "source_packet_reduced", "transient_cleared"),
+        ),
+    ):
+        retry = commands.add_parser(name)
+        retry.add_argument("--db", type=Path)
+        retry.add_argument("--actor-id", type=int, required=True)
+        retry.add_argument("--generation-job-id", type=int, required=True)
+        retry.add_argument("--reason-code", dest="reason_code", choices=reasons, required=True)
+        retry.set_defaults(handler=handler)
 
     notify = commands.add_parser("notify-candidates", help="send candidate digest through the Telegram Bot API")
     notify.add_argument("--db", type=Path)

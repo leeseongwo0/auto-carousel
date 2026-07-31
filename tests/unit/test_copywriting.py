@@ -137,7 +137,6 @@ def test_fixture_category_v1_uses_boundaries_and_consumes_longer_aliases() -> No
     assert fixture_category(_fixture_draft(prose="chair cryptocurrency crypto blockchain")) == "Blockchain"
 
 
-
 def test_adaptive_page_counts_accept_one_and_eight_but_reject_zero_and_nine() -> None:
     body = BodyPage(
         "세부 내용",
