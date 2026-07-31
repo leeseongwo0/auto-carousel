@@ -12,7 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
-from typing import Any
+from typing import Any, cast
 
 from newsbot.approval.base import (
     ApprovalAction,
@@ -33,6 +33,7 @@ from newsbot.copywriting import (
     validate_copy,
 )
 from newsbot.exports import approval_outbox_intent
+from newsbot.handoffs import SheetCategory, enqueue_sheet_handoff
 from newsbot.storage import Storage, has_newer_material_source
 
 
@@ -64,12 +65,19 @@ class CandidateApprovalService:
     """Persist candidate and draft decisions using the bundled SQLite schema."""
 
     def __init__(
-        self, storage: Storage, *, chat_id: int, authorized_user_ids: set[int], now: Callable[[], datetime]
+        self,
+        storage: Storage,
+        *,
+        chat_id: int,
+        authorized_user_ids: set[int],
+        now: Callable[[], datetime],
+        sheet_target_binding_id: int | None = None,
     ) -> None:
         self.storage = storage
         self.chat_id = chat_id
         self.authorized_user_ids = frozenset(authorized_user_ids)
         self.now = now
+        self.sheet_target_binding_id = sheet_target_binding_id
 
     def create_digest(
         self, run_id: int, *, actor_id: int, expires_in: timedelta = timedelta(hours=24)
@@ -287,6 +295,7 @@ class CandidateApprovalService:
             page_count: int | None = None
             generation: Any = None
             warnings: tuple[dict[str, Any], ...] = ()
+            approval_category: str | None = None
             if stage is ApprovalStage.REVIEW:
                 generation = connection.execute(
                     "SELECT g.id, g.attempt, g.content_json, j.requested_page_count FROM generations g "
@@ -330,6 +339,7 @@ class CandidateApprovalService:
                     warnings = self._warnings_for_candidate(connection, candidate_id)
                     if payload.get("warning_digest") != _warning_digest(warnings):
                         return ApprovalResult("stale")
+                    approval_category = json.loads(str(generation["content_json"]))["category"]
                 if action in (ApprovalAction.PAGE_INCREMENT, ApprovalAction.PAGE_DECREMENT):
                     page_count = _page_count(generation["content_json"])
                     if page_count is None:
@@ -345,6 +355,9 @@ class CandidateApprovalService:
             ).fetchone()
             if existing is not None:
                 return ApprovalResult("duplicate", candidate_id)
+            decision_payload = dict(payload)
+            if approval_category is not None:
+                decision_payload["category"] = approval_category
             connection.execute(
                 "INSERT INTO decision_events(run_id, digest_id, selection_id, event_key, decision, actor, payload_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
@@ -354,7 +367,7 @@ class CandidateApprovalService:
                     event_key,
                     action.value,
                     str(user_id),
-                    json.dumps(payload, sort_keys=True),
+                    json.dumps(decision_payload, sort_keys=True),
                 ),
             )
             event_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
@@ -447,7 +460,8 @@ class CandidateApprovalService:
                 )
                 return ApprovalResult("queued", candidate_id, selection_id, job_id)
             if stage is ApprovalStage.REVIEW and action is ApprovalAction.APPROVE_HANDOFF:
-                export_id, json_bytes, markdown_bytes = approval_outbox_intent(
+                assert approval_category in ("AI", "Blockchain")
+                export_id, canonical_payload, _ = approval_outbox_intent(
                     candidate_id=candidate_id,
                     generation_id=int(generation["id"]),
                     approval_event_id=event_id,
@@ -462,29 +476,22 @@ class CandidateApprovalService:
                         "candidate_revision": int(candidate["revision"]),
                         "digest_revision": int(digest_revision),
                         "warning_digest": _warning_digest(warnings),
+                        "category": approval_category,
                     },
                 )
-                digest = connection.execute(
-                    "SELECT digest_id FROM selections WHERE id=?",
-                    (self._selection_id(connection, candidate_id),),
-                ).fetchone()
-                assert digest is not None
-                for kind, content in (("json", json_bytes), ("markdown", markdown_bytes)):
-                    connection.execute(
-                        "INSERT INTO export_outbox(digest_id, generation_id, approval_event_id, export_kind, "
-                        "export_id, canonical_bytes, sha256, payload_json, status) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')",
-                        (
-                            int(digest["digest_id"]),
-                            int(generation["id"]),
-                            event_id,
-                            kind,
-                            export_id,
-                            content,
-                            sha256(content).hexdigest(),
-                            json.dumps({"export_id": export_id, "sha256": sha256(content).hexdigest()}, sort_keys=True),
-                        ),
-                    )
+                if self.sheet_target_binding_id is None:
+                    raise RuntimeError("pre-created Sheets target binding is required")
+                enqueue_sheet_handoff(
+                    connection,
+                    generation_id=int(generation["id"]),
+                    approval_event_id=event_id,
+                    target_binding_id=self.sheet_target_binding_id,
+                    export_id=export_id,
+                    category=cast(SheetCategory, approval_category),
+                    canonical_bytes=canonical_payload,
+                    approved_at=now.isoformat(),
+                    now=now.isoformat(),
+                )
                 connection.execute("UPDATE candidates SET status='approved' WHERE id=?", (candidate_id,))
                 connection.execute("UPDATE digests SET status='approved' WHERE id=?", (digest_id,))
                 return ApprovalResult("approved", candidate_id)
@@ -653,6 +660,7 @@ class CandidateApprovalService:
                 for body in payload["bodies"]
             ),
             Caption(**payload["caption"]),
+            category=payload["category"],
             draft=payload["draft"],
             source_reported=payload["source_reported"],
         )

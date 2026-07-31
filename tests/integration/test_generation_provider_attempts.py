@@ -73,7 +73,7 @@ def test_provider_attempts_preserve_failures_expired_leases_and_retry_success() 
     clock = FixtureClock(datetime(2026, 7, 29, 12, tzinfo=UTC))
     candidate_id = _selected_job(storage)
     providers = iter((FailingProvider(), FakeGenerationProvider()))
-    pipeline = NewsPipeline(storage, SimpleNamespace(), "output", lambda: next(providers), clock)
+    pipeline = NewsPipeline(storage, SimpleNamespace(), lambda: next(providers), clock)
 
     with pytest.raises(RuntimeError, match="not-for-logs"):
         asyncio.run(pipeline.generate_selected(candidate_id, page_count=2))
@@ -200,7 +200,6 @@ def test_generation_fact_packet_is_content_addressed_and_retains_server_trust_da
     pipeline = NewsPipeline(
         storage,
         SimpleNamespace(),
-        "output",
         provider,
         FixtureClock(datetime(2026, 7, 29, 12, tzinfo=UTC)),
     )

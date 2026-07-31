@@ -5,7 +5,9 @@ from __future__ import annotations
 import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import Literal
 
+Category = Literal["AI", "Blockchain"]
 
 class CopyValidationError(ValueError):
     """Raised when generated copy cannot enter human review."""
@@ -71,6 +73,7 @@ class CopyDraft:
     cover: CoverPage
     bodies: tuple[BodyPage, ...]
     caption: Caption
+    category: Category
     draft: bool = True
     source_reported: bool = True
 
@@ -149,6 +152,8 @@ def validate_copy(
         raise CopyValidationError("a draft must have 1 through 8 total pages")
     if expected_page_count is not None and draft.page_count != expected_page_count:
         raise CopyValidationError("draft page count does not match its generation request")
+    if draft.category not in ("AI", "Blockchain"):
+        raise CopyValidationError("category must be exactly 'AI' or 'Blockchain'")
 
     _validate_text(draft.cover.title, "cover.title")
     _validate_text(draft.cover.subtitle, "cover.subtitle", 35)

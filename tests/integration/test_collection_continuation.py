@@ -280,7 +280,6 @@ def test_fixture_reconcile_is_bounded_and_cursor_neutral(tmp_path):
         {"messages": [{**_message(1, NOW - timedelta(minutes=30)), "channel_id": "aipost"}]},
     )
     database = tmp_path / "newsbot.sqlite"
-    output = tmp_path / "output"
     channel = SimpleNamespace(id="aipost", handle="aipost")
     with Storage.open(database) as storage:
         collection = DurableCollection(storage)
@@ -317,8 +316,6 @@ def test_fixture_reconcile_is_bounded_and_cursor_neutral(tmp_path):
                 "1",
                 "--db",
                 str(database),
-                "--output",
-                str(output),
             ]
         )
         == 0

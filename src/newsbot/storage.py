@@ -15,6 +15,22 @@ from typing import Any, cast
 
 from .collectors.base import Engagement, Media, MessageKind, SourceObservation, UrlCandidate
 
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+
+def aware_epoch_us(value: object) -> int | None:
+    """Return a strict aware ISO timestamp as UTC microseconds, or ``None``."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            return None
+        delta = parsed.astimezone(UTC) - _EPOCH
+    except (OverflowError, ValueError):
+        return None
+    return ((delta.days * 86_400 + delta.seconds) * 1_000_000) + delta.microseconds
+
 
 class Storage:
     """A small, explicit wrapper around one SQLite connection.
@@ -31,6 +47,7 @@ class Storage:
         self._connection = sqlite3.connect(path, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
         self._lock = RLock()
+        self._lease_authority_hash: str | None = None
         self._configure()
 
     @classmethod
@@ -43,6 +60,23 @@ class Storage:
     def _configure(self) -> None:
         with self._lock:
             self._connection.execute("PRAGMA foreign_keys = ON")
+            self._connection.create_function(
+                "sha256_hex",
+                1,
+                lambda value: sha256(bytes(value)).hexdigest(),
+                deterministic=True,
+            )
+            self._connection.create_function(
+                "lease_owner_hash",
+                0,
+                lambda: self._lease_authority_hash,
+            )
+            self._connection.create_function(
+                "aware_epoch_us",
+                1,
+                aware_epoch_us,
+                deterministic=True,
+            )
             self._connection.execute("PRAGMA journal_mode = WAL").fetchone()
             self._connection.execute("PRAGMA synchronous = NORMAL")
             self._connection.execute("PRAGMA busy_timeout = 5000")
@@ -67,33 +101,105 @@ class Storage:
                 if migration.name in applied:
                     continue
                 script = migration.read_text(encoding="utf-8")
+                if migration.name == "004_sheets_authority_upgrade.sql":
+                    self._assert_sheets_authority_upgrade_supported(migration_dir / "003_sheets_handoff.sql")
+                    handoff_columns = {
+                        str(row["name"]) for row in self._connection.execute("PRAGMA table_info(sheet_handoffs)")
+                    }
+                    target_expression = (
+                        "h.target_binding_id" if "target_binding_id" in handoff_columns else "b.target_binding_id"
+                    )
+                    script = script.replace("__HANDOFF_TARGET_EXPR__", target_expression)
                 version = migration.name.replace("'", "''")
+                foreign_keys_disabled = migration.name in {
+                    "002_canonical_authority.sql",
+                    "004_sheets_authority_upgrade.sql",
+                }
                 if migration.name == "002_canonical_authority.sql":
                     self._prepare_canonical_authority_upgrade()
+                if foreign_keys_disabled:
                     self._connection.execute("PRAGMA foreign_keys = OFF")
                 try:
-                    self._connection.executescript(
-                        "BEGIN IMMEDIATE;\n"
-                        f"{script}\n"
-                        "INSERT INTO schema_migrations (version) "
-                        f"VALUES ('{version}');\n"
-                        "COMMIT;"
-                    )
+                    if migration.name == "004_sheets_authority_upgrade.sql":
+                        self._connection.executescript(f"BEGIN IMMEDIATE;\n{script}\n")
+                        violations = self._connection.execute("PRAGMA foreign_key_check").fetchall()
+                        if violations:
+                            raise RuntimeError(f"{migration.name} introduced foreign key violations")
+                        self._connection.execute(
+                            "INSERT INTO schema_migrations (version) VALUES (?)",
+                            (migration.name,),
+                        )
+                        self._connection.commit()
+                    else:
+                        self._connection.executescript(
+                            "BEGIN IMMEDIATE;\n"
+                            f"{script}\n"
+                            "INSERT INTO schema_migrations (version) "
+                            f"VALUES ('{version}');\n"
+                            "COMMIT;"
+                        )
                 except BaseException:
                     self._connection.rollback()
                     raise
                 finally:
-                    if migration.name == "002_canonical_authority.sql":
+                    if migration.name == "004_sheets_authority_upgrade.sql":
+                        self._connection.execute("PRAGMA legacy_alter_table = OFF")
+                    if foreign_keys_disabled:
                         self._connection.execute("PRAGMA foreign_keys = ON")
+                    if migration.name == "002_canonical_authority.sql":
                         violations = self._connection.execute("PRAGMA foreign_key_check").fetchall()
                         if violations:
-                            raise RuntimeError("canonical authority migration introduced foreign key violations")
+                            raise RuntimeError(f"{migration.name} introduced foreign key violations")
 
     def _prepare_canonical_authority_upgrade(self) -> None:
         """Add columns SQLite cannot add conditionally from a SQL migration."""
         callback_columns = {str(row["name"]) for row in self._connection.execute("PRAGMA table_info(callback_tokens)")}
         if "revoked_at" not in callback_columns:
             self._connection.execute("ALTER TABLE callback_tokens ADD COLUMN revoked_at TEXT")
+
+    def _assert_sheets_authority_upgrade_supported(self, migration_path: Path) -> None:
+        """Fail closed when an applied 003 is not the supported authority shape."""
+        authority_tables = (
+            "sheet_bootstraps",
+            "sheet_handoff_bindings",
+            "sheet_operation_events",
+            "sheet_operation_leases",
+            "sheet_operation_probes",
+            "sheet_operation_settlements",
+            "sheet_remote_operations",
+            "sheet_target_bindings",
+        )
+        placeholders = ",".join("?" for _ in authority_tables)
+        query = (
+            "SELECT type,name,tbl_name,sql FROM sqlite_master "
+            "WHERE type IN ('table','trigger','index') AND tbl_name IN ("
+            f"{placeholders}) AND sql IS NOT NULL ORDER BY type,name"
+        )
+        installed = [tuple(row) for row in self._connection.execute(query, authority_tables)]
+
+        expected_connection = sqlite3.connect(":memory:")
+        try:
+            expected_connection.create_function(
+                "sha256_hex",
+                1,
+                lambda value: sha256(bytes(value)).hexdigest(),
+                deterministic=True,
+            )
+            expected_connection.create_function("lease_owner_hash", 0, lambda: None)
+            expected_connection.create_function("aware_epoch_us", 1, aware_epoch_us, deterministic=True)
+            expected_connection.executescript(
+                "CREATE TABLE generations(id INTEGER PRIMARY KEY);"
+                "CREATE TABLE decision_events(id INTEGER PRIMARY KEY);" + migration_path.read_text(encoding="utf-8")
+            )
+            expected = [tuple(row) for row in expected_connection.execute(query, authority_tables)]
+        finally:
+            expected_connection.close()
+        if installed != expected:
+            raise RuntimeError("unsupported applied 003 Sheets authority schema; automatic upgrade refused")
+
+    def _authorize_lease(self, owner_token: str) -> None:
+        """Authorize one transaction to write events for the named lease owner."""
+        self._lease_authority_hash = sha256(owner_token.encode()).hexdigest()
 
     @contextmanager
     def transaction(self, *, immediate: bool = True) -> Iterator[sqlite3.Connection]:
@@ -105,11 +211,12 @@ class Storage:
             self._connection.execute(begin)
             try:
                 yield self._connection
+                self._connection.commit()
             except BaseException:
                 self._connection.rollback()
                 raise
-            else:
-                self._connection.commit()
+            finally:
+                self._lease_authority_hash = None
 
     def execute(self, sql: str, parameters: Sequence[Any] = ()) -> sqlite3.Cursor:
         """Execute one statement. Writes require an explicit transaction."""

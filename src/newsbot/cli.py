@@ -10,7 +10,8 @@ from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
+from zoneinfo import ZoneInfo
 
 from .ai.base import GenerationProvider
 from .approval.scripted import ScriptedAction, ScriptedApprovalAdapter
@@ -18,11 +19,11 @@ from .candidates import CandidateApprovalService, CandidateDigest
 from .collectors.base import SourceObservation
 from .collectors.fixture import FixtureCollector
 from .config import AppConfig, Capability, ConfigError, load_config, validate_capabilities
-from .exports import materialize_outbox, verify_ready_outbox
 from .observability import inspect, status
 from .pipeline import NewsPipeline, _draft_payload
 from .runtime import FixtureClock, SystemClock
-from .secrets import SessionStore, ensure_private_directory
+from .secrets import SecretFileError, SessionStore, ensure_private_directory, read_service_account_info
+from .sheets.base import SheetsAdapter
 from .storage import DurableCollection, Storage
 
 CommandHandler = Callable[[argparse.Namespace], int]
@@ -36,8 +37,6 @@ def _config(args: argparse.Namespace) -> AppConfig:
     overrides: dict[str, Path] = {}
     if args.db is not None:
         overrides["database_path"] = args.db
-    if getattr(args, "output", None) is not None:
-        overrides["output_dir"] = args.output
     return load_config(args.config, cli_overrides=overrides)
 
 
@@ -117,15 +116,16 @@ def run_fixture(args: argparse.Namespace) -> int:
         ).hexdigest()
     )
     with Storage.open(config.database_path) as storage:
-        terminal_run = storage.fetch_one(
-            "SELECT id FROM runs WHERE run_key=? AND mode='fixture' AND status='ready'",
-            (run_key,),
+        from .handoffs import SheetHandoffService
+        from .sheets.schema import WORKPLACE_ORACLE_FINGERPRINT
+
+        fixture_target_id = SheetHandoffService(storage).ensure_binding(
+            binding_key="workplace",
+            spreadsheet_id="fixture://workplace",
+            sheet_id=0,
+            now=clock.now().isoformat(),
+            oracle_fingerprint=WORKPLACE_ORACLE_FINGERPRINT,
         )
-        if terminal_run is not None:
-            terminal = _ready_fixture_result(storage, int(terminal_run["id"]), config.output_dir)
-            if terminal is not None:
-                _print(terminal)
-                return 0
         durable = DurableCollection(storage)
         for channel in config.enabled_channels:
             collector = FixtureCollector(fixture_path)
@@ -134,13 +134,45 @@ def run_fixture(args: argparse.Namespace) -> int:
                 collection = durable.collect_channel(collector, channel, now=clock.now())
         observations = storage.latest_observations()
         run = storage.fetch_one("SELECT id FROM runs WHERE run_key=?", (run_key,))
-        if run is not None:
-            ready = _ready_fixture_result(storage, int(run["id"]), config.output_dir)
-            if ready is not None:
-                _print(ready)
+        if args.scripted_approve:
+            existing = storage.fetch_one(
+                "SELECT h.id AS handoff_id, h.generation_id, c.id AS candidate_id, d.id AS digest_id "
+                "FROM sheet_handoffs h JOIN generations g ON g.id=h.generation_id "
+                "JOIN generation_jobs j ON j.id=g.generation_job_id JOIN selections s ON s.id=j.selection_id "
+                "JOIN candidates c ON c.id=s.candidate_id JOIN candidate_evaluations e ON e.id=c.evaluation_id "
+                "JOIN digests d ON d.run_id=e.run_id WHERE e.run_id=? ORDER BY h.id DESC LIMIT 1",
+                (int(run["id"]),) if run is not None else (-1,),
+            )
+            if existing is not None:
+                assert run is not None
+                candidate_count = storage.fetch_one(
+                    "SELECT COUNT(*) AS count FROM candidates c "
+                    "JOIN candidate_evaluations e ON e.id=c.evaluation_id "
+                    "WHERE e.run_id=? AND c.rank IS NOT NULL",
+                    (int(run["id"]),),
+                )
+                assert candidate_count is not None
+                _print(
+                    {
+                        "candidate_count": int(candidate_count["count"]),
+                        "candidate_id": int(existing["candidate_id"]),
+                        "digest_id": int(existing["digest_id"]),
+                        "generation_id": int(existing["generation_id"]),
+                        "handoff_id": int(existing["handoff_id"]),
+                        "reused": True,
+                        "run_id": int(run["id"]),
+                        "status": "approved",
+                    }
+                )
                 return 0
-        pipeline = NewsPipeline(storage, config, config.output_dir, _fixture_provider_factory, clock)
-        service = CandidateApprovalService(storage, chat_id=1, authorized_user_ids={1}, now=clock.now)
+        pipeline = NewsPipeline(storage, config, _fixture_provider_factory, clock)
+        service = CandidateApprovalService(
+            storage,
+            chat_id=1,
+            authorized_user_ids={1},
+            now=clock.now,
+            sheet_target_binding_id=fixture_target_id,
+        )
         stage = asyncio.run(pipeline.run(observations, run_key=run_key, approval_service=service, actor_id=1))
         result: dict[str, Any] = {
             "candidate_count": len(stage.digest.candidates),
@@ -148,11 +180,6 @@ def run_fixture(args: argparse.Namespace) -> int:
             "run_id": stage.run_id,
             "status": "pending_selection",
         }
-        ready = _ready_fixture_result(storage, stage.run_id, config.output_dir)
-        if ready is not None:
-            result.update(ready)
-            _print(result)
-            return 0
         if args.scripted_approve:
             if not stage.digest.candidates:
                 raise ValueError("fixture has no eligible candidate")
@@ -186,71 +213,23 @@ def run_fixture(args: argparse.Namespace) -> int:
             )
             if adapter.apply(ScriptedAction(review.token, 1, 1)).status != "approved":
                 raise RuntimeError("scripted review was not approved")
-            exported = pipeline.materialize_approved_export(generated.generation_id)
+            handoff = storage.fetch_one(
+                "SELECT id FROM sheet_handoffs WHERE generation_id=? ORDER BY id DESC LIMIT 1",
+                (generated.generation_id,),
+            )
+            if handoff is None:
+                raise RuntimeError("scripted approval did not create a Sheets handoff")
             result.update(
                 {
-                    "candidate_id": exported.candidate_id,
-                    "export_id": exported.export.export_id,
-                    "generation_id": exported.generation_id,
-                    "json_path": str(exported.export.json_path),
-                    "markdown_path": str(exported.export.markdown_path),
+                    "candidate_id": candidate_id,
+                    "generation_id": generated.generation_id,
+                    "handoff_id": int(handoff["id"]),
                     "reused": generated.reused,
-                    "status": "ready",
+                    "status": "approved",
                 }
             )
     _print(result)
     return 0
-
-
-def _ready_fixture_result(storage: Storage, run_id: int, output_dir: Path) -> dict[str, Any] | None:
-    row = storage.fetch_one(
-        "SELECT c.id AS candidate_id, g.id AS generation_id, json_outbox.export_id AS json_export_id, "
-        "markdown_outbox.export_id AS markdown_export_id "
-        "FROM runs r JOIN candidate_evaluations ce ON ce.run_id=r.id "
-        "JOIN candidates c ON c.evaluation_id=ce.id "
-        "JOIN selections s ON s.candidate_id=c.id "
-        "JOIN generation_jobs j ON j.selection_id=s.id "
-        "JOIN generations g ON g.generation_job_id=j.id "
-        "JOIN export_outbox json_outbox ON json_outbox.digest_id=s.digest_id "
-        "AND json_outbox.generation_id=g.id AND json_outbox.export_kind='json' AND json_outbox.status='ready' "
-        "JOIN export_outbox markdown_outbox ON markdown_outbox.digest_id=s.digest_id "
-        "AND markdown_outbox.generation_id=g.id AND markdown_outbox.export_kind='markdown' "
-        "AND markdown_outbox.status='ready' "
-        "WHERE r.id=? AND r.status='ready' AND g.status='current'",
-        (run_id,),
-    )
-    if row is None:
-        return None
-    generation_id = int(row["generation_id"])
-    pair = verify_ready_outbox(storage, output_dir, generation_id)
-    if pair is None:
-        return None
-    if row["json_export_id"] != pair.export_id or row["markdown_export_id"] != pair.export_id:
-        raise RuntimeError("ready fixture run has invalid export records")
-    candidate_count = storage.fetch_one(
-        "SELECT COUNT(*) AS count FROM candidates c "
-        "JOIN candidate_evaluations ce ON ce.id=c.evaluation_id "
-        "WHERE ce.run_id=? AND c.status!='rejected'",
-        (run_id,),
-    )
-    digest = storage.fetch_one(
-        "SELECT id FROM digests WHERE run_id=? ORDER BY id DESC LIMIT 1",
-        (run_id,),
-    )
-    if candidate_count is None or digest is None:
-        raise RuntimeError("ready fixture run is missing candidate or digest state")
-    return {
-        "candidate_count": int(candidate_count["count"]),
-        "candidate_id": int(row["candidate_id"]),
-        "digest_id": int(digest["id"]),
-        "export_id": pair.export_id,
-        "generation_id": generation_id,
-        "json_path": str(pair.json_path),
-        "markdown_path": str(pair.markdown_path),
-        "reused": True,
-        "run_id": run_id,
-        "status": "ready",
-    }
 
 
 def show_status(args: argparse.Namespace) -> int:
@@ -262,38 +241,6 @@ def show_status(args: argparse.Namespace) -> int:
 def show_inspect(args: argparse.Namespace) -> int:
     with Storage.open(_database(args)) as storage:
         _print(inspect(storage, args.run_id))
-    return 0
-
-
-def repair_exports(args: argparse.Namespace) -> int:
-    """Materialize each complete SQLite-authoritative export outbox pair."""
-    output = args.output if args.output is not None else _path_from_environment("NEWSBOT_OUTPUT_DIR", "output")
-    repaired = 0
-    corrupt = 0
-    with Storage.open(_database(args)) as storage:
-        rows = storage.fetch_all(
-            "SELECT generation_id, export_kind FROM export_outbox "
-            "WHERE status IN ('pending', 'materializing', 'ready') ORDER BY generation_id, export_kind"
-        )
-        grouped: dict[int, set[str]] = {}
-        for row in rows:
-            grouped.setdefault(int(row["generation_id"]), set()).add(str(row["export_kind"]))
-        for generation_id, kinds in grouped.items():
-            if kinds != {"json", "markdown"}:
-                with storage.transaction() as connection:
-                    connection.execute(
-                        "UPDATE export_outbox SET status='corrupt' WHERE generation_id=?",
-                        (generation_id,),
-                    )
-                corrupt += 1
-                continue
-            try:
-                materialize_outbox(storage, output, generation_id)
-            except (FileExistsError, OSError, RuntimeError, ValueError):
-                corrupt += 1
-            else:
-                repaired += 1
-    _print({"corrupt": corrupt, "repaired": repaired})
     return 0
 
 
@@ -366,18 +313,16 @@ def rank(args: argparse.Namespace) -> int:
     with Storage.open(config.database_path) as storage:
         observations = storage.latest_observations()
         service = CandidateApprovalService(storage, chat_id=1, authorized_user_ids={1}, now=lambda: now)
-        pipeline = DurableLivePipeline(storage, config, config.output_dir, _live_provider_forbidden, SystemClock())
+        pipeline = DurableLivePipeline(storage, config, _live_provider_forbidden, SystemClock())
         stage = asyncio.run(
             pipeline.run(
                 observations, run_key=_live_run_key(observations, config), approval_service=service, actor_id=1
             )
         )
-        digest_path = _write_pending_selection_digest(config.output_dir, stage.run_id, stage.digest)
     _print(
         {
             "candidate_count": len(stage.digest.candidates),
             "digest_id": stage.digest.id,
-            "digest_path": str(digest_path),
             "mode": "rank",
             "run_id": stage.run_id,
             "status": "pending_selection",
@@ -413,7 +358,7 @@ def reconcile_fixture(args: argparse.Namespace) -> int:
         )
         observations = storage.latest_observations()
         service = CandidateApprovalService(storage, chat_id=1, authorized_user_ids={1}, now=clock.now)
-        pipeline = DurableLivePipeline(storage, config, config.output_dir, _live_provider_forbidden, clock)
+        pipeline = DurableLivePipeline(storage, config, _live_provider_forbidden, clock)
         stage = asyncio.run(
             pipeline.run(
                 observations,
@@ -422,13 +367,11 @@ def reconcile_fixture(args: argparse.Namespace) -> int:
                 actor_id=1,
             )
         )
-        digest_path = _write_pending_selection_digest(config.output_dir, stage.run_id, stage.digest)
     _print(
         {
             "channel": channel.id,
             "candidate_count": len(stage.digest.candidates),
             "digest_id": stage.digest.id,
-            "digest_path": str(digest_path),
             "mode": "reconcile",
             "persisted": persisted,
             "run_id": stage.run_id,
@@ -499,18 +442,6 @@ def _live_run_key(observations: Sequence[SourceObservation], config: AppConfig) 
     ]
     digest = sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
     return f"live-{config.digest}-{digest}"
-
-
-def _write_pending_selection_digest(output_dir: Path, run_id: int, digest: CandidateDigest) -> Path:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    path = output_dir / f"pending-selection-{run_id}.json"
-    candidates = digest.candidates
-    path.write_text(
-        json.dumps({"run_id": run_id, "candidates": candidates}, ensure_ascii=False, sort_keys=True, default=str)
-        + "\n",
-        encoding="utf-8",
-    )
-    return path
 
 
 def _live_provider_forbidden() -> GenerationProvider:
@@ -589,7 +520,7 @@ def _collect_live(args: argparse.Namespace, *, reconcile: bool) -> int:
             now = datetime.now(UTC)
             observations = storage.latest_observations()
             service = CandidateApprovalService(storage, chat_id=1, authorized_user_ids={1}, now=lambda: now)
-            pipeline = DurableLivePipeline(storage, config, config.output_dir, _live_provider_forbidden, SystemClock())
+            pipeline = DurableLivePipeline(storage, config, _live_provider_forbidden, SystemClock())
             stage = loop.run_until_complete(
                 pipeline.run(
                     observations,
@@ -598,7 +529,6 @@ def _collect_live(args: argparse.Namespace, *, reconcile: bool) -> int:
                     actor_id=1,
                 )
             )
-            digest_path = _write_pending_selection_digest(config.output_dir, stage.run_id, stage.digest)
     finally:
         try:
             close()
@@ -609,8 +539,6 @@ def _collect_live(args: argparse.Namespace, *, reconcile: bool) -> int:
             "channels": counts,
             "channel_errors": channel_errors,
             "digest_id": stage.digest.id,
-            "digest_path": str(digest_path),
-            "pending_selection_digest_path": str(digest_path),
             "mode": "reconcile" if reconcile else "collect",
             "run_id": stage.run_id,
             "status": "pending_selection",
@@ -633,7 +561,7 @@ def generate_pending(args: argparse.Namespace) -> int:
     config = _config(args)
     with Storage.open(config.database_path) as storage:
         clock = FixtureClock() if args.provider == "fake" else SystemClock()
-        pipeline = NewsPipeline(storage, config, config.output_dir, _provider_factory(args.provider), clock)
+        pipeline = NewsPipeline(storage, config, _provider_factory(args.provider), clock)
         generated = asyncio.run(
             pipeline.generate_selected(
                 args.candidate_id, page_count=args.page_count or _adaptive_page_count(storage, args.candidate_id)
@@ -658,8 +586,24 @@ def _approval_service(storage: Storage) -> CandidateApprovalService:
     user_ids = {int(value.strip()) for value in os.environ["NEWSBOT_APPROVER_USER_IDS"].split(",") if value.strip()}
     if not user_ids:
         raise ConfigError("NEWSBOT_APPROVER_USER_IDS must contain at least one integer user id")
+    spreadsheet_id = os.environ.get("GOOGLE_SHEETS_SPREADSHEET_ID", "").strip()
+    target_binding_id: int | None = None
+    if spreadsheet_id:
+        target = storage.fetch_one(
+            "SELECT id FROM sheet_target_bindings WHERE target_ref_sha256=?",
+            (sha256(spreadsheet_id.encode()).hexdigest(),),
+        )
+        if target is None:
+            raise ConfigError("Google Sheets target must be bootstrapped before approval")
+        target_binding_id = int(target["id"])
     clock = SystemClock()
-    return CandidateApprovalService(storage, chat_id=chat_id, authorized_user_ids=user_ids, now=clock.now)
+    return CandidateApprovalService(
+        storage,
+        chat_id=chat_id,
+        authorized_user_ids=user_ids,
+        now=clock.now,
+        sheet_target_binding_id=target_binding_id,
+    )
 
 
 def notify_candidates(args: argparse.Namespace) -> int:
@@ -787,7 +731,7 @@ def poll_approvals(args: argparse.Namespace) -> int:
                 "WHERE j.status IN ('queued', 'failed_recoverable') ORDER BY s.candidate_id"
             )
             clock = FixtureClock() if args.provider == "fake" else SystemClock()
-            pipeline = NewsPipeline(storage, config, config.output_dir, _provider_factory(args.provider), clock)
+            pipeline = NewsPipeline(storage, config, _provider_factory(args.provider), clock)
             for row in candidate_rows:
                 candidate_id = int(row["candidate_id"])
                 generated.append(
@@ -798,6 +742,468 @@ def poll_approvals(args: argparse.Namespace) -> int:
                     ).generation_id
                 )
     _print({"handled": len(statuses), "statuses": statuses, "generated": generated})
+    return 0
+
+
+def _live_sheets(args: argparse.Namespace) -> tuple[AppConfig, SheetsAdapter, str]:
+    validate_capabilities(Capability.LIVE_SHEETS)
+    config = _config(args)
+    if config.google_service_account_file is None or config.google_sheets_spreadsheet_id is None:
+        raise ConfigError("Google Sheets capability is incomplete")
+    try:
+        credential_info = read_service_account_info(config.google_service_account_file)
+    except (OSError, SecretFileError) as error:
+        raise ConfigError("Google Sheets credential file is invalid") from error
+    try:
+        from .sheets.google import GoogleSheetsAdapter
+
+        adapter = GoogleSheetsAdapter.from_credentials(
+            credential_info=credential_info,
+            spreadsheet_id=config.google_sheets_spreadsheet_id,
+        )
+    except (ImportError, RuntimeError, ValueError) as error:
+        raise RuntimeError("Google Sheets capability is unavailable") from error
+    return config, adapter, credential_info["client_email"]
+
+
+def _request_sha256(body: object) -> str:
+    return sha256(json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _live_target_binding(service: object, config: AppConfig, *, now: str, oracle_fingerprint: str) -> int:
+    from .handoffs import SheetHandoffService
+
+    assert isinstance(service, SheetHandoffService)
+    assert config.google_sheets_spreadsheet_id is not None
+    return service.ensure_binding(
+        binding_key="workplace",
+        spreadsheet_id=config.google_sheets_spreadsheet_id,
+        sheet_id=0,
+        now=now,
+        oracle_fingerprint=oracle_fingerprint,
+    )
+
+
+def sheets_validate(args: argparse.Namespace) -> int:
+    _, adapter, _ = _live_sheets(args)
+    from .sheets.schema import delivery_metadata_value
+
+    probe = adapter.probe(metadata_value=delivery_metadata_value("exp_" + "0" * 32, "0" * 64))
+    if probe.safe_code is not None:
+        raise RuntimeError("Google Sheets workplace validation failed")
+    _print({"status": "valid"})
+    return 0
+
+
+def sheets_bootstrap(args: argparse.Namespace) -> int:
+    config, adapter, email = _live_sheets(args)
+    from .handoffs import SheetHandoffService
+    from .sheets.base import DeliveryOutcome, MetadataState, SafeCode
+    from .sheets.schema import (
+        WORKPLACE_ORACLE_FINGERPRINT,
+        schema_metadata_value,
+    )
+
+    now = datetime.now(UTC).isoformat()
+    expires_at = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
+    controls_fingerprint = _request_sha256(
+        {
+            "schema": WORKPLACE_ORACLE_FINGERPRINT,
+            "controls": schema_metadata_value(),
+        }
+    )
+    with Storage.open(config.database_path) as storage:
+        service = SheetHandoffService(storage)
+        target_id = _live_target_binding(service, config, now=now, oracle_fingerprint=WORKPLACE_ORACLE_FINGERPRINT)
+        bootstrap_status = service.ensure_bootstrap(
+            target_binding_id=target_id,
+            marker_value=schema_metadata_value(),
+            controls_fingerprint=controls_fingerprint,
+        )
+        if bootstrap_status == "ready":
+            _print({"status": "ready", "reused": True})
+            return 0
+        lease = service.acquire_initial(
+            None,
+            operation_kind="bootstrap",
+            target_binding_id=target_id,
+            now=now,
+            expires_at=expires_at,
+        )
+        if lease is None:
+            _print({"status": "not_acquired"})
+            return 0
+        prepared = adapter.prepare_bootstrap(service_account_email=email)
+        request = prepared.body
+        request_sha = prepared.request_sha256
+        has_requests = bool(request.get("requests"))
+        preflight: Literal["exact", "absent", "conflict"] = "absent" if has_requests else "exact"
+        if not service.record_preflight(lease, outcome=preflight, now=now):
+            raise RuntimeError("sheet bootstrap lease was lost after preflight")
+        if not has_requests:
+            if not service.finish(lease, outcome="reused", now=now):
+                raise RuntimeError("sheet bootstrap lease was lost before reuse settlement")
+            _print({"status": "ready", "reused": True})
+            return 0
+        attestation = adapter.dispatch_credential_attestation()
+        adapter.arm_prepared_dispatch()
+        dispatch_at = datetime.now(UTC).isoformat()
+        if not service.mark_possibly_sent(
+            lease,
+            request_sha256=request_sha,
+            oracle_fingerprint=WORKPLACE_ORACLE_FINGERPRINT,
+            controls_fingerprint=controls_fingerprint,
+            credential_refreshed_at=attestation.refreshed_at,
+            credential_expires_at=attestation.expires_at,
+            credential_scope_ok=attestation.scope_ok,
+            now=dispatch_at,
+        ):
+            raise RuntimeError("sheet bootstrap lease was lost before dispatch")
+        result = adapter.dispatch_prepared_bootstrap(prepared)
+        settled_at = datetime.now(UTC).isoformat()
+        if result.metadata is not None:
+            probe_outcome = cast(
+                Literal["exact", "absent", "duplicate", "conflict", "unavailable"],
+                {
+                    MetadataState.EXACT: "exact",
+                    MetadataState.ABSENT: "absent",
+                    MetadataState.DUPLICATE: "duplicate",
+                    MetadataState.CONFLICT: "conflict",
+                }[result.metadata],
+            )
+            if not service.record_probe(lease, outcome=probe_outcome, now=settled_at):
+                raise RuntimeError("sheet bootstrap probe evidence was lost")
+        if result.outcome is DeliveryOutcome.APPLIED:
+            if not service.finish(lease, outcome="applied", now=settled_at):
+                raise RuntimeError("sheet bootstrap lease was lost before settlement")
+            _print({"status": "ready", "reused": False})
+        elif result.outcome is DeliveryOutcome.AMBIGUOUS:
+            if not service.release_possibly_sent(lease, now=settled_at):
+                raise RuntimeError("sheet bootstrap lease was lost before ambiguity release")
+            _print({"status": "ambiguous"})
+        elif result.metadata is not None:
+            if not service.finish(lease, outcome="schema_conflict", now=settled_at):
+                raise RuntimeError("sheet bootstrap lease was lost before conflict settlement")
+            _print(
+                {
+                    "safe_code": result.safe_code.value if result.safe_code else None,
+                    "status": "blocked",
+                }
+            )
+        else:
+            retryable = result.outcome is DeliveryOutcome.NOT_APPLIED
+            if not service.settle_trusted_rejection(
+                lease,
+                retryable=retryable,
+                safe_code=(result.safe_code.value if result.safe_code is not None else SafeCode.AMBIGUOUS.value),
+                now=settled_at,
+                retry_at=(
+                    (
+                        datetime.fromisoformat(settled_at) + timedelta(seconds=result.retry_after_seconds or 1)
+                    ).isoformat()
+                    if retryable
+                    else None
+                ),
+            ):
+                raise RuntimeError("sheet bootstrap rejection evidence was lost")
+            _print(
+                {
+                    "safe_code": result.safe_code.value if result.safe_code else None,
+                    "status": "retryable" if retryable else "blocked",
+                }
+            )
+    return 0
+
+
+def sheets_status(args: argparse.Namespace) -> int:
+    config = _config(args)
+    with Storage.open(config.database_path) as storage:
+        row = storage.fetch_one(
+            "SELECT COUNT(*) AS total, "
+            "SUM(CASE WHEN finished_at IS NULL THEN 1 ELSE 0 END) AS open "
+            "FROM sheet_remote_operations"
+        )
+        handoffs = storage.fetch_one(
+            "SELECT COUNT(*) AS total, "
+            "SUM(CASE WHEN status='ambiguous' THEN 1 ELSE 0 END) AS ambiguous, "
+            "SUM(CASE WHEN status='delivered' THEN 1 ELSE 0 END) AS delivered "
+            "FROM sheet_handoffs"
+        )
+        assert row is not None and handoffs is not None
+    _print(
+        {
+            "ambiguous_handoffs": int(handoffs["ambiguous"] or 0),
+            "delivered_handoffs": int(handoffs["delivered"] or 0),
+            "handoffs": int(handoffs["total"]),
+            "open_operations": int(row["open"] or 0),
+            "operations": int(row["total"]),
+            "status": "ok",
+        }
+    )
+    return 0
+
+
+def _handoff_projection(storage: Storage, handoff_id: int) -> tuple[str, str, tuple[str, ...]]:
+    from .sheets.schema import project_handoff
+
+    row = storage.fetch_one(
+        "SELECT canonical_bytes, canonical_sha256, category, approved_at FROM sheet_handoffs WHERE id=?",
+        (handoff_id,),
+    )
+    if row is None:
+        raise LookupError("unknown sheet handoff")
+    try:
+        payload = json.loads(bytes(row["canonical_bytes"]).decode("utf-8"))
+        pages = payload["pages"]
+        cover = pages[0]
+        projected_pages = [(cover["title"], cover["subtitle"])] + [
+            (page["subtitle"], page["body"]) for page in pages[1:]
+        ]
+        values = project_handoff(
+            approved_date=_seoul_date(str(row["approved_at"])),
+            page_count=len(pages),
+            category=str(row["category"]),
+            caption=payload["caption"]["text"],
+            pages=projected_pages,
+        )
+        export_id = payload["export_id"]
+    except (KeyError, TypeError, UnicodeDecodeError, ValueError) as error:
+        raise ValueError("invalid immutable sheet handoff") from error
+    if not isinstance(export_id, str) or payload.get("category") != row["category"]:
+        raise ValueError("invalid immutable sheet handoff")
+    return export_id, str(row["canonical_sha256"]), values
+
+
+def _seoul_date(value: str) -> str:
+    timestamp = datetime.fromisoformat(value)
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=UTC)
+    return timestamp.astimezone(ZoneInfo("Asia/Seoul")).date().isoformat()
+
+
+def sheets_deliver(args: argparse.Namespace) -> int:
+    config, adapter, _ = _live_sheets(args)
+    from .handoffs import OperationOutcome, SheetHandoffService
+    from .sheets.base import DeliveryOutcome, MetadataState, SafeCode
+    from .sheets.schema import (
+        WORKPLACE_ORACLE_FINGERPRINT,
+        schema_metadata_value,
+    )
+
+    now = datetime.now(UTC).isoformat()
+    expires_at = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
+    controls_fingerprint = _request_sha256(
+        {
+            "schema": WORKPLACE_ORACLE_FINGERPRINT,
+            "controls": schema_metadata_value(),
+        }
+    )
+    with Storage.open(config.database_path) as storage:
+        service = SheetHandoffService(storage)
+        target_id = _live_target_binding(service, config, now=now, oracle_fingerprint=WORKPLACE_ORACLE_FINGERPRINT)
+        export_id, payload_sha256, values = _handoff_projection(storage, args.handoff_id)
+        lease = service.acquire_initial(
+            args.handoff_id,
+            operation_kind="delivery",
+            target_binding_id=target_id,
+            now=now,
+            expires_at=expires_at,
+        )
+        if lease is None:
+            _print({"status": "not_acquired"})
+            return 0
+        prepared = adapter.prepare_delivery(export_id=export_id, canonical_sha256=payload_sha256, values=values)
+        request_sha = prepared.request_sha256
+        preflight: Literal["exact", "absent", "conflict"] = (
+            "exact"
+            if prepared.metadata is MetadataState.EXACT
+            else ("conflict" if prepared.metadata in {MetadataState.DUPLICATE, MetadataState.CONFLICT} else "absent")
+        )
+        if not service.record_preflight(lease, outcome=preflight, now=now):
+            raise RuntimeError("sheet mutation lease was lost after preflight")
+        if prepared.metadata is MetadataState.EXACT:
+            if not service.finish(lease, outcome="reused", now=now):
+                raise RuntimeError("sheet preflight lease was lost")
+            _print({"status": "delivered", "reused": True})
+            return 0
+        if prepared.metadata in {MetadataState.DUPLICATE, MetadataState.CONFLICT}:
+            outcome: OperationOutcome = (
+                "duplicate_metadata" if prepared.metadata is MetadataState.DUPLICATE else "conflicting_metadata"
+            )
+            if not service.finish(lease, outcome=outcome, now=now):
+                raise RuntimeError("sheet preflight lease was lost")
+            _print({"safe_code": SafeCode.METADATA_CONFLICT.value, "status": "blocked"})
+            return 0
+        attestation = adapter.dispatch_credential_attestation()
+        adapter.arm_prepared_dispatch()
+        dispatch_at = datetime.now(UTC).isoformat()
+        if not service.mark_possibly_sent(
+            lease,
+            request_sha256=request_sha,
+            oracle_fingerprint=WORKPLACE_ORACLE_FINGERPRINT,
+            controls_fingerprint=controls_fingerprint,
+            credential_refreshed_at=attestation.refreshed_at,
+            credential_expires_at=attestation.expires_at,
+            credential_scope_ok=attestation.scope_ok,
+            now=dispatch_at,
+        ):
+            raise RuntimeError("sheet mutation lease was lost before dispatch")
+        result = adapter.dispatch_prepared(prepared)
+        settled_at = datetime.now(UTC).isoformat()
+        if result.metadata is not None:
+            probe_outcome = cast(
+                Literal["exact", "absent", "duplicate", "conflict", "unavailable"],
+                {
+                    MetadataState.EXACT: "exact",
+                    MetadataState.ABSENT: "absent",
+                    MetadataState.DUPLICATE: "duplicate",
+                    MetadataState.CONFLICT: "conflict",
+                }[result.metadata],
+            )
+            if not service.record_probe(lease, outcome=probe_outcome, now=settled_at):
+                raise RuntimeError("sheet mutation probe evidence was lost")
+        if result.outcome is DeliveryOutcome.APPLIED:
+            if not service.finish(lease, outcome="applied", now=settled_at):
+                raise RuntimeError("sheet mutation lease was lost before settlement")
+            _print({"status": "delivered", "reused": False})
+        elif result.outcome is DeliveryOutcome.AMBIGUOUS:
+            if not service.release_possibly_sent(lease, now=settled_at):
+                raise RuntimeError("sheet mutation lease was lost before ambiguity release")
+            _print({"status": "ambiguous"})
+        elif result.metadata is not None:
+            outcome = "duplicate_metadata" if result.metadata is MetadataState.DUPLICATE else "conflicting_metadata"
+            if not service.finish(lease, outcome=outcome, now=settled_at):
+                raise RuntimeError("sheet mutation lease was lost before conflict settlement")
+            _print(
+                {
+                    "safe_code": result.safe_code.value if result.safe_code else None,
+                    "status": "blocked",
+                }
+            )
+        else:
+            retryable = result.outcome is DeliveryOutcome.NOT_APPLIED
+            if not service.settle_trusted_rejection(
+                lease,
+                retryable=retryable,
+                safe_code=(result.safe_code.value if result.safe_code is not None else SafeCode.AMBIGUOUS.value),
+                now=settled_at,
+                retry_at=(
+                    (
+                        datetime.fromisoformat(settled_at) + timedelta(seconds=result.retry_after_seconds or 1)
+                    ).isoformat()
+                    if retryable
+                    else None
+                ),
+            ):
+                raise RuntimeError("sheet mutation rejection evidence was lost")
+            _print(
+                {
+                    "safe_code": result.safe_code.value if result.safe_code else None,
+                    "status": "retryable" if retryable else "blocked",
+                }
+            )
+    return 0
+
+
+def sheets_retry_blocked(args: argparse.Namespace) -> int:
+    config = _config(args)
+    from .handoffs import SheetHandoffService
+
+    now = datetime.now(UTC).isoformat()
+    with Storage.open(config.database_path) as storage:
+        corrected = SheetHandoffService(storage).retry_blocked(
+            args.operation_id,
+            now=now,
+        )
+    _print({"status": "retryable" if corrected else "not_corrected"})
+    return 0
+
+
+def sheets_reconcile(args: argparse.Namespace) -> int:
+    config, adapter, email = _live_sheets(args)
+    from .handoffs import OperationOutcome, SheetHandoffService
+    from .sheets.base import MetadataState, SafeCode
+    from .sheets.schema import delivery_metadata_value
+
+    now = datetime.now(UTC).isoformat()
+    expires_at = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
+    with Storage.open(config.database_path) as storage:
+        operation = storage.fetch_one(
+            "SELECT o.id AS operation_id,o.operation_kind,"
+            "o.last_fence_version AS expected_fence,"
+            "h.canonical_bytes,h.canonical_sha256 "
+            "FROM sheet_remote_operations o "
+            "LEFT JOIN sheet_handoffs h ON h.id=o.handoff_id "
+            "WHERE o.id=? AND o.operation_kind IN ('delivery','bootstrap')",
+            (args.operation_id,),
+        )
+        if operation is None:
+            raise LookupError("unknown sheet operation")
+        export_id: str | None = None
+        if operation["operation_kind"] == "delivery":
+            try:
+                export_id = json.loads(bytes(operation["canonical_bytes"]).decode("utf-8"))["export_id"]
+            except (
+                KeyError,
+                TypeError,
+                UnicodeDecodeError,
+                json.JSONDecodeError,
+            ) as error:
+                raise ValueError("invalid immutable sheet handoff") from error
+            if not isinstance(export_id, str):
+                raise ValueError("invalid immutable sheet handoff")
+        service = SheetHandoffService(storage)
+        lease = service.acquire_probe(
+            args.operation_id,
+            expected_fence=int(operation["expected_fence"]),
+            now=now,
+            expires_at=expires_at,
+        )
+        if lease is None:
+            _print({"status": "not_acquired"})
+            return 0
+        if operation["operation_kind"] == "bootstrap":
+            probe = adapter.probe_bootstrap(service_account_email=email)
+        else:
+            assert export_id is not None
+            probe = adapter.probe(metadata_value=delivery_metadata_value(export_id, str(operation["canonical_sha256"])))
+        settled_at = datetime.now(UTC).isoformat()
+        if probe.safe_code is SafeCode.AMBIGUOUS:
+            probe_outcome: Literal["exact", "absent", "duplicate", "conflict", "unavailable"] = "unavailable"
+        elif probe.metadata is MetadataState.EXACT:
+            probe_outcome = "exact"
+        elif probe.metadata is MetadataState.DUPLICATE:
+            probe_outcome = "duplicate"
+        elif probe.metadata is MetadataState.CONFLICT:
+            probe_outcome = "conflict"
+        else:
+            probe_outcome = "absent"
+        if not service.record_probe(lease, outcome=probe_outcome, now=settled_at):
+            raise RuntimeError("sheet probe lease was lost before observation")
+        if probe_outcome == "exact":
+            if not service.finish(lease, outcome="applied", now=settled_at):
+                raise RuntimeError("sheet probe lease was lost before settlement")
+            status = "ready" if operation["operation_kind"] == "bootstrap" else "delivered"
+        elif probe_outcome in {"duplicate", "conflict"}:
+            outcome: OperationOutcome
+            if operation["operation_kind"] == "bootstrap":
+                outcome = "schema_conflict"
+            else:
+                outcome = "duplicate_metadata" if probe_outcome == "duplicate" else "conflicting_metadata"
+            if not service.finish(lease, outcome=outcome, now=settled_at):
+                raise RuntimeError("sheet probe lease was lost before settlement")
+            status = "blocked"
+        else:
+            unresolved: Literal["absent", "unavailable"] = "absent" if probe_outcome == "absent" else "unavailable"
+            if not service.release_probe_unresolved(lease, outcome=unresolved, now=settled_at):
+                raise RuntimeError("sheet probe lease was lost before release")
+            status = "ambiguous"
+    _print(
+        {
+            "safe_code": probe.safe_code.value if probe.safe_code is not None else None,
+            "status": status,
+        }
+    )
     return 0
 
 
@@ -814,7 +1220,6 @@ def build_parser() -> argparse.ArgumentParser:
     fixture.add_argument("--fixture", type=Path, required=True)
     fixture.add_argument("--db", type=Path)
     fixture.add_argument("--page-count", type=int, choices=range(1, 9))
-    fixture.add_argument("--output", type=Path)
     fixture.add_argument(
         "--scripted-approve", action="store_true", help="apply scripted selection and review callbacks"
     )
@@ -829,17 +1234,12 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_command.add_argument("--run-id", type=int, required=True)
     inspect_command.set_defaults(handler=show_inspect)
 
-    repair = commands.add_parser("repair-exports", help="repair missing verified Markdown exports")
-    repair.add_argument("--db", type=Path)
-    repair.add_argument("--output", type=Path)
-    repair.set_defaults(handler=repair_exports)
     auth = commands.add_parser("auth-telethon", help="interactively authorize an owner-only local Telethon session")
     auth.set_defaults(handler=auth_telethon)
 
     rank_command = commands.add_parser("rank", help="rank durable local observations without a provider")
     rank_command.add_argument("--config", type=Path, default=Path("config/channels.toml"))
     rank_command.add_argument("--db", type=Path)
-    rank_command.add_argument("--output", type=Path)
     rank_command.set_defaults(handler=rank)
 
     fixture_reconcile = commands.add_parser("reconcile", help="perform bounded fixture recovery into local ranking")
@@ -847,7 +1247,6 @@ def build_parser() -> argparse.ArgumentParser:
     fixture_reconcile.add_argument("--fixture", type=Path, required=True)
     fixture_reconcile.add_argument("--channel", required=True)
     fixture_reconcile.add_argument("--db", type=Path)
-    fixture_reconcile.add_argument("--output", type=Path)
     fixture_range_mode = fixture_reconcile.add_mutually_exclusive_group()
     fixture_range_mode.add_argument("--lookback-hours", type=int)
     fixture_range_mode.add_argument("--from-id", type=int)
@@ -859,7 +1258,6 @@ def build_parser() -> argparse.ArgumentParser:
     live = commands.add_parser("collect-live", help="collect a durable page from each configured Telethon channel")
     live.add_argument("--config", type=Path, default=Path("config/channels.toml"))
     live.add_argument("--db", type=Path)
-    live.add_argument("--output", type=Path)
     live.add_argument("--lookback-hours", type=int, default=24)
     live.add_argument("--page-size", type=int, default=100)
     live.add_argument("--max-pages", type=int, default=10)
@@ -868,7 +1266,6 @@ def build_parser() -> argparse.ArgumentParser:
     reconcile = commands.add_parser("reconcile-live", help="perform bounded durable Telethon reconciliation")
     reconcile.add_argument("--config", type=Path, default=Path("config/channels.toml"))
     reconcile.add_argument("--db", type=Path)
-    reconcile.add_argument("--output", type=Path)
     reconcile.add_argument("--channel", required=True)
     range_mode = reconcile.add_mutually_exclusive_group()
     range_mode.add_argument("--lookback-hours", type=int)
@@ -881,7 +1278,6 @@ def build_parser() -> argparse.ArgumentParser:
     generate = commands.add_parser("generate-pending", help="lease and generate one selected queued candidate")
     generate.add_argument("--config", type=Path, default=Path("config/channels.toml"))
     generate.add_argument("--db", type=Path)
-    generate.add_argument("--output", type=Path)
     generate.add_argument("--candidate-id", type=int, required=True)
     generate.add_argument("--provider", choices=("fake", "openai_compatible"), required=True)
     generate.add_argument("--fixture-only", action="store_true")
@@ -904,7 +1300,6 @@ def build_parser() -> argparse.ArgumentParser:
     poll = commands.add_parser("poll-approvals", help="poll Telegram callback updates once")
     poll.add_argument("--config", type=Path, default=Path("config/channels.toml"))
     poll.add_argument("--db", type=Path)
-    poll.add_argument("--output", type=Path)
     poll.add_argument("--offset", type=int)
     poll.add_argument("--timeout", type=int, choices=range(0, 51), default=0)
     poll.add_argument("--process-generation", action="store_true")
@@ -912,6 +1307,26 @@ def build_parser() -> argparse.ArgumentParser:
     poll.add_argument("--fixture-only", action="store_true")
     poll.add_argument("--page-count", type=int, choices=range(1, 9))
     poll.set_defaults(handler=poll_approvals)
+    for name, handler, help_text in (
+        ("sheets-validate", sheets_validate, "validate the fixed workplace Sheets schema"),
+        ("sheets-bootstrap", sheets_bootstrap, "validate and bind the fixed workplace Sheets target"),
+        ("sheets-status", sheets_status, "show redacted workplace delivery operation counts"),
+        ("sheets-deliver", sheets_deliver, "deliver one immutable approved handoff"),
+        ("sheets-reconcile", sheets_reconcile, "probe one possibly-sent Sheets operation"),
+        (
+            "sheets-retry-blocked",
+            sheets_retry_blocked,
+            "audit a corrected not-applied Sheets blocker",
+        ),
+    ):
+        command = commands.add_parser(name, help=help_text)
+        command.add_argument("--config", type=Path, default=Path("config/channels.toml"))
+        command.add_argument("--db", type=Path)
+        if name == "sheets-deliver":
+            command.add_argument("--handoff-id", type=int, required=True)
+        elif name in {"sheets-reconcile", "sheets-retry-blocked"}:
+            command.add_argument("--operation-id", type=int, required=True)
+        command.set_defaults(handler=handler)
     return parser
 
 

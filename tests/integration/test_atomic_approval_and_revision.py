@@ -1,17 +1,21 @@
 import asyncio
 import json
+import sqlite3
 from datetime import UTC, datetime
+
+import pytest
 
 from newsbot.ai.fake import FakeGenerationProvider
 from newsbot.approval.scripted import ScriptedAction, ScriptedApprovalAdapter
 from newsbot.candidates import CandidateApprovalService
 from newsbot.exports import generation_claim_payload
+from newsbot.handoffs import SheetHandoffService
 from newsbot.pipeline import NewsPipeline
 from newsbot.runtime import FixtureClock
 from newsbot.storage import Storage
 
 
-def _review_state(storage: Storage, *, pages: int = 2) -> tuple[int, int, int]:
+def _review_state(storage: Storage, *, pages: int = 2, category: str | None = "AI") -> tuple[int, int, int]:
     with storage.transaction() as connection:
         connection.execute("INSERT INTO runs(run_key, mode, status) VALUES ('atomic', 'fixture', 'done')")
         connection.execute("INSERT INTO source_posts(channel_id, external_post_id) VALUES ('channel', '1')")
@@ -72,6 +76,7 @@ def _review_state(storage: Storage, *, pages: int = 2) -> tuple[int, int, int]:
         content = {
             "draft": True,
             "source_reported": True,
+            **({"category": category} if category is not None else {}),
             "cover": {
                 "title": "Title",
                 "subtitle": "",
@@ -118,8 +123,19 @@ def _review_state(storage: Storage, *, pages: int = 2) -> tuple[int, int, int]:
 
 
 def _service(storage: Storage) -> CandidateApprovalService:
+    target_binding_id = SheetHandoffService(storage).ensure_binding(
+        binding_key="workplace",
+        spreadsheet_id="sheet",
+        sheet_id=0,
+        oracle_fingerprint="a" * 64,
+        now="2026-07-29T00:00:00+00:00",
+    )
     return CandidateApprovalService(
-        storage, chat_id=1, authorized_user_ids={2}, now=FixtureClock(datetime(2026, 7, 29, tzinfo=UTC)).now
+        storage,
+        chat_id=1,
+        authorized_user_ids={2},
+        now=FixtureClock(datetime(2026, 7, 29, tzinfo=UTC)).now,
+        sheet_target_binding_id=target_binding_id,
     )
 
 
@@ -133,24 +149,80 @@ def _button(
     )
 
 
-def test_approval_commits_recoverable_outbox_before_files(tmp_path) -> None:
+def test_approval_commits_exactly_one_sheet_handoff_without_files(tmp_path) -> None:
     storage = Storage.open(":memory:")
     candidate_id, generation_id, source_id = _review_state(storage)
     service = _service(storage)
-    assert (
-        ScriptedApprovalAdapter(service)
-        .apply(ScriptedAction(_button(service, candidate_id, generation_id, source_id, "approve_handoff"), 1, 2))
-        .status
-        == "approved"
-    )
+    token = _button(service, candidate_id, generation_id, source_id, "approve_handoff")
+    adapter = ScriptedApprovalAdapter(service)
+    assert adapter.apply(ScriptedAction(token, 1, 2)).status == "approved"
+    assert adapter.apply(ScriptedAction(token, 1, 2)).status == "duplicate"
     assert storage.fetch_one("SELECT status FROM candidates WHERE id=?", (candidate_id,))["status"] == "approved"
-    assert (
-        storage.fetch_one(
-            "SELECT COUNT(*) AS n FROM export_outbox WHERE generation_id=? AND status='pending'", (generation_id,)
-        )["n"]
-        == 2
+    handoff = storage.fetch_one(
+        "SELECT category, canonical_bytes FROM sheet_handoffs WHERE generation_id=?",
+        (generation_id,),
     )
+    assert handoff["category"] == "AI"
+    assert json.loads(bytes(handoff["canonical_bytes"]))["category"] == "AI"
+    decision = storage.fetch_one("SELECT payload_json FROM decision_events WHERE decision='approve_handoff'")
+    assert json.loads(decision["payload_json"])["category"] == "AI"
+    assert storage.fetch_one("SELECT COUNT(*) AS n FROM sheet_handoffs")["n"] == 1
+    binding = storage.fetch_one(
+        "SELECT b.target_binding_id FROM sheet_handoff_bindings b "
+        "JOIN sheet_handoffs h ON h.id=b.handoff_id WHERE h.generation_id=?",
+        (generation_id,),
+    )
+    assert binding is not None
+    assert service.sheet_target_binding_id is not None
+    assert int(binding["target_binding_id"]) == service.sheet_target_binding_id
+    assert storage.fetch_one("SELECT COUNT(*) AS n FROM export_outbox")["n"] == 0
     assert not list(tmp_path.iterdir())
+
+
+def test_approval_binding_failure_rolls_back_and_target_cannot_rebind() -> None:
+    storage = Storage.open(":memory:")
+    candidate_id, generation_id, source_id = _review_state(storage)
+    unbound = CandidateApprovalService(
+        storage,
+        chat_id=1,
+        authorized_user_ids={2},
+        now=FixtureClock(datetime(2026, 7, 29, tzinfo=UTC)).now,
+        sheet_target_binding_id=9999,
+    )
+    token = _button(unbound, candidate_id, generation_id, source_id, "approve_handoff")
+
+    with pytest.raises(sqlite3.IntegrityError):
+        unbound.apply(token, chat_id=1, user_id=2)
+
+    assert storage.fetch_one("SELECT COUNT(*) AS n FROM decision_events")["n"] == 0
+    assert storage.fetch_one("SELECT COUNT(*) AS n FROM sheet_handoffs")["n"] == 0
+
+    target_service = SheetHandoffService(storage)
+    target_service.ensure_binding(
+        binding_key="workplace",
+        spreadsheet_id="sheet",
+        sheet_id=0,
+        oracle_fingerprint="a" * 64,
+        now="2026-07-29T00:00:00+00:00",
+    )
+    with pytest.raises(ValueError, match="immutable"):
+        target_service.ensure_binding(
+            binding_key="workplace",
+            spreadsheet_id="other-sheet",
+            sheet_id=0,
+            oracle_fingerprint="a" * 64,
+            now="2026-07-29T00:00:01+00:00",
+        )
+
+
+def test_missing_category_cannot_commit_a_decision_or_handoff() -> None:
+    storage = Storage.open(":memory:")
+    candidate_id, generation_id, source_id = _review_state(storage, category=None)
+    service = _service(storage)
+    token = _button(service, candidate_id, generation_id, source_id, "approve_handoff")
+    assert service.apply(token, chat_id=1, user_id=2).status == "stale"
+    assert storage.fetch_one("SELECT COUNT(*) AS n FROM decision_events")["n"] == 0
+    assert storage.fetch_one("SELECT COUNT(*) AS n FROM sheet_handoffs")["n"] == 0
 
 
 def test_regenerate_supersedes_old_review_and_keeps_one_current_generation() -> None:
@@ -173,7 +245,7 @@ def test_page_successor_persists_the_bounded_intent_across_retry() -> None:
     assert service.apply(increment, chat_id=1, user_id=2).status == "queued"
     with storage.transaction() as connection:
         connection.execute("UPDATE generation_jobs SET status='failed_recoverable' WHERE status='queued'")
-    pipeline = NewsPipeline(storage, object(), ".", FakeGenerationProvider(), FixtureClock())
+    pipeline = NewsPipeline(storage, object(), FakeGenerationProvider(), FixtureClock())
     generated = asyncio.run(pipeline.generate_selected(candidate_id, page_count=1))
     assert generated.draft.page_count == 3
     assert (
@@ -196,7 +268,7 @@ def test_terminal_edit_retains_approved_attempt_and_allows_one_new_attempt() -> 
             "INSERT INTO source_post_versions(source_post_id, version_key, body) VALUES (?, 'v2', 'edited')", (post_id,)
         )
         replacement = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
-    pipeline = NewsPipeline(storage, object(), ".", lambda: None, FixtureClock())
+    pipeline = NewsPipeline(storage, object(), lambda: None, FixtureClock())
     pipeline._invalidate_revised_candidates(1, {("channel", "1"): replacement})
     assert storage.fetch_one("SELECT status FROM candidates WHERE id=?", (candidate_id,))["status"] == "approved"
     assert storage.fetch_one("SELECT status FROM generations WHERE id=?", (generation_id,))["status"] == "current"

@@ -63,7 +63,7 @@ def test_fixture_engagement_snapshot_creates_a_new_reranked_evaluation_without_s
     config = _pipeline_config()
     clock = FixtureClock(NOW)
     with Storage.open(tmp_path / "newsbot.sqlite") as storage:
-        pipeline = NewsPipeline(storage, config, tmp_path, FakeGenerationProvider(), clock)
+        pipeline = NewsPipeline(storage, config, FakeGenerationProvider(), clock)
         service = CandidateApprovalService(storage, chat_id=1, authorized_user_ids={1}, now=clock.now)
         initial = asyncio.run(
             pipeline.run_fixture(SimpleNamespace(collect=lambda: (first, second)), approval_service=service, actor_id=1)
@@ -139,7 +139,7 @@ def test_material_edit_marks_bound_candidate_stale(tmp_path):
             )
             changed_version = persist_observation(connection, changed, NOW + timedelta(minutes=1))
 
-        pipeline = NewsPipeline(storage, object(), tmp_path, FakeGenerationProvider(), FixtureClock(NOW))
+        pipeline = NewsPipeline(storage, object(), FakeGenerationProvider(), FixtureClock(NOW))
         pipeline._invalidate_revised_candidates(1, {("source", "100"): changed_version})
 
         assert changed_version != original_version

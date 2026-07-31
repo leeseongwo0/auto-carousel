@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "kind": "api-package-test-report",
+  "surface": "Google Sheets delivery adapter, SQLite authority, and CLI integration",
+  "sourceHash": "sha256:17134c8872cab9ce7a4e211a185357b1245372acdd6567911cd224f54be4d13f",
+  "commands": [
+    ".venv/bin/ruff check src tests",
+    ".venv/bin/mypy src",
+    ".venv/bin/pytest -q",
+    "focused SQLite fencing/crash-recovery, adapter placement/redaction, CLI, fixture, and approval tests",
+    "base optional-import isolation plus focused fixture/approval tests",
+    "uv lock --check and pip-audit over frozen third-party requirements",
+    "newsbot sheets-bootstrap against the configured fixed workplace target",
+    "newsbot sheets-validate and sheets-status against the configured fixed workplace target"
+  ],
+  "results": {
+    "ruff": "passed",
+    "mypy": "passed: 28 source files",
+    "pytest": "passed: 171 tests",
+    "focusedSecurityAndRecovery": "passed",
+    "baseEnvironment": "passed: Google client modules absent; 10 focused tests passed",
+    "dependencyAudit": "passed: no known vulnerabilities",
+    "liveBootstrap": "ready, exact controls reused without mutation",
+    "liveValidation": "valid",
+    "liveStatus": "one settled bootstrap operation; no open operations or handoffs"
+  },
+  "adversarialCoverage": [
+    "immutable settlement records enforce a closed outcome/kind-to-subject/lease matrix and exact operation/fence/timestamp partnership; operation-only and self-consistent mismatched direct-SQL transactions roll back",
+    "terminal outcomes are bound to exact preflight/probe evidence in both service and SQL; absent/conflict preflight cannot settle reused and mismatched probe evidence cannot finalize applied",
+    "SQLite settlement requires the same-fence finalized event safe code to equal the terminal outcome; coherent direct-SQL conflict-evidence-to-reused forgery rolls back exactly and remains unchanged after reopen",
+    "trusted rejection taxonomy is closed in service and SQL: only aborted/rate_limited are retryable; definitive permission/auth/request/template/metadata/not-found codes are blocked; both mismatch directions roll back and reopen unchanged",
+    "bounded Retry-After parsing is invoked only for trusted 429 and rejects overlong numeric or date-like input; 409/403 never read the header, and all invalid 429 values fail closed to ambiguity",
+    "one deterministic Python/SQLite aware_epoch_us parser governs retry, acquisition, lease expiry, events, probes, and settlements; past, equal, malformed, impossible-date, timezone-naive, offset-equivalent, and earlier-event forgeries roll back atomically",
+    "expired pre-marker owners are abandoned before reacquisition, and offset-equivalent post-expiry dispatch is rejected in both service and direct SQL",
+    "post-marker absence never restores mutation eligibility",
+    "dispatch CAS requires one immutable same-fence preflight decision ordered within the active lease and at or before dispatch; only preflight_absent may authorize send, plus exact bound oracle/control fingerprints, ready/configuring bootstrap state, prepared request hash, credential scope, refresh ordering, and at least 255 seconds of remaining lifetime; future/post-expiry preflight and every missing/stale/mismatched attestation reject before send",
+    "post-send exact metadata proof and duplicate/conflict settlement",
+    "a successful bootstrap mutation followed by failed exact-control verification remains permanently ambiguous rather than being misclassified as not applied",
+    "fresh workers retire expired mutate leases ownerlessly before probe fence rotation; delivery and bootstrap crash recovery both settle from exact read-only proof",
+    "sheets-reconcile handles ambiguous bootstrap controls: exact proof settles ready, conflict blocks, and absent/unavailable remains ambiguous",
+    "audited operator_corrected events reopen only allowlisted settled-not-applied delivery/bootstrap blockers with no open operation; unsafe or unaudited blocked-to-retryable transitions are rejected",
+    "approval atomically inserts the immutable handoff and its pre-created fixed workplace target binding; a deferred composite foreign key makes the binding mandatory at commit, binding failure rolls back the decision and handoff, delivery cannot repair an unbound row, and configuration cannot create a second workplace target",
+    "numbered migration 004 atomically upgrades the supported applied-003 authority shape, preserves handoff/operation/event/lease history, validates foreign keys before recording its receipt and committing, and supports post-upgrade reconciliation, approval, and acquisition; exact table, trigger, and partial-unique-index fingerprinting rejects unsupported historical authority shapes before mutation or receipt",
+    "the mutation transport guards the low-level connection request itself, so httplib2 internal reconnect/retry loops cannot issue a second POST after an applied request loses its response",
+    "offline append placement at the next nonblank value row while preserving validations",
+    "literal blank rows, capacity, row-4 drift, human edits, and zero-write marker reuse",
+    "structured error redaction covers credential initialization and pre-dispatch reads through the CLI boundary; the credential file is read exactly once and its identity and adapter are derived from the same validated in-memory snapshot, optional Google imports remain isolated, fixture networking is denied, and no ordinary result files are produced"
+  ],
+  "limitations": [
+    "No synthetic manuscript row was appended to the user's production spreadsheet. Live evidence is limited to write-safe exact-control bootstrap reuse, validation, and redacted status. Offline API-shaped tests prove atomic metadata-plus-append placement and zero-write reuse. The approved disposable live append canary still requires a separately provisioned disposable spreadsheet target."
+  ]
+}

@@ -107,7 +107,7 @@ def test_terminal_revision_supersedes_jobs_and_preserves_old_generation() -> Non
         connection.execute("UPDATE candidates SET status='approved' WHERE id=?", (candidate_id,))
 
     # The pipeline's invalidation is deliberately source-version based: engagement-only snapshots create no version.
-    pipeline = NewsPipeline(storage, object(), ".", lambda: None, FixtureClock())
+    pipeline = NewsPipeline(storage, object(), lambda: None, FixtureClock())
     pipeline._invalidate_revised_candidates(1, {("source", "two"): versions[1]})
     assert storage.fetch_one("SELECT status FROM candidates WHERE id=?", (candidate_id,))["status"] == "approved"
     assert storage.fetch_one("SELECT status FROM generations WHERE id=?", (generation_id,))["status"] == "current"
@@ -147,7 +147,7 @@ def test_material_edit_invalidates_nonterminal_candidate_from_an_older_run() -> 
         connection.execute("INSERT INTO runs(run_key, mode, status) VALUES ('revision-2', 'fixture', 'done')")
         second_run_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
 
-    pipeline = NewsPipeline(storage, object(), ".", lambda: None, FixtureClock())
+    pipeline = NewsPipeline(storage, object(), lambda: None, FixtureClock())
     pipeline._invalidate_revised_candidates(second_run_id, {("source", "two"): replacement_observation})
 
     assert storage.fetch_one("SELECT status FROM candidates WHERE id=?", (candidate_id,))["status"] == "superseded"

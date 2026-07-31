@@ -21,20 +21,15 @@ class ConfigError(ValueError):
 
 class Capability(StrEnum):
     INIT_DB = "init-db"
-    STATUS = "status"
-    INSPECT = "inspect"
-    REPAIR_EXPORTS = "repair-exports"
     FIXTURE_RUN = "fixture-run"
-    FIXTURE_RECONCILE = "fixture-reconcile"
+    GENERATE_FAKE = "generate-fake"
     AUTH_TELETHON = "auth-telethon"
     LIVE_COLLECTION = "live-collection"
     LIVE_RECONCILE = "live-reconcile"
-    RANK = "rank"
     NOTIFY_CANDIDATES = "notify-candidates"
     APPROVE_POLL = "approve-poll"
-    GENERATE_FAKE = "generate-fake"
     GENERATE_OPENAI = "generate-openai"
-
+    LIVE_SHEETS = "live-sheets"
 
 _CHANNEL_KEYS = frozenset(
     {
@@ -189,9 +184,9 @@ class AppConfig:
     channels: tuple[ChannelConfig, ...]
     policy: PolicyConfig
     database_path: Path
-    output_dir: Path
+    google_service_account_file: Path | None
+    google_sheets_spreadsheet_id: str | None
     config_path: Path
-
     @property
     def enabled_channels(self) -> tuple[ChannelConfig, ...]:
         return tuple(channel for channel in self.channels if channel.enabled)
@@ -481,12 +476,22 @@ def load_config(
         or env.get("NEWSBOT_DATABASE")
         or "data/newsbot.sqlite"
     )
-    output = overrides.get("output_dir") or env.get("NEWSBOT_OUTPUT_DIR") or "output"
+    service_account_file = (
+        overrides.get("google_service_account_file")
+        or env.get("GOOGLE_SERVICE_ACCOUNT_FILE")
+    )
+    spreadsheet_id = (
+        overrides.get("google_sheets_spreadsheet_id")
+        or env.get("GOOGLE_SHEETS_SPREADSHEET_ID")
+    )
+    if spreadsheet_id is not None:
+        spreadsheet_id = str(spreadsheet_id).strip() or None
     return AppConfig(
         channels=channels,
         policy=_parse_policy(raw.get("policy")),
         database_path=Path(database),
-        output_dir=Path(output),
+        google_service_account_file=Path(service_account_file) if service_account_file else None,
+        google_sheets_spreadsheet_id=spreadsheet_id,
         config_path=config_path,
     )
 
@@ -503,6 +508,7 @@ def validate_capabilities(
         Capability.NOTIFY_CANDIDATES: ("TELEGRAM_BOT_TOKEN", "NEWSBOT_APPROVER_CHAT_ID", "NEWSBOT_APPROVER_USER_IDS"),
         Capability.APPROVE_POLL: ("TELEGRAM_BOT_TOKEN", "NEWSBOT_APPROVER_CHAT_ID", "NEWSBOT_APPROVER_USER_IDS"),
         Capability.GENERATE_OPENAI: ("OPENAI_BASE_URL", "OPENAI_API_KEY", "OPENAI_MODEL", "OPENAI_TIMEOUT_SECONDS"),
+        Capability.LIVE_SHEETS: ("GOOGLE_SERVICE_ACCOUNT_FILE", "GOOGLE_SHEETS_SPREADSHEET_ID"),
     }
     env = os.environ if environ is None else environ
     missing = sorted(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import secrets
 import stat
@@ -99,6 +100,59 @@ def read_private_bytes(path: str | Path) -> bytes:
 
 def read_private_text(path: str | Path, *, encoding: str = "utf-8") -> str:
     return read_private_bytes(path).decode(encoding)
+
+
+def read_service_account_info(path: str | Path) -> dict[str, str]:
+    """Read and validate service-account JSON once through a hardened descriptor."""
+    credential_path = Path(path)
+    parent_info = _lstat(credential_path.parent, directory=True)
+    if stat.S_IMODE(parent_info.st_mode) != 0o700:
+        raise SecretFileError("unsafe service-account directory")
+    credential_info = _lstat(credential_path)
+    if stat.S_IMODE(credential_info.st_mode) != 0o600:
+        raise SecretFileError("unsafe service-account file")
+    try:
+        raw = read_private_bytes(credential_path)
+        if len(raw) > 64 * 1024:
+            raise ValueError
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise SecretFileError("invalid service-account credentials") from error
+    required = {
+        "type",
+        "project_id",
+        "private_key_id",
+        "private_key",
+        "client_email",
+        "client_id",
+        "auth_uri",
+        "token_uri",
+        "auth_provider_x509_cert_url",
+        "client_x509_cert_url",
+        "universe_domain",
+    }
+    if not isinstance(value, dict) or set(value) != required:
+        raise SecretFileError("invalid service-account credentials")
+    if value["type"] != "service_account":
+        raise SecretFileError("invalid service-account credentials")
+    if any(not isinstance(value[key], str) or not value[key] for key in required - {"type"}):
+        raise SecretFileError("invalid service-account credentials")
+    if not value["private_key"].startswith("-----BEGIN PRIVATE KEY-----\n") or not value["private_key"].endswith(
+        "-----END PRIVATE KEY-----\n"
+    ):
+        raise SecretFileError("invalid service-account credentials")
+    if not value["client_email"].endswith(".gserviceaccount.com"):
+        raise SecretFileError("invalid service-account credentials")
+    if value["token_uri"] != "https://oauth2.googleapis.com/token":
+        raise SecretFileError("invalid service-account credentials")
+    return {str(key): str(item) for key, item in value.items()}
+
+
+def validate_service_account_file(path: str | Path) -> Path:
+    """Validate a private Google service-account JSON file."""
+    credential_path = Path(path)
+    read_service_account_info(credential_path)
+    return credential_path
 
 
 def write_private_bytes(path: str | Path, data: bytes) -> None:

@@ -66,7 +66,7 @@ def test_fixture_run_is_offline_and_idempotent(tmp_path, monkeypatch):
     )
     with Storage.open(tmp_path / "newsbot.sqlite") as storage:
         clock = FixtureClock(datetime(2026, 7, 29, 12, tzinfo=UTC))
-        pipeline = NewsPipeline(storage, config, tmp_path / "output", FakeGenerationProvider(), clock)
+        pipeline = NewsPipeline(storage, config, FakeGenerationProvider(), clock)
         service = CandidateApprovalService(storage, chat_id=1, authorized_user_ids={1}, now=clock.now)
 
         first = asyncio.run(pipeline.run_fixture(FixtureCollector(fixture), approval_service=service, actor_id=1))
@@ -136,7 +136,6 @@ def test_scripted_fixture_rerun_reuses_ready_export(tmp_path, capsys, monkeypatc
     root = Path(__file__).parents[2]
     fixture = root / "tests/fixtures/channel_messages.json"
     database = tmp_path / "newsbot.sqlite"
-    output = tmp_path / "output"
     arguments = [
         "run-fixture",
         "--config",
@@ -145,13 +144,13 @@ def test_scripted_fixture_rerun_reuses_ready_export(tmp_path, capsys, monkeypatc
         str(fixture),
         "--db",
         str(database),
-        "--output",
-        str(output),
         "--scripted-approve",
     ]
+    before_files = set(tmp_path.iterdir())
 
     assert main(arguments) == 0
     first = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert set(tmp_path.iterdir()) - before_files == {database}
     with Storage.open(database) as storage:
         counts_before_rerun = {
             table: storage.fetch_one(f"SELECT COUNT(*) AS count FROM {table}")["count"]
@@ -162,12 +161,9 @@ def test_scripted_fixture_rerun_reuses_ready_export(tmp_path, capsys, monkeypatc
                 "selections",
                 "generation_jobs",
                 "generations",
-                "export_outbox",
+                "sheet_handoffs",
                 "pipeline_events",
             )
-        }
-        output_before_rerun = {
-            path.relative_to(output): path.read_bytes() for path in output.rglob("*") if path.is_file()
         }
         assert storage.fetch_one("SELECT COUNT(*) AS count FROM source_post_observations")["count"] > 0
         assert storage.fetch_one("SELECT COUNT(*) AS count FROM collection_cursors")["count"] == 6
@@ -175,9 +171,9 @@ def test_scripted_fixture_rerun_reuses_ready_export(tmp_path, capsys, monkeypatc
 
     assert main(arguments) == 0
     repeated = json.loads(capsys.readouterr().out.splitlines()[-1])
-    assert repeated["status"] == "ready"
+    assert repeated["status"] == "approved"
     assert repeated["reused"] is True
-    assert repeated["export_id"] == first["export_id"]
+    assert repeated["handoff_id"] == first["handoff_id"]
     assert repeated["candidate_count"] == first["candidate_count"]
     assert repeated["digest_id"] == first["digest_id"]
     assert repeated["run_id"] == first["run_id"]
@@ -185,9 +181,6 @@ def test_scripted_fixture_rerun_reuses_ready_export(tmp_path, capsys, monkeypatc
         assert {
             table: storage.fetch_one(f"SELECT COUNT(*) AS count FROM {table}")["count"] for table in counts_before_rerun
         } == counts_before_rerun
-    assert {
-        path.relative_to(output): path.read_bytes() for path in output.rglob("*") if path.is_file()
-    } == output_before_rerun
 
     alternate_fixture = tmp_path / "alternate-fixture.json"
     alternate_fixture.write_bytes(fixture.read_bytes() + b"\n")

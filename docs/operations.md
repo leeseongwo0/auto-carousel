@@ -2,65 +2,75 @@
 
 ## 기본 원칙
 
-모든 상태와 canonical export bytes는 로컬 SQLite에 둔다. fixture 명령은 자격증명과 네트워크가 필요 없다. Telegram과 OpenAI-compatible capability는 해당 명령이 선택될 때만 필요한 환경 변수를 검사한다. 비밀값을 CLI 인수나 로그에 넣지 않는다.
+SQLite가 원고, 승인, Sheets handoff와 원격 작업 이력의 권위다. fixture 명령은 Google 패키지·자격증명·네트워크 없이 동작하며 일반 결과 파일을 만들지 않는다. 비밀값, 스프레드시트 ID, 원고 본문, Google 오류 본문은 로그·SQLite safe code·영수증에 기록하지 않는다.
 
-현재 구현된 credential-free 흐름은 다음과 같다.
+## 환경과 설치
 
 ```bash
-uv run newsbot init-db --db var/e2e/newsbot.db
-uv run newsbot run-fixture --config config/channels.toml --fixture tests/fixtures/channel_messages.json --db var/e2e/newsbot.db --output var/e2e/exports
-uv run newsbot reconcile --config config/channels.toml --fixture tests/fixtures/channel_messages.json --channel exilist_official --lookback-hours 24 --db var/e2e/newsbot.db --output var/e2e/exports
-uv run newsbot rank --config config/channels.toml --db var/e2e/newsbot.db --output var/e2e/exports
-uv run newsbot status --db var/e2e/newsbot.db
-uv run newsbot inspect --db var/e2e/newsbot.db --run-id 1
-uv run newsbot repair-exports --db var/e2e/newsbot.db --output var/e2e/exports
+uv sync --group dev
+uv sync --group dev --extra sheets  # 실계정 Sheets 명령 전용
 ```
-
-기본 `run-fixture`는 live와 같은 durable collection/cursor 경로로 고정 24시간 범위를 저장하고 후보 다이제스트까지만 만든다. `reconcile`은 fixture snapshot을 불변 source version/별도 engagement observation으로 저장하고 후보를 다시 평가한다. `rank`는 이미 저장된 최신 observation만 평가한다. 모두 provider, Telethon import, 네트워크, 자격증명이 없다. `--scripted-approve`는 fixture fake provider로 선택, 생성, 검토 승인, export materialization을 수행한다. 동일 구성에 검증된 `ready` 쌍이 있으면 재실행은 수집·평가·callback·파일을 변경하지 않고 기존 쌍을 반환한다.
-
-## capability별 환경 변수
 
 | 명령 | 필요한 환경 변수 |
 |---|---|
-| `init-db`, `run-fixture`, `reconcile`, `rank`, `status`, `inspect`, `repair-exports` | 없음 |
-| `auth-telethon` | `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_SESSION_PATH` |
-| `collect-live`, `reconcile-live` | `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_SESSION_PATH` |
+| `init-db`, `run-fixture`, `reconcile`, `rank`, `status`, `inspect` | 없음 |
+| `auth-telethon`, `collect-live`, `reconcile-live` | `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_SESSION_PATH` |
 | `notify-candidates`, `notify-review`, `poll-approvals` | `TELEGRAM_BOT_TOKEN`, `NEWSBOT_APPROVER_CHAT_ID`, `NEWSBOT_APPROVER_USER_IDS` |
 | `generate-pending --provider openai_compatible` | `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_TIMEOUT_SECONDS` |
-| `generate-pending --provider fake --fixture-only` | 없음 |
-| `poll-approvals --process-generation --provider openai_compatible` | Bot API 변수와 OpenAI-compatible 변수 모두 |
-| `poll-approvals --process-generation --provider fake --fixture-only` | Bot API 변수만 |
+| `sheets-validate`, `sheets-bootstrap`, `sheets-deliver`, `sheets-reconcile` | `GOOGLE_SHEETS_SPREADSHEET_ID`, `GOOGLE_SERVICE_ACCOUNT_FILE` |
 
-`poll-approvals --process-generation`은 Bot과 선택 provider의 인수·capability를 Telegram import, 네트워크 요청, callback 적용보다 먼저 함께 검증한다. 검토 거절은 terminal이며 이후 `generate-pending`과 `notify-review`가 해당 draft를 다시 노출하지 않는다.
+`GOOGLE_SERVICE_ACCOUNT_FILE`은 소유자 전용 `0700` 디렉터리 안의 소유자 전용 `0600` 일반 JSON 파일이어야 한다. 심볼릭 링크, 그룹/기타 권한, 잘못된 service-account JSON은 Google import나 네트워크 전에 거부된다. 권한 범위는 Sheets 전용이다.
 
-`NEWSBOT_DATABASE`와 `NEWSBOT_OUTPUT_DIR`는 각각 기본 DB와 output 경로를 바꾼다. `--db`와 `--output`은 해당 명령의 환경 값보다 우선한다. `.env.example`의 값은 비어 있으며 fixture에는 환경 변수가 없다.
-
-실제 adapter 명령의 표면은 다음과 같다.
+## Fixture와 승인
 
 ```bash
-uv run newsbot auth-telethon
-uv run newsbot collect-live --config config/channels.toml --db var/live/newsbot.db --output var/live/exports --lookback-hours 24 --page-size 100 --max-pages 10
-uv run newsbot reconcile-live --config config/channels.toml --db var/live/newsbot.db --output var/live/exports --channel testingcatalog --lookback-hours 24 --page-size 100 --max-pages 10
-uv run newsbot reconcile-live --config config/channels.toml --db var/live/newsbot.db --output var/live/exports --channel testingcatalog --from-id 100 --to-id 200 --page-size 100 --max-pages 10
-uv run newsbot generate-pending --config config/channels.toml --db var/live/newsbot.db --output var/live/exports --candidate-id 1 --provider openai_compatible
-uv run newsbot notify-candidates --db var/live/newsbot.db --run-id 1 --actor-id 123456
-uv run newsbot notify-review --db var/live/newsbot.db --candidate-id 1 --generation-id 1 --actor-id 123456
-uv run newsbot poll-approvals --config config/channels.toml --db var/live/newsbot.db --output var/live/exports --timeout 0
-uv run newsbot poll-approvals --config config/channels.toml --db var/live/newsbot.db --output var/live/exports --timeout 0 --process-generation --provider openai_compatible
+uv run newsbot init-db --db var/e2e/newsbot.db
+uv run newsbot run-fixture --config config/channels.toml --fixture tests/fixtures/channel_messages.json --db var/e2e/newsbot.db
+uv run newsbot run-fixture --config config/channels.toml --fixture tests/fixtures/channel_messages.json --db var/e2e/newsbot.db --scripted-approve
+uv run newsbot status --db var/e2e/newsbot.db
+uv run newsbot inspect --db var/e2e/newsbot.db --run-id 1
 ```
 
-`auth-telethon`만 interactive MTProto authorization을 연다. `collect-live`와 `reconcile-live`는 MTProto로 configured channel을 읽는다. session parent는 owner-only로 만들고, 완료 뒤 session은 owner-only regular file이어야 한다. `reconcile`과 `reconcile-live`는 `--channel`과 lookback 또는 정확한 ID range 하나를 받는다. `--from-id`와 `--to-id`는 함께 필요하고 양수이며 `from <= to`; 양 끝은 inclusive다. range mode는 newest-message 조회 없이 지정한 ID 경계와 `--page-size`/`--max-pages` cap 안에서 결정론적으로 page한다.
+`--scripted-approve`는 선택·생성·최종 승인을 수행하고 SQLite에 불변 Sheets handoff를 만든다. 파일 export나 자동 Sheets 전송은 하지 않는다. 생성 category는 원고 내용에서 `AI` 또는 `Blockchain`으로 결정되며 사람이 별도 선택하지 않는다.
 
-## 복구와 점검
+## Sheets 준비와 전달
 
-- `collect-live`는 `collection_intervals`의 fixed floor, upper bound, page/overlap frontier를 저장한다. 각 scan의 실제 capture time을 observation에 기록한다. cap, crash, timeout, 또는 bounded FloodWait 재시도 실패 뒤 같은 명령을 다시 실행하면 미완료 interval에서 계속한다. 한 channel의 live failure는 이미 commit된 progress를 보존하고 다른 channel의 scan/ranking을 막지 않으며 `channel_errors`로 출력한다.
-- `reconcile-live`는 lookback 또는 정확한 inclusive ID range를 `--page-size`와 `--max-pages`로 제한해 수집하고 normal cursor를 변경하지 않는다. cap에 걸린 range는 같은 range 명령을 다시 실행해도 cursor를 바꾸지 않는다.
-- 선택된 generation job은 SQLite lease로 `queued`, `failed_recoverable`, 또는 만료된 `running` 상태에서 하나를 복구해 생성한다. provider 실패는 redacted recoverable failure만 기록하며 draft, approval, outbox를 만들지 않는다. review의 6/24/72시간 연기는 due time 뒤 `poll-approvals`가 `resume_due`로 pending selection/review를 복원하고 해당 digest/draft를 다시 보낸다.
-- callback은 hash와 exact candidate/source-version/draft binding을 검사한다. consume 또는 상태 변경은 sibling callback을 revoke하므로 stale/revoked token은 무해하다. defer는 selection/review stage와 due time을 저장하고, due poll은 source binding이 current일 때만 정확한 digest 또는 current draft callback을 다시 보낸다.
-- fixture와 live reconciliation은 모두 bounded다. `reconcile`과 `reconcile-live`는 대상 `--channel` 하나와 양수 lookback 또는 inclusive positive ID range 하나만 `page_size`/`max_pages` cap 안에서 읽으며 normal cursor를 절대 전진시키지 않는다.
-- `status`와 `inspect --run-id`는 redacted local counter와 run 요약을 출력한다. `[제작]` 전 `provider_calls_before_selection`은 0이다.
-- `repair-exports --db … --output …`는 verified JSON에서 누락된 Markdown만 다시 materialize한다. SQLite canonical bytes/digest와 맞지 않는 파일은 보존하고 outbox를 `corrupt`로 남긴다. `ready` JSON/Markdown 쌍만 수동 handoff 대상이다.
+대상은 사전 공유된 고정 스프레드시트의 정확한 `workplace` 탭(sheetId 0)이다. `Demo`와 다른 탭은 읽기/쓰기 판단에 사용하지 않는다.
 
-## 수동 경계
+```bash
+uv run newsbot sheets-validate --config config/channels.toml --db var/live/newsbot.db
+uv run newsbot sheets-bootstrap --config config/channels.toml --db var/live/newsbot.db
+uv run newsbot sheets-status --config config/channels.toml --db var/live/newsbot.db
+uv run newsbot sheets-deliver --config config/channels.toml --db var/live/newsbot.db --handoff-id 1
+uv run newsbot sheets-reconcile --config config/channels.toml --db var/live/newsbot.db --operation-id 1
+```
 
-Figma 편집과 Instagram 게시는 수동이다. VPS 스케줄링, backup/retention, secret transport, health monitoring, shutdown, rollback, 배포는 이 도구가 제공하는 명령이 아니다.
+1. `sheets-validate`는 A1:V3 헤더·병합·타깃을 읽기 전용으로 검증한다.
+2. `sheets-bootstrap`은 동일 binding mutex 아래 schema metadata, D/E validation, A:D protection을 원자적으로 설치하거나 정확히 재사용한다. 헤더, row 4 값, 다른 탭은 수정하지 않는다.
+   보호 요청의 명시적 편집자는 서비스 계정 하나다. Google 응답에는 제거할 수 없는 스프레드시트 소유자가 함께 정규화될 수 있으므로 검증은 서비스 계정 포함, 그룹 없음, 도메인 편집 비활성화를 요구하며 소유자 권한을 보안 경계로 간주하지 않는다.
+3. `sheets-deliver`는 최종 승인 handoff만 읽어 A:V 22개 문자열을 새 행에 추가한다. A는 빈 문자열, E는 `X`다.
+4. Instagram 업로드 후 사람은 E를 `O`로 바꾼다. 봇은 기존 행을 수정·복구하지 않는다.
+5. 정확한 document metadata가 있으면 zero-write 재사용한다. 중복/충돌 metadata는 차단한다.
+
+## 불확실 전송과 복구
+
+Bootstrap과 delivery는 `workplace` binding 하나의 SQLite mutex/fence를 공유한다. 원격 mutation 전에 요청 SHA와 `possibly_sent` 상태를 커밋한다. 그 뒤 timeout, reset, 5xx, redirect, malformed response, 프로세스 종료, 음성 probe는 영구적으로 자동 재전송을 금지한다.
+
+- 정확한 metadata probe: delivered/ready로 확정
+- duplicate/conflict: blocked
+- absent/unavailable: 여전히 ambiguous, 재전송 금지
+- 완전히 수신·파싱된 원자적 4xx/허용된 rate-limit rejection만 settled-not-applied
+- stale token/fence: 상태 변경·event·전송 모두 0건
+
+`sheet_operation_leases`, events, probes와 terminal operation은 삭제하지 않는다. 복구는 probe 또는 명시적 운영자 판단만 사용한다.
+
+## Cutover와 rollback
+
+1. 구 materializer/poller를 중지하고 SQLite를 백업한다.
+2. 새 binary로 migration 003을 적용하고 `PRAGMA foreign_key_check` 및 legacy counter를 확인한다.
+3. `sheets-validate`, `sheets-bootstrap`, disposable spreadsheet append-placement canary를 통과시킨다.
+4. 새 승인/전달 worker만 활성화한다.
+
+Rollback은 원격 행·metadata·controls 또는 새 SQLite audit를 삭제하지 않는다. 효과를 중지하고 새 binary/DB를 고쳐 앞으로 진행한다. 구 binary/DB 복원이나 legacy outbox backfill은 금지한다.
+
+Figma 편집과 Instagram 게시는 수동이다. commit, push, 배포, VPS 스케줄링은 이 도구가 자동 수행하지 않는다.

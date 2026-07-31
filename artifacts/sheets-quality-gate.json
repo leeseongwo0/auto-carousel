@@ -1,0 +1,183 @@
+{
+  "architectReview": {
+    "architectureStatus": "CLEAR",
+    "productStatus": "CLEAR",
+    "codeStatus": "CLEAR",
+    "recommendation": "APPROVE",
+    "evidence": "Exact-hash architecture review returned CLEAR/CLEAR/CLEAR and APPROVE with no blockers or snapshot drift.",
+    "commands": ["agent://31-31-Architect2fbae"],
+    "blockers": []
+  },
+  "executorQa": {
+    "status": "passed",
+    "e2eStatus": "passed",
+    "redTeamStatus": "passed",
+    "evidence": "Exact immutable API/package, persistence, adapter, approval, CLI, and credential-snapshot red-team passed; the full suite reports 171 passing tests and the focused exact-hash QA rerun reports 91 passing tests.",
+    "e2eCommands": [".venv/bin/pytest -q tests/integration/test_sheet_handoff_state.py tests/integration/test_sheets_adapter.py tests/integration/test_cli_live_capabilities.py"],
+    "redTeamCommands": [".venv/bin/pytest -q tests/integration/test_sheet_handoff_state.py tests/integration/test_sheets_adapter.py"],
+    "artifactRefs": [
+      {
+        "id": "sheets-api-report",
+        "kind": "api-package-test-report",
+        "path": "artifacts/sheets-api-test-report.json",
+        "description": "Frozen-source live-safe, full-suite, API/package, and adversarial evidence"
+      }
+    ],
+    "contractCoverage": [
+      {
+        "id": "sqlite-authority",
+        "contractRef": "approved-plan/sqlite-authority",
+        "obligation": "SQLite enforces event, lease, probe, fence partnership, crash recovery, and permanent no-resend state.",
+        "status": "covered",
+        "surfaceEvidenceRefs": ["api-state"],
+        "adversarialCaseRefs": ["forged-sql", "expired-owner"]
+      },
+      {
+        "id": "sheet-projection",
+        "contractRef": "approved-plan/workplace-a-v",
+        "obligation": "Approved manuscripts project to exact A:V rows after the preserved template with atomic metadata and append semantics.",
+        "status": "covered",
+        "surfaceEvidenceRefs": ["api-adapter"],
+        "adversarialCaseRefs": ["placement-human-edits"]
+      },
+      {
+        "id": "dispatch-boundary",
+        "contractRef": "approved-plan/dispatch-boundary",
+        "obligation": "Mutex acquisition precedes fresh preparation and only an armed, unexpired owner may cross the durable dispatch marker.",
+        "status": "covered",
+        "surfaceEvidenceRefs": ["api-state", "api-adapter"],
+        "adversarialCaseRefs": ["unarmed-dispatch", "expired-owner"]
+      },
+      {
+        "id": "provenance-security",
+        "contractRef": "approved-plan/provenance-security",
+        "obligation": "Category/provenance remain immutable, credentials stay external, errors are redacted, optional imports are isolated, and no ordinary result files are produced.",
+        "status": "covered",
+        "surfaceEvidenceRefs": ["api-package"],
+        "adversarialCaseRefs": ["security-boundaries"]
+      }
+    ],
+    "surfaceEvidence": [
+      {
+        "id": "api-state",
+        "contractRef": "SQLite handoff state API",
+        "surface": "api",
+        "invocation": ".venv/bin/pytest -q tests/integration/test_sheet_handoff_state.py",
+        "verdict": "passed",
+        "artifactRefs": ["sheets-api-report"]
+      },
+      {
+        "id": "api-adapter",
+        "contractRef": "Google Sheets adapter package API",
+        "surface": "package",
+        "invocation": ".venv/bin/pytest -q tests/integration/test_sheets_adapter.py",
+        "verdict": "passed",
+        "artifactRefs": ["sheets-api-report"]
+      },
+      {
+        "id": "api-package",
+        "contractRef": "Newsbot package and fixture boundary",
+        "surface": "package",
+        "invocation": ".venv/bin/pytest -q",
+        "verdict": "passed",
+        "artifactRefs": ["sheets-api-report"]
+      }
+    ],
+    "adversarialCases": [
+      {
+        "id": "forged-sql",
+        "contractRef": "approved-plan/sqlite-authority",
+        "scenario": "Direct SQL attempts forged event, lease, probe, and fence-only commits.",
+        "expectedBehavior": "Every partial or ownerless authority mutation is rejected and commit-time failures roll back exactly.",
+        "verdict": "passed",
+        "artifactRefs": ["sheets-api-report"]
+      },
+      {
+        "id": "expired-owner",
+        "contractRef": "approved-plan/dispatch-boundary",
+        "scenario": "A preparation finishes at or after its lease deadline.",
+        "expectedBehavior": "The operation is abandoned before the marker and transport is never called; a fresh operation can reacquire.",
+        "verdict": "passed",
+        "artifactRefs": ["sheets-api-report"]
+      },
+      {
+        "id": "unarmed-dispatch",
+        "contractRef": "approved-plan/dispatch-boundary",
+        "scenario": "Prepared mutation dispatch is invoked without explicit one-shot arming.",
+        "expectedBehavior": "No transport call occurs and the result remains safely ambiguous.",
+        "verdict": "passed",
+        "artifactRefs": ["sheets-api-report"]
+      },
+      {
+        "id": "placement-human-edits",
+        "contractRef": "approved-plan/workplace-a-v",
+        "scenario": "Blank rows, capacity edge, row-four drift, exact metadata reuse, duplicate metadata, and human edits are present.",
+        "expectedBehavior": "Placement is next-nonblank safe, drift/conflict blocks, and exact reuse performs zero writes.",
+        "verdict": "passed",
+        "artifactRefs": ["sheets-api-report"]
+      },
+      {
+        "id": "security-boundaries",
+        "contractRef": "approved-plan/provenance-security",
+        "scenario": "Provider secrets/errors, absent optional Google modules, fixture networking, and result-file creation are exercised.",
+        "expectedBehavior": "Secrets do not leak, base imports work, fixture networking is denied, and no ordinary local result files appear.",
+        "verdict": "passed",
+        "artifactRefs": ["sheets-api-report"]
+      }
+    ],
+    "blockers": []
+  },
+  "iteration": {
+    "status": "passed",
+    "evidence": "All joined cohort blockers were repaired and the full verification loop reran cleanly on the immutable source.",
+    "fullRerun": true,
+    "rerunCommands": [
+      ".venv/bin/ruff check src tests",
+      ".venv/bin/mypy src",
+      ".venv/bin/pytest -q",
+      "git diff --check",
+      ".venv/bin/uv lock --check",
+      ".venv/bin/uv tool run pip-audit"
+    ],
+    "reviewCohort": {
+      "reviewGeneration": 5,
+      "sourceHash": "sha256:17134c8872cab9ce7a4e211a185357b1245372acdd6567911cd224f54be4d13f",
+      "joined": true,
+      "deltaOnly": true,
+      "priorGenerationSourceHash": "sha256:122f2095aa4ce5402710d9f5d5774aa1f62c40f318675447eac06a17153b7549",
+      "deltaPaths": [
+        "src/newsbot/cli.py",
+        "src/newsbot/secrets.py",
+        "src/newsbot/sheets/google.py",
+        "tests/integration/test_cli_live_capabilities.py"
+      ],
+      "lanes": {
+        "cleaner": {
+          "status": "passed",
+          "sourceHash": "sha256:17134c8872cab9ce7a4e211a185357b1245372acdd6567911cd224f54be4d13f",
+          "evidence": "Exact-hash cleaner review passed with no blockers (agent://23-23-Cleaner9cd).",
+          "blockers": []
+        },
+        "architect": {
+          "status": "CLEAR",
+          "sourceHash": "sha256:17134c8872cab9ce7a4e211a185357b1245372acdd6567911cd224f54be4d13f",
+          "evidence": "Exact-hash full-scope architecture review returned CLEAR and APPROVE with no blockers or drift (agent://31-31-Architect2fbae).",
+          "blockers": []
+        },
+        "qa": {
+          "status": "passed",
+          "sourceHash": "sha256:17134c8872cab9ce7a4e211a185357b1245372acdd6567911cd224f54be4d13f",
+          "evidence": "Exact-hash QA passed 91 focused tests and found no credential TOCTOU, replay, direct-SQL, migration, or crash-safety blocker; the bound full report records 171 tests and all release gates (agent://25-25-Qa9cd).",
+          "blockers": []
+        }
+      }
+    },
+    "blockers": []
+  },
+  "criticReview": {
+    "verdict": "OKAY",
+    "sourceHash": "sha256:17134c8872cab9ce7a4e211a185357b1245372acdd6567911cd224f54be4d13f",
+    "evidence": "Fresh exact-hash terminal critic returned OKAY with no blockers after independently re-auditing credential snapshotting, migration 004, replay prevention, SQLite authority, settlement integrity, and permanent no-resend behavior (agent://33-33-TerminalCritic2fbae).",
+    "blockers": []
+  }
+}

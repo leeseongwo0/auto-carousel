@@ -1,31 +1,14 @@
-"""Canonical, crash-safe export materialization."""
+"""Canonical payload and provenance identities for durable delivery."""
 
 from __future__ import annotations
 
 import json
-import os
-import re
-import tempfile
-from contextlib import suppress
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import asdict, is_dataclass
 from hashlib import sha256
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeGuard
-
-from .storage import Storage
 
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
-
-
-@dataclass(frozen=True, slots=True)
-class ExportPair:
-    export_id: str
-    json_path: Path
-    markdown_path: Path
-    json_digest: str
-    markdown_digest: str
-
 
 def canonical_json_bytes(value: Any) -> bytes:
     """Encode JSON once, with a stable representation suitable for hashing."""
@@ -345,7 +328,11 @@ def approval_outbox_intent(
             for page in content["pages"]
         ]
         caption = content["caption"]
+    category = content.get("category")
+    if category is not None and category not in ("AI", "Blockchain"):
+        raise ValueError("approved content category must be exactly 'AI' or 'Blockchain'")
     portable_content = {
+        **({"category": category} if category is not None else {}),
         "pages": pages,
         "caption": caption,
         "draft": content.get("draft") is True,
@@ -360,6 +347,7 @@ def approval_outbox_intent(
     )
     semantic = {
         "export_schema_version": "newsbot-export-v3",
+        **({"category": category} if category is not None else {}),
         "source_versions": sorted(provenance_by_local_id.values(), key=lambda item: item["source_version_identity"]),
         "claims": portable_claims,
         "approved_candidate_content_identity": approved_content_identity,
@@ -411,135 +399,6 @@ def _content_addressed_units(
         for unit in units
     ]
 
-
-def materialize_export(
-    output_dir: str | Path, export_id: str, canonical_json: bytes, canonical_markdown: bytes
-) -> ExportPair:
-    """Atomically write a JSON/Markdown pair without replacing foreign content."""
-    if re.fullmatch(r"exp_[0-9a-f]{32}", export_id) is None:
-        raise ValueError("export_id must use the exp_ prefix followed by 32 lowercase hexadecimal characters")
-    directory = Path(output_dir)
-    directory.mkdir(parents=True, exist_ok=True)
-    json_path = directory / f"{export_id}.json"
-    markdown_path = directory / f"{export_id}.md"
-    for path, payload in ((json_path, canonical_json), (markdown_path, canonical_markdown)):
-        if path.exists() and path.read_bytes() != payload:
-            raise FileExistsError(f"refusing to overwrite unexpected export content: {path}")
-        if not path.exists():
-            _atomic_write(path, payload)
-        if path.read_bytes() != payload:
-            raise OSError(f"export verification failed for {path}")
-    return ExportPair(export_id, json_path, markdown_path, _digest(canonical_json), _digest(canonical_markdown))
-
-
-def materialize_outbox(storage: Storage, output_dir: str | Path, generation_id: int) -> ExportPair:
-    """Materialize the byte authority committed in SQLite, including crash recovery."""
-    rows = storage.fetch_all("SELECT * FROM export_outbox WHERE generation_id=? ORDER BY export_kind", (generation_id,))
-    try:
-        export_id, payloads = _validated_outbox_pair(rows)
-    except (TypeError, ValueError):
-        _mark_outbox_corrupt(storage, generation_id)
-        raise RuntimeError("export outbox canonical bytes are invalid") from None
-    with storage.transaction() as connection:
-        connection.execute(
-            "UPDATE export_outbox SET status='materializing', attempts=attempts+1 "
-            "WHERE generation_id=? AND status IN ('pending', 'materializing', 'ready')",
-            (generation_id,),
-        )
-    try:
-        pair = materialize_export(output_dir, export_id, payloads["json"], payloads["markdown"])
-    except (FileExistsError, OSError):
-        _mark_outbox_corrupt(storage, generation_id)
-        raise
-    with storage.transaction() as connection:
-        connection.execute(
-            "UPDATE export_outbox SET status='ready', delivered_at=CURRENT_TIMESTAMP WHERE generation_id=?",
-            (generation_id,),
-        )
-    return pair
-
-
-def verify_ready_outbox(storage: Storage, output_dir: str | Path, generation_id: int) -> ExportPair | None:
-    """Return a ready pair only when SQLite authority and both files still verify."""
-    rows = storage.fetch_all("SELECT * FROM export_outbox WHERE generation_id=? ORDER BY export_kind", (generation_id,))
-    if len(rows) != 2 or any(str(row["status"]) != "ready" for row in rows):
-        return None
-    try:
-        export_id, payloads = _validated_outbox_pair(rows)
-        directory = Path(output_dir)
-        pair = ExportPair(
-            export_id,
-            directory / f"{export_id}.json",
-            directory / f"{export_id}.md",
-            _digest(payloads["json"]),
-            _digest(payloads["markdown"]),
-        )
-        missing = not pair.json_path.exists() or not pair.markdown_path.exists()
-        if missing:
-            with storage.transaction() as connection:
-                connection.execute(
-                    "UPDATE export_outbox SET status='pending' WHERE generation_id=? AND status='ready'",
-                    (generation_id,),
-                )
-            return None
-        if pair.json_path.read_bytes() != payloads["json"] or pair.markdown_path.read_bytes() != payloads["markdown"]:
-            raise ValueError("export files do not match SQLite authority")
-    except (OSError, TypeError, ValueError):
-        _mark_outbox_corrupt(storage, generation_id)
-        return None
-    return pair
-
-
-def _validated_outbox_pair(rows: list[Any]) -> tuple[str, dict[str, bytes]]:
-    if len(rows) != 2 or {str(row["export_kind"]) for row in rows} != {"json", "markdown"}:
-        raise ValueError("generation has no complete export outbox intent")
-    export_id = str(rows[0]["export_id"])
-    if re.fullmatch(r"exp_[0-9a-f]{32}", export_id) is None or any(str(row["export_id"]) != export_id for row in rows):
-        raise ValueError("export outbox has inconsistent export identities")
-    payloads = {str(row["export_kind"]): bytes(row["canonical_bytes"]) for row in rows}
-    if any(_digest(payloads[str(row["export_kind"])]) != str(row["sha256"]) for row in rows):
-        raise ValueError("export outbox digest mismatch")
-    try:
-        payload = json.loads(payloads["json"])
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError("export outbox JSON is invalid") from exc
-    if not isinstance(payload, dict) or payload.get("export_id") != export_id:
-        raise ValueError("export outbox JSON identity is invalid")
-    if canonical_json_bytes(payload) != payloads["json"]:
-        raise ValueError("export outbox JSON is not canonical")
-    expected_markdown = f"<!-- export_id: {export_id} -->\n".encode() + canonical_markdown_bytes(payload)
-    if payloads["markdown"] != expected_markdown:
-        raise ValueError("export outbox Markdown is not canonical")
-    return export_id, payloads
-
-
-def _mark_outbox_corrupt(storage: Storage, generation_id: int) -> None:
-    with storage.transaction() as connection:
-        connection.execute("UPDATE export_outbox SET status='corrupt' WHERE generation_id=?", (generation_id,))
-
-
-def _atomic_write(path: Path, payload: bytes) -> None:
-    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
-    try:
-        os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, "wb", closefd=True) as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary_name, path)
-        directory_fd = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
-    except BaseException:
-        with suppress(FileNotFoundError):
-            os.unlink(temporary_name)
-        raise
-
-
-def _digest(payload: bytes) -> str:
-    return sha256(payload).hexdigest()
 
 
 def _json_default(value: object) -> object:

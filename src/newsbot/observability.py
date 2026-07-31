@@ -15,7 +15,10 @@ def status(storage: Storage) -> dict[str, int]:
         "selected": _count(storage, "candidates", "status = 'selected_generation_pending'"),
         "approved": _count(storage, "candidates", "status = 'approved'"),
         "generations": _count(storage, "generations", "status = 'current'"),
-        "ready_exports": _ready_export_pairs(storage),
+        "sheet_handoffs": _count(storage, "sheet_handoffs"),
+        "sheet_delivered": _count(storage, "sheet_handoffs", "status = 'delivered'"),
+        "sheet_ambiguous": _count(storage, "sheet_handoffs", "status = 'ambiguous'"),
+        "legacy_local_exports": _ready_export_pairs(storage),
         "provider_calls": _provider_calls(storage),
         "provider_attempts": _count(storage, "generation_provider_attempts"),
         "provider_calls_before_selection": _provider_calls_before_selection(storage),
@@ -33,7 +36,8 @@ def inspect(storage: Storage, run_id: int) -> dict[str, Any]:
         "run": {key: run[key] for key in ("id", "run_key", "mode", "status", "started_at", "finished_at")},
         "candidates": _count(storage, "candidate_evaluations", "run_id = ?", (run_id,)),
         "approvals": _count(storage, "decision_events", "run_id = ? AND decision = 'approve_handoff'", (run_id,)),
-        "ready_exports": _ready_export_pairs(storage, run_id),
+        "sheet_handoffs": _run_sheet_handoffs(storage, run_id),
+        "legacy_local_exports": _ready_export_pairs(storage, run_id),
         "provider_calls": _provider_calls(storage, run_id),
         "provider_attempts": _provider_attempts(storage, run_id),
         "provider_calls_before_selection": _provider_calls_before_selection(storage, run_id),
@@ -65,6 +69,20 @@ def _ready_export_pairs(storage: Storage, run_id: int | None = None) -> int:
     assert row is not None
     return int(row["count"])
 
+
+def _run_sheet_handoffs(storage: Storage, run_id: int) -> int:
+    row = storage.fetch_one(
+        "SELECT COUNT(*) AS count FROM sheet_handoffs handoff "
+        "JOIN generations generation ON generation.id=handoff.generation_id "
+        "JOIN generation_jobs job ON job.id=generation.generation_job_id "
+        "JOIN selections selection ON selection.id=job.selection_id "
+        "JOIN candidates candidate ON candidate.id=selection.candidate_id "
+        "JOIN candidate_evaluations evaluation ON evaluation.id=candidate.evaluation_id "
+        "WHERE evaluation.run_id=?",
+        (run_id,),
+    )
+    assert row is not None
+    return int(row["count"])
 
 def _provider_calls(storage: Storage, run_id: int | None = None) -> int:
     condition = "event_kind = 'provider_call'"

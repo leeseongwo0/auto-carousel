@@ -13,6 +13,11 @@ dependencies = []
 telegram = [
     "telethon>=1.36,<2",
 ]
+sheets = [
+    "google-api-python-client>=2.176,<3",
+    "google-auth>=2.40,<3",
+    "google-auth-httplib2>=0.2,<1",
+]
 [project.scripts]
 newsbot = "newsbot.cli:main"
 

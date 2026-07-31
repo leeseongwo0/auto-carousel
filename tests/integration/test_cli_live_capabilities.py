@@ -34,6 +34,14 @@ def test_optional_capabilities_fail_closed_independently() -> None:
         validate_capabilities(Capability.GENERATE_OPENAI, environ={})
 
 
+def test_sheets_capability_fails_closed_without_live_settings() -> None:
+    with pytest.raises(ConfigError) as error:
+        validate_capabilities(Capability.LIVE_SHEETS, environ={})
+    assert str(error.value) == (
+        "missing required environment variables: GOOGLE_SERVICE_ACCOUNT_FILE, GOOGLE_SHEETS_SPREADSHEET_ID"
+    )
+
+
 def test_poll_generation_validates_bot_and_openai_capabilities_before_bot_effects(monkeypatch) -> None:
     from newsbot import cli
 
@@ -59,6 +67,238 @@ def test_capability_scoped_commands_appear_in_help_without_optional_imports(caps
     assert "auth-telethon" in help_text
     assert "rank" in help_text
     assert "reconcile" in help_text
+
+
+def test_base_cli_help_never_imports_google_packages(monkeypatch, capsys) -> None:
+    from newsbot import cli
+
+    monkeypatch.setitem(sys.modules, "google", None)
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["--help"])
+    assert exit_info.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "sheets-validate" in help_text
+    assert "sheets-bootstrap" in help_text
+    assert "sheets-deliver" in help_text
+    assert "sheets-status" in help_text
+    assert "sheets-reconcile" in help_text
+    assert "sheets-retry-blocked" in help_text
+    assert "repair-exports" not in help_text
+    assert "--output" not in help_text
+
+
+def test_live_sheets_commands_fail_before_google_import(monkeypatch) -> None:
+    from newsbot import cli
+
+    monkeypatch.setitem(sys.modules, "newsbot.sheets.google", None)
+    with pytest.raises(SystemExit) as error:
+        cli.main(["sheets-validate"])
+    assert error.value.code == 2
+
+
+def test_live_sheets_uses_one_validated_credential_snapshot(monkeypatch, tmp_path) -> None:
+    from newsbot import cli
+    from newsbot.sheets.google import GoogleSheetsAdapter
+
+    credential_path = tmp_path / "service-account.json"
+    config = SimpleNamespace(
+        google_service_account_file=credential_path,
+        google_sheets_spreadsheet_id="sheet",
+    )
+    credential_info = {
+        "type": "service_account",
+        "client_email": "bot@project.iam.gserviceaccount.com",
+    }
+    reads = 0
+    adapter = object()
+
+    def read_once(path: Path) -> dict[str, str]:
+        nonlocal reads
+        reads += 1
+        assert path == credential_path
+        if reads > 1:
+            raise AssertionError("credential file reopened")
+        return credential_info
+
+    def construct_from_snapshot(*, credential_info: dict[str, str], spreadsheet_id: str) -> object:
+        assert credential_info is credential_info_snapshot
+        assert spreadsheet_id == "sheet"
+        return adapter
+
+    credential_info_snapshot = credential_info
+    monkeypatch.setattr(cli, "validate_capabilities", lambda *_: None)
+    monkeypatch.setattr(cli, "_config", lambda _: config)
+    monkeypatch.setattr(cli, "read_service_account_info", read_once)
+    monkeypatch.setattr(
+        GoogleSheetsAdapter,
+        "from_credentials",
+        staticmethod(construct_from_snapshot),
+    )
+
+    actual_config, actual_adapter, email = cli._live_sheets(SimpleNamespace())
+
+    assert actual_config is config
+    assert actual_adapter is adapter
+    assert email == "bot@project.iam.gserviceaccount.com"
+    assert reads == 1
+
+
+def test_live_sheets_redacts_credential_path(monkeypatch, tmp_path) -> None:
+    from newsbot import cli
+    from newsbot.secrets import SecretFileError
+
+    credential_path = tmp_path / "private" / "service-account.json"
+    config = SimpleNamespace(
+        google_service_account_file=credential_path,
+        google_sheets_spreadsheet_id="sheet",
+    )
+    monkeypatch.setattr(cli, "validate_capabilities", lambda *_: None)
+    monkeypatch.setattr(cli, "_config", lambda _: config)
+
+    def fail_read(path: Path) -> dict[str, str]:
+        raise SecretFileError(f"cannot safely open {path}")
+
+    monkeypatch.setattr(cli, "read_service_account_info", fail_read)
+
+    with pytest.raises(ConfigError) as error:
+        cli._live_sheets(SimpleNamespace())
+
+    assert str(error.value) == "Google Sheets credential file is invalid"
+    assert str(credential_path) not in str(error.value)
+
+
+def test_sheets_bootstrap_redacts_pre_dispatch_provider_errors(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from newsbot import cli
+    from newsbot.sheets.google import GoogleSheetsAdapter
+
+    secret = "https://sheets.googleapis.test/private-sheet?token=secret"
+    credential_file = tmp_path / "service-account.json"
+    credential_file.write_text(
+        json.dumps(
+            {
+                "type": "service_account",
+                "client_email": "bot@example.invalid",
+            }
+        ),
+        encoding="utf-8",
+    )
+    credential_file.chmod(0o600)
+
+    class FailingService:
+        def get_document(self, _spreadsheet_id: str) -> object:
+            raise RuntimeError(secret)
+
+    config = SimpleNamespace(
+        database_path=tmp_path / "newsbot.sqlite",
+        google_service_account_file=credential_file,
+        google_sheets_spreadsheet_id="sheet",
+    )
+    adapter = GoogleSheetsAdapter(
+        spreadsheet_id="sheet",
+        service=FailingService(),
+        service_account_email="bot@example.invalid",
+    )
+    monkeypatch.setattr(
+        cli,
+        "_live_sheets",
+        lambda _args: (config, adapter, "bot@example.invalid"),
+    )
+
+    with pytest.raises(RuntimeError) as error:
+        cli.sheets_bootstrap(SimpleNamespace())
+
+    assert str(error.value) == "Google Sheets preparation read failed"
+    assert secret not in str(error.value)
+
+
+def test_sheets_reconcile_settles_ambiguous_bootstrap_ready(
+    tmp_path,
+    monkeypatch,
+    capsys,
+) -> None:
+    from newsbot import cli
+    from newsbot.handoffs import SheetHandoffService
+    from newsbot.sheets.base import MetadataState, SheetProbe
+    from newsbot.storage import Storage
+
+    database = tmp_path / "bootstrap.sqlite"
+    credential_file = tmp_path / "service-account.json"
+    credential_file.write_text(
+        json.dumps({"client_email": "bot@example.invalid"}),
+        encoding="utf-8",
+    )
+    credential_file.chmod(0o600)
+    now = "2026-07-30T12:00:00+00:00"
+    later = "2026-07-30T12:05:00+00:00"
+    fingerprint = "a" * 64
+    with Storage.open(database) as storage:
+        service = SheetHandoffService(storage)
+        target = service.ensure_binding(
+            binding_key="workplace",
+            spreadsheet_id="sheet",
+            sheet_id=0,
+            oracle_fingerprint=fingerprint,
+            now=now,
+        )
+        assert (
+            service.ensure_bootstrap(
+                target_binding_id=target,
+                marker_value="schema",
+                controls_fingerprint=fingerprint,
+            )
+            == "uninitialized"
+        )
+        lease = service.acquire_initial(
+            None,
+            operation_kind="bootstrap",
+            target_binding_id=target,
+            now=now,
+            expires_at=later,
+        )
+        assert lease is not None
+        assert service.record_preflight(lease, outcome="absent", now=now)
+        assert service.mark_possibly_sent(
+            lease,
+            request_sha256=fingerprint,
+            oracle_fingerprint=fingerprint,
+            controls_fingerprint=fingerprint,
+            credential_refreshed_at=now,
+            credential_expires_at="2026-07-30T16:00:00+00:00",
+            credential_scope_ok=True,
+            now=now,
+        )
+        assert service.release_possibly_sent(lease, now=now)
+        operation_id = lease.operation_id
+
+    class ExactBootstrapAdapter:
+        def probe_bootstrap(self, *, service_account_email: str) -> SheetProbe:
+            assert service_account_email == "bot@example.invalid"
+            return SheetProbe(metadata=MetadataState.EXACT)
+
+    config = SimpleNamespace(
+        database_path=database,
+        google_service_account_file=credential_file,
+    )
+    monkeypatch.setattr(
+        cli,
+        "_live_sheets",
+        lambda args: (config, ExactBootstrapAdapter(), "bot@example.invalid"),
+    )
+
+    assert cli.sheets_reconcile(SimpleNamespace(operation_id=operation_id)) == 0
+
+    assert json.loads(capsys.readouterr().out)["status"] == "ready"
+    with Storage.open(database) as storage:
+        assert (
+            storage.fetch_one(
+                "SELECT status FROM sheet_bootstraps WHERE target_binding_id=?",
+                (target,),
+            )["status"]
+            == "ready"
+        )
 
 
 def test_reconcile_live_range_arguments_fail_closed_before_live_adapter_import(monkeypatch) -> None:
@@ -235,7 +475,8 @@ def test_collect_live_uses_one_loop_and_creates_provider_free_candidate_digest(t
     assert cli.main(["collect-live"]) == 0
     result = json.loads(capsys.readouterr().out)
     assert result["status"] == "pending_selection"
-    assert Path(result["digest_path"]).is_file()
+    assert "digest_path" not in result
+    assert not config.output_dir.exists()
     with Storage.open(config.database_path) as storage:
         assert storage.fetch_one("SELECT COUNT(*) AS count FROM candidates")["count"] == 1
         assert storage.fetch_one("SELECT COUNT(*) AS count FROM digests")["count"] == 1
@@ -282,7 +523,6 @@ def test_durable_live_pipeline_binds_the_latest_observation_material_version_aft
         bound = DurableLivePipeline(
             storage,
             SimpleNamespace(),
-            tmp_path,
             lambda: pytest.fail("provider must not be constructed"),
             FixtureClock(),
         )._persist_sources(latest, FixtureClock().now())
@@ -352,7 +592,7 @@ def test_openai_capability_failure_is_recoverable_after_selection(tmp_path, monk
     )
     clock = FixtureClock(datetime(2026, 7, 29, 12, tzinfo=UTC))
     with Storage.open(database) as storage:
-        pipeline = NewsPipeline(storage, config, output, FakeGenerationProvider(), clock)
+        pipeline = NewsPipeline(storage, config, FakeGenerationProvider(), clock)
         service = CandidateApprovalService(storage, chat_id=1, authorized_user_ids={1}, now=clock.now)
         stage = asyncio.run(pipeline.run_fixture(FixtureCollector(fixture), approval_service=service, actor_id=1))
         candidate_id = int(stage.digest.candidates[0]["candidate_id"])
@@ -440,7 +680,7 @@ def test_candidate_set_keys_are_portable_and_separate_material_from_observation_
 
     def evaluate(storage: Storage, observation: SourceObservation, run_key: str) -> tuple[str, str]:
         service = CandidateApprovalService(storage, chat_id=1, authorized_user_ids={1}, now=clock.now)
-        pipeline = NewsPipeline(storage, config, tmp_path / "output", FakeGenerationProvider(), clock)
+        pipeline = NewsPipeline(storage, config, FakeGenerationProvider(), clock)
         stage = asyncio.run(pipeline.run((observation,), run_key=run_key, approval_service=service, actor_id=1))
         row = storage.fetch_one(
             "SELECT source_set_key, observation_set_key FROM candidate_evaluations WHERE run_id=?",

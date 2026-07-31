@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import unicodedata
+from dataclasses import replace
+
 from newsbot.ai.base import FactClaim, GenerationRequest
 from newsbot.copywriting import (
     BodyPage,
     Caption,
+    Category,
     CopyDraft,
     CoverPage,
     FactReference,
@@ -13,6 +17,83 @@ from newsbot.copywriting import (
     validate_copy,
 )
 
+_FIXTURE_ALIASES: tuple[tuple[Category, str], ...] = (
+    ("Blockchain", "blockchain"),
+    ("Blockchain", "crypto"),
+    ("Blockchain", "cryptocurrency"),
+    ("Blockchain", "bitcoin"),
+    ("Blockchain", "ethereum"),
+    ("Blockchain", "web3"),
+    ("Blockchain", "token"),
+    ("Blockchain", "wallet"),
+    ("Blockchain", "exchange"),
+    ("Blockchain", "on-chain"),
+    ("Blockchain", "블록체인"),
+    ("Blockchain", "암호화폐"),
+    ("Blockchain", "비트코인"),
+    ("Blockchain", "이더리움"),
+    ("Blockchain", "웹3"),
+    ("Blockchain", "토큰"),
+    ("Blockchain", "코인"),
+    ("Blockchain", "지갑"),
+    ("Blockchain", "거래소"),
+    ("Blockchain", "온체인"),
+    ("AI", "artificial intelligence"),
+    ("AI", "machine learning"),
+    ("AI", "llm"),
+    ("AI", "foundation model"),
+    ("AI", "language model"),
+    ("AI", "multimodal"),
+    ("AI", "ai"),
+    ("AI", "agent"),
+    ("AI", "인공지능"),
+    ("AI", "머신러닝"),
+    ("AI", "거대언어모델"),
+    ("AI", "파운데이션 모델"),
+    ("AI", "언어 모델"),
+    ("AI", "멀티모달"),
+    ("AI", "에이전트"),
+)
+_SORTED_FIXTURE_ALIASES = tuple(sorted(_FIXTURE_ALIASES, key=lambda item: len(item[1]), reverse=True))
+
+
+def fixture_category(draft: CopyDraft) -> Category:
+    """Classify a fixture manuscript with the frozen fixture-category-v1 lexicon."""
+
+    fields = (
+        draft.cover.title,
+        draft.cover.subtitle,
+        *(field for body in draft.bodies for field in (body.subtitle, body.body)),
+        draft.caption.hook,
+        draft.caption.context,
+        draft.caption.details,
+        draft.caption.implications,
+        draft.caption.questions,
+    )
+    text = "\n".join(unicodedata.normalize("NFC", field).casefold() for field in fields)
+    consumed: list[tuple[int, int]] = []
+    scores = {"AI": 0, "Blockchain": 0}
+
+    for category, alias in _SORTED_FIXTURE_ALIASES:
+        start = text.find(alias)
+        while start != -1:
+            end = start + len(alias)
+            before = text[start - 1] if start else ""
+            after = text[end] if end < len(text) else ""
+            if (
+                not _is_word_character(before)
+                and not _is_word_character(after)
+                and not any(start < consumed_end and consumed_start < end for consumed_start, consumed_end in consumed)
+            ):
+                consumed.append((start, end))
+                scores[category] += 1
+            start = text.find(alias, start + 1)
+
+    return "Blockchain" if scores["Blockchain"] > scores["AI"] else "AI"
+
+
+def _is_word_character(value: str) -> bool:
+    return value == "_" or value.isalnum()
 
 class FakeGenerationProvider:
     """Produce stable Korean copy without network, clocks, or randomness."""
@@ -55,7 +136,9 @@ class FakeGenerationProvider:
                 questions="여러분은 이 소식을 어떻게 보시나요?",
                 hashtags=("#뉴스", "#브리핑"),
             ),
+            category="AI",
         )
+        draft = replace(draft, category=fixture_category(draft))
         return validate_copy(
             draft,
             allowed_claim_sources={fact.id: fact.source_version_id for fact in request.facts},

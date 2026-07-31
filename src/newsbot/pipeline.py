@@ -1,4 +1,4 @@
-"""Offline-capable, selection-bound workflow from collection through export."""
+"""Offline-capable, selection-bound workflow from collection through approval."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from hashlib import sha256
-from pathlib import Path
 from secrets import token_hex
 from typing import Any, Protocol
 
@@ -16,14 +15,7 @@ from .ai.base import FactClaim, GenerationProvider, GenerationRequest
 from .candidates import CandidateApprovalService, CandidateDigest
 from .collectors.base import SourceObservation
 from .copywriting import CopyDraft, validate_copy
-from .exports import (
-    ExportPair,
-    materialize_outbox,
-    source_claim_identity,
-    source_identity,
-    source_material_identity,
-    source_observation_identity,
-)
+from .exports import source_claim_identity, source_identity, source_material_identity, source_observation_identity
 from .ranking import Evaluation, evaluate_candidates
 from .runtime import Clock
 from .storage import Storage, has_newer_material_source, persist_observation
@@ -50,14 +42,6 @@ class GenerationResult:
     reused: bool
 
 
-@dataclass(frozen=True, slots=True)
-class PipelineResult:
-    run_id: int
-    candidate_id: int
-    generation_id: int
-    export: ExportPair
-    reused: bool
-
 
 class NewsPipeline:
     """Persist a deterministic candidate workflow; providers are called only after selection."""
@@ -66,13 +50,11 @@ class NewsPipeline:
         self,
         storage: Storage,
         config: object,
-        output_dir: str | Path,
         provider: GenerationProvider | Callable[[], GenerationProvider],
         clock: Clock,
     ) -> None:
         self.storage = storage
         self.config = config
-        self.output_dir = Path(output_dir)
         self._provider_factory = provider if callable(provider) else lambda: provider
         self.clock = clock
 
@@ -608,39 +590,6 @@ class NewsPipeline:
             raise ValueError("generation source binding is incomplete")
         return tuple(facts)
 
-    def materialize_approved_export(self, generation_id: int) -> PipelineResult:
-        """Compatibility wrapper that materializes approval-committed outbox bytes."""
-        now = _utc(self.clock.now())
-        row = self.storage.fetch_one(
-            "SELECT c.id AS candidate_id, ce.run_id FROM generations g "
-            "JOIN generation_jobs j ON j.id=g.generation_job_id "
-            "JOIN selections s ON s.id=j.selection_id "
-            "JOIN candidates c ON c.id=s.candidate_id "
-            "JOIN candidate_evaluations ce ON ce.id=c.evaluation_id "
-            "WHERE g.id=? AND g.status='current' AND c.status='approved'",
-            (generation_id,),
-        )
-        if row is None:
-            raise ValueError("export requires an approved current draft")
-        outbox = self.storage.fetch_one(
-            "SELECT 1 FROM export_outbox WHERE generation_id=? AND status IN ('pending', 'materializing', 'ready')",
-            (generation_id,),
-        )
-        if outbox is None:
-            raise ValueError("approved draft has no recoverable export outbox")
-        pair = materialize_outbox(self.storage, self.output_dir, generation_id)
-        with self.storage.transaction() as connection:
-            connection.execute(
-                "UPDATE runs SET status='ready', finished_at=? WHERE id=?",
-                (now.isoformat(), int(row["run_id"])),
-            )
-        return PipelineResult(
-            int(row["run_id"]),
-            int(row["candidate_id"]),
-            generation_id,
-            pair,
-            False,
-        )
 
 
 def _candidate_source_ids(connection: Any, candidate_id: int) -> tuple[int, ...]:
@@ -766,6 +715,7 @@ def _draft_payload(draft: CopyDraft) -> dict[str, Any]:
             "questions": draft.caption.questions,
             "hashtags": list(draft.caption.hashtags),
         },
+        "category": draft.category,
         "draft": draft.draft,
         "source_reported": draft.source_reported,
     }
@@ -801,6 +751,7 @@ def _draft_from_payload(value: dict[str, Any]) -> CopyDraft:
         CoverPage(value["cover"]["title"], value["cover"]["subtitle"], make_units(value["cover"]["factual_units"])),
         tuple(BodyPage(body["subtitle"], body["body"], make_units(body["factual_units"])) for body in value["bodies"]),
         Caption(**value["caption"]),
+        category=value["category"],
         draft=value["draft"],
         source_reported=value["source_reported"],
     )
