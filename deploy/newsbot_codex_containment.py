@@ -19,6 +19,7 @@ AUDIT = "audit"
 RECOVERY_LOCK = "codex-recovery.lock"
 CREDENTIAL = "/run/newsbot-codex-activation-v1"
 LOCK = "/run/lock/newsbot-codex/generation.lock"
+LOCK_DIR = "/run/lock/newsbot-codex"
 MANIFEST = "/usr/local/lib/newsbot-codex-manifest-v1.json"
 UNITS = ("newsbot-generate-codex.service", "newsbot-generate-codex-canary.service")
 CGROUPS = (
@@ -450,8 +451,22 @@ def atomic_state(rootfd, value):
         os.close(fd)
 
 
+def lock_parents_safe():
+    for path in ("/run", "/run/lock", LOCK_DIR):
+        value = os.stat(path, follow_symlinks=False)
+        mode = stat.S_IMODE(value.st_mode)
+        if not stat.S_ISDIR(value.st_mode) or value.st_uid != 0:
+            die()
+        if path == "/run" and mode != 0o755:
+            die()
+        if path == "/run/lock" and value.st_mode & stat.S_IWOTH and not value.st_mode & stat.S_ISVTX:
+            die()
+        if path == LOCK_DIR and mode != 0o750:
+            die()
+
+
 def fixed_lock_free():
-    parents_safe(LOCK)
+    lock_parents_safe()
     fd = os.open(LOCK, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
         value = os.fstat(fd)

@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import tomllib
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -43,6 +44,27 @@ def test_bundled_codex_policy_is_minimal_read_only_and_denies_device_auth() -> N
     assert policy["allowed_permission_profiles"] == {"newsbot_generate": True}
     assert policy["permissions"]["newsbot_generate"]["extends"] == ":read-only"
     assert policy["permissions"]["newsbot_generate"]["filesystem"] == {"~/.codex": "deny"}
+
+
+def test_lock_parent_check_accepts_standard_sticky_run_lock(
+    containment: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    modes = {
+        "/run": 0o755,
+        "/run/lock": 0o1777,
+        containment.LOCK_DIR: 0o750,
+    }
+    monkeypatch.setattr(
+        containment.os,
+        "stat",
+        lambda path, **_: SimpleNamespace(st_mode=containment.stat.S_IFDIR | modes[path], st_uid=0),
+    )
+
+    containment.lock_parents_safe()
+
+    modes[containment.LOCK_DIR] = 0o770
+    with pytest.raises(containment.Blocked):
+        containment.lock_parents_safe()
 
 
 def _dirty(module: object, *, unit: str | None = None, manifest: str = "m" * 64) -> dict[str, object]:
