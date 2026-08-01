@@ -14,7 +14,7 @@ from typing import Any, Protocol
 from .ai.base import FactClaim, GenerationProvider, GenerationRequest
 from .candidates import CandidateApprovalService, CandidateDigest
 from .collectors.base import SourceObservation
-from .copywriting import CopyDraft, validate_copy
+from .copywriting import CopyDraft, adaptive_page_count, validate_copy
 from .exports import source_claim_identity, source_identity, source_material_identity, source_observation_identity
 from .ranking import Evaluation, evaluate_candidates
 from .runtime import Clock
@@ -639,7 +639,18 @@ class NewsPipeline:
             )
             if not due:
                 return None
-            page_count = int(job["requested_page_count"])
+            if job["requested_page_count"] is None:
+                marks = ",".join("?" for _ in source_ids)
+                source_rows = connection.execute(
+                    f"SELECT body FROM source_post_versions WHERE id IN ({marks}) ORDER BY id",
+                    source_ids,
+                )
+                page_count = _job_page_count(
+                    str(job["job_kind"]),
+                    adaptive_page_count(str(row["body"]) for row in source_rows),
+                )
+            else:
+                page_count = int(job["requested_page_count"])
             if not 1 <= page_count <= 8:
                 return None
             if job["status"] == "running":
@@ -651,13 +662,15 @@ class NewsPipeline:
             lease_until = now + timedelta(minutes=5)
             leased = connection.execute(
                 "UPDATE generation_jobs SET status='running', attempts=attempts+1, lease_token=?, "
-                "lease_expires_at=?, started_at=?, retry_at=NULL, error_message=NULL WHERE id=? "
+                "lease_expires_at=?, started_at=?, retry_at=NULL, error_message=NULL, "
+                "requested_page_count=COALESCE(requested_page_count, ?) WHERE id=? "
                 "AND ((status='running' AND lease_expires_at < ?) OR "
                 "(status='failed_recoverable' AND retry_at <= ?) OR status='queued')",
                 (
                     lease_token,
                     lease_until.isoformat(),
                     now.isoformat(),
+                    page_count,
                     generation_job_id,
                     now.isoformat(),
                     now.isoformat(),

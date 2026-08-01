@@ -19,7 +19,7 @@ from newsbot.storage import Storage
 NOW = datetime(2026, 7, 31, 12, tzinfo=UTC)
 
 
-def _job(storage: Storage, index: int, *, status: str = "queued") -> int:
+def _job(storage: Storage, index: int, *, status: str = "queued", page_count: int | None = 2) -> int:
     with storage.transaction() as db:
         db.execute("INSERT INTO runs(run_key, mode, status) VALUES (?, 'fixture', 'running')", (f"exact-{index}",))
         run = db.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -47,8 +47,8 @@ def _job(storage: Storage, index: int, *, status: str = "queued") -> int:
         db.execute("INSERT INTO selections(digest_id, candidate_id, position) VALUES (?, ?, 1)", (digest, candidate))
         selection = db.execute("SELECT last_insert_rowid()").fetchone()[0]
         db.execute(
-            "INSERT INTO generation_jobs(selection_id, job_kind, status, requested_page_count) VALUES (?, 'initial', ?, 2)",
-            (selection, status),
+            "INSERT INTO generation_jobs(selection_id, job_kind, status, requested_page_count) VALUES (?, 'initial', ?, ?)",
+            (selection, status, page_count),
         )
         job = int(db.execute("SELECT last_insert_rowid()").fetchone()[0])
         db.execute(
@@ -196,3 +196,19 @@ def test_same_job_exact_replay_returns_existing_current_generation(monkeypatch) 
         )["count"]
         == 1
     )
+
+
+def test_exact_job_materializes_adaptive_page_count_for_initial_approval(monkeypatch) -> None:
+    storage = Storage.open(":memory:")
+    job = _job(storage, 1, page_count=None)
+    _bind(storage, job)
+    monkeypatch.setattr("newsbot.ai.codex_cli.CodexCliProvider", FakeGenerationProvider)
+
+    result = asyncio.run(_pipeline(storage).generate_codex_job_exact(job))
+
+    assert result is not None
+    assert result.draft.page_count == 1
+    assert storage.fetch_one(
+        "SELECT requested_page_count FROM generation_jobs WHERE id=?",
+        (job,),
+    )["requested_page_count"] == 1
