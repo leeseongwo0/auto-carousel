@@ -44,6 +44,7 @@ id newsbot-codex || sudo useradd --system --create-home \
 
 sudo install -d -o root -g root -m 0755 /opt/newsbot/releases
 sudo install -d -o newsbot -g newsbot -m 0700 /var/lib/newsbot/telegram
+sudo install -d -o newsbot -g newsbot -m 0700 /var/lib/newsbot/google
 sudo install -d -o newsbot-codex -g newsbot-codex -m 0700 /var/lib/newsbot-codex/.codex
 sudo install -d -o root -g root -m 0700 /var/lib/newsbot-containment /var/lib/newsbot-containment/audit
 sudo install -d -o root -g root -m 0755 /var/empty/newsbot-provider /var/empty/newsbot-codex
@@ -73,7 +74,7 @@ TELEGRAM_BOT_TOKEN=
 NEWSBOT_APPROVER_CHAT_ID=
 NEWSBOT_APPROVER_USER_IDS=
 GOOGLE_SHEETS_SPREADSHEET_ID=
-GOOGLE_SERVICE_ACCOUNT_FILE=/etc/newsbot/google.json</code></pre></section>
+GOOGLE_SERVICE_ACCOUNT_FILE=/var/lib/newsbot/google/service-account.json</code></pre></section>
 
 <section><button class="copy">복사</button><h2><span class="step">6</span>SQLite 운영 DB 생성</h2><pre><code>sudo -u newsbot sh -c 'umask 077; exec /usr/local/bin/newsbot init-db --db /var/lib/newsbot/newsbot.db'
 sudo -u newsbot sqlite3 /var/lib/newsbot/newsbot.db \
@@ -92,8 +93,9 @@ exit
 sudo chmod 0700 /var/lib/newsbot/telegram
 sudo chmod 0600 /var/lib/newsbot/telegram/newsbot.session</code></pre><p>전화번호, Telegram 인증 코드와 필요한 경우 2FA 암호를 입력합니다.</p></section>
 
-<section><h2><span class="step">8</span>Google service-account JSON 입력</h2><button class="copy">복사</button><pre><code>sudo install -o newsbot -g newsbot -m 0600 /dev/null /etc/newsbot/google.json
-sudoedit /etc/newsbot/google.json</code></pre><p>편집기에 Google service-account JSON 전체를 붙여 넣고 저장한 다음 실행합니다.</p><button class="copy">복사</button><pre><code>sudo -u newsbot -H bash
+<section><h2><span class="step">8</span>Google service-account JSON 입력</h2><button class="copy">복사</button><pre><code>sudo install -d -o newsbot -g newsbot -m 0700 /var/lib/newsbot/google
+sudo install -o newsbot -g newsbot -m 0600 /dev/null /var/lib/newsbot/google/service-account.json
+sudoedit /var/lib/newsbot/google/service-account.json</code></pre><p>편집기에 Google에서 다운로드한 service-account JSON 전체를 붙여 넣고 저장한 다음 실행합니다. OAuth client JSON은 사용할 수 없습니다.</p><button class="copy">복사</button><pre><code>sudo -u newsbot -H bash
 set -a
 source /etc/newsbot/newsbot.env
 set +a

@@ -107,7 +107,7 @@
 /var/lib/newsbot-codex/.codex/   newsbot-codex 전용 ChatGPT device auth
 /var/lib/newsbot-containment/    root-owned dirty|clean state와 immutable receipts
 /etc/newsbot/newsbot.env         Telegram/Sheets 전용 환경 변수
-/etc/newsbot/google.json         Google service account
+/var/lib/newsbot/google/        Google service account 전용 0700 디렉터리
 /etc/codex/requirements.toml     root-managed Codex permission profile</code></pre>
     <p>기존 <code>var/demo/newsbot.db</code>는 fixture 데이터와 실제 데모 전달 기록이 섞여 있으므로 운영 DB로 복사하지 않고 새 DB를 만듭니다.</p>
   </section>
@@ -123,6 +123,7 @@ sudo useradd --system --create-home --home-dir /var/lib/newsbot-codex \
   --shell /usr/sbin/nologin newsbot-codex
 sudo install -d -o root -g root -m 0755 /opt/newsbot/releases
 sudo install -d -o newsbot -g newsbot -m 0700 /var/lib/newsbot/telegram
+sudo install -d -o newsbot -g newsbot -m 0700 /var/lib/newsbot/google
 sudo install -d -o newsbot-codex -g newsbot-codex -m 0700 /var/lib/newsbot-codex/.codex
 sudo install -d -o root -g root -m 0700 /var/lib/newsbot-containment
 sudo install -d -o root -g root -m 0755 /var/empty/newsbot-provider /var/empty/newsbot-codex
@@ -189,7 +190,7 @@ NEWSBOT_APPROVER_CHAT_ID=
 NEWSBOT_APPROVER_USER_IDS=
 
 GOOGLE_SHEETS_SPREADSHEET_ID=
-GOOGLE_SERVICE_ACCOUNT_FILE=/etc/newsbot/google.json</code></pre>
+GOOGLE_SERVICE_ACCOUNT_FILE=/var/lib/newsbot/google/service-account.json</code></pre>
     <table>
       <thead><tr><th>값</th><th>용도</th></tr></thead>
       <tbody>
@@ -247,10 +248,10 @@ sudo stat -c '%U:%G %a %n' /var/lib/newsbot-codex /var/lib/newsbot-codex/.codex<
     <h2>8. Google Sheets 연결</h2>
     <pre><code>scp /secure/path/google-service-account.json USER@VPS:/tmp/google.json
 
-sudo mv /tmp/google.json /etc/newsbot/google.json
-sudo chown newsbot:newsbot /etc/newsbot/google.json
-sudo chmod 0600 /etc/newsbot/google.json
-sudo chmod 0750 /etc/newsbot</code></pre>
+sudo install -d -o newsbot -g newsbot -m 0700 /var/lib/newsbot/google
+sudo install -o newsbot -g newsbot -m 0600 /tmp/google.json /var/lib/newsbot/google/service-account.json
+sudo rm -f /tmp/google.json
+sudo stat -c '%U:%G %a %n' /var/lib/newsbot/google /var/lib/newsbot/google/service-account.json</code></pre>
     <p>newsbot 사용자 shell에서 환경 파일을 불러온 뒤:</p>
     <pre><code>/usr/local/bin/newsbot sheets-validate \
   --config /etc/newsbot/config.toml --db /var/lib/newsbot/newsbot.db
