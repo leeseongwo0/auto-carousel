@@ -32,6 +32,14 @@ def test_short_multiline_message_is_not_split() -> None:
     )
 
 
+def test_long_poll_transport_timeout_includes_network_margin() -> None:
+    assert telegram._transport_timeout("sendMessage", {"timeout": "50"}) == 20
+    assert telegram._transport_timeout("getUpdates", {"timeout": "0"}) == 20
+    assert telegram._transport_timeout("getUpdates", {"timeout": "20"}) == 30
+    assert telegram._transport_timeout("getUpdates", {"timeout": "50"}) == 60
+    assert telegram._transport_timeout("getUpdates", {"timeout": "invalid"}) == 20
+
+
 def test_send_message_honors_retry_after_then_applies_group_pacing(monkeypatch: pytest.MonkeyPatch) -> None:
     responses: list[object] = [_rate_limit(2), _Response()]
     sleeps: list[float] = []

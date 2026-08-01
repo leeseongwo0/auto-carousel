@@ -20,6 +20,18 @@ from newsbot.candidates import CandidateApprovalService, CandidateDigest
 TELEGRAM_TEXT_LIMIT = 4096
 TELEGRAM_GROUP_SEND_INTERVAL_SECONDS = 3.1
 TELEGRAM_MAX_RETRY_AFTER_SECONDS = 60
+TELEGRAM_HTTP_TIMEOUT_SECONDS = 20
+TELEGRAM_LONG_POLL_MARGIN_SECONDS = 10
+
+
+def _transport_timeout(method: str, payload: Mapping[str, str]) -> int:
+    if method != "getUpdates":
+        return TELEGRAM_HTTP_TIMEOUT_SECONDS
+    try:
+        long_poll = int(payload.get("timeout", "0"))
+    except ValueError:
+        long_poll = 0
+    return max(TELEGRAM_HTTP_TIMEOUT_SECONDS, min(max(long_poll, 0), 50) + TELEGRAM_LONG_POLL_MARGIN_SECONDS)
 
 
 def _retry_after(error: HTTPError) -> int:
@@ -79,7 +91,7 @@ class TelegramApprovalAdapter:
         decoded: object = None
         for attempt in range(3):
             try:
-                with urlopen(request, timeout=20) as response:  # nosec B310: explicit Bot API endpoint
+                with urlopen(request, timeout=_transport_timeout(method, payload)) as response:  # nosec B310
                     decoded = json.loads(response.read().decode("utf-8"))
                 break
             except HTTPError as error:
