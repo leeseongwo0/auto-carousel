@@ -74,8 +74,8 @@ def test_read_input_rejects_byte_over_cap(runner: object, monkeypatch: pytest.Mo
 def test_runner_constants_pin_environment_and_codex_argv(runner: object) -> None:
     assert (runner.INPUT_CAP, runner.STDOUT_CAP, runner.STDERR_CAP) == (524288, 262144, 131072)
     assert (runner.PINNED_CODEX, runner.PINNED_MODEL, runner.PINNED_SCHEMA) == (
-        "/usr/local/libexec/codex-v0.138.0",
-        "gpt-5-codex",
+        "/usr/local/libexec/codex-v0.146.0",
+        "gpt-5.6-terra",
         "/usr/local/share/newsbot/copy_draft.schema.json",
     )
     assert runner.RUNNER_CWD == "/var/empty/newsbot-codex"

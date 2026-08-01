@@ -27,7 +27,7 @@ CGROUPS = (
 )
 MANIFEST_ARTIFACTS = frozenset(
     {
-        "/usr/local/libexec/codex-v0.138.0",
+        "/usr/local/libexec/codex-v0.146.0",
         "/usr/local/libexec/newsbot-codex-runner-v1",
         "/usr/local/sbin/newsbot-codex-containment-v1",
         "/usr/local/share/newsbot/copy_draft.schema.json",
@@ -157,8 +157,8 @@ def manifest_digest():
     if (
         set(manifest) != required
         or manifest["version"] != "newsbot-codex-release-manifest-v1"
-        or manifest["codex_version"] != "0.138.0"
-        or manifest["model"] != "gpt-5-codex"
+        or manifest["codex_version"] != "0.146.0"
+        or manifest["model"] != "gpt-5.6-terra"
         or not isinstance(manifest["artifacts"], list)
     ):
         die()

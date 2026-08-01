@@ -12,10 +12,10 @@ import sys
 from pathlib import Path
 
 OUTPUT = Path("/usr/local/lib/newsbot-codex-manifest-v1.json")
-MODEL = "gpt-5-codex"
-CODEX_VERSION = "0.138.0"
+MODEL = "gpt-5.6-terra"
+CODEX_VERSION = "0.146.0"
 ARTIFACTS = {
-    "/usr/local/libexec/codex-v0.138.0": 0o755,
+    "/usr/local/libexec/codex-v0.146.0": 0o755,
     "/usr/local/libexec/newsbot-codex-runner-v1": 0o755,
     "/usr/local/sbin/newsbot-codex-containment-v1": 0o755,
     "/usr/local/share/newsbot/copy_draft.schema.json": 0o644,
