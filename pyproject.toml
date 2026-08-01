@@ -50,3 +50,4 @@ where = ["src"]
 namespaces = true
 [tool.setuptools.package-data]
 "newsbot.ai" = ["resources/*.json"]
+"newsbot" = ["migrations/*.sql"]
