@@ -122,6 +122,7 @@ sudo useradd --system --create-home --home-dir /var/lib/newsbot \
 sudo useradd --system --create-home --home-dir /var/lib/newsbot-codex \
   --shell /usr/sbin/nologin newsbot-codex
 sudo install -d -o root -g root -m 0755 /opt/newsbot/releases
+sudo install -d -o root -g root -m 0755 /usr/local/libexec /usr/local/share/newsbot
 sudo install -d -o newsbot -g newsbot -m 0700 /var/lib/newsbot/telegram
 sudo install -d -o newsbot -g newsbot -m 0700 /var/lib/newsbot/google
 sudo install -d -o newsbot-codex -g newsbot-codex -m 0700 /var/lib/newsbot-codex/.codex
