@@ -66,7 +66,9 @@ def root_dir(path, mode):
 
 def parents_safe(path):
     current = "/"
-    for component in path.strip("/").split("/"):
+    for component in os.path.dirname(path).strip("/").split("/"):
+        if not component:
+            continue
         current = os.path.join(current, component)
         value = os.stat(current, follow_symlinks=False)
         if not stat.S_ISDIR(value.st_mode) or value.st_uid != 0 or value.st_mode & 0o022:

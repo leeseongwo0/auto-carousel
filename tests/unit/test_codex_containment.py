@@ -45,6 +45,23 @@ def test_bundled_codex_policy_is_minimal_read_only_and_denies_device_auth() -> N
     assert policy["permissions"]["newsbot_generate"]["extends"] == ":read-only"
     assert policy["permissions"]["newsbot_generate"]["filesystem"] == {"~/.codex": "deny"}
 
+def test_parent_check_validates_directories_not_regular_target(
+    containment: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directories = {"/usr", "/usr/local", "/usr/local/lib"}
+    visited: list[str] = []
+
+    def fake_stat(path: str, **_: object) -> SimpleNamespace:
+        visited.append(path)
+        mode = containment.stat.S_IFDIR if path in directories else containment.stat.S_IFREG
+        return SimpleNamespace(st_mode=mode | 0o755, st_uid=0)
+
+    monkeypatch.setattr(containment.os, "stat", fake_stat)
+
+    containment.parents_safe("/usr/local/lib/manifest.json")
+
+    assert visited == ["/usr", "/usr/local", "/usr/local/lib"]
+
 
 def test_lock_parent_check_accepts_standard_sticky_run_lock(
     containment: object, monkeypatch: pytest.MonkeyPatch
