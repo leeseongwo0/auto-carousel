@@ -253,17 +253,21 @@ def auth_telethon(args: argparse.Namespace) -> int:
     if not session_value:
         raise ConfigError("missing required environment variables: TELEGRAM_SESSION_PATH")
     session_path = Path(session_value)
-    ensure_private_directory(session_path.parent)
-    loop = asyncio.new_event_loop()
-    collector, close = _live_collector(loop, session_path)
+    previous_umask = os.umask(0o077)
     try:
-        cast(Any, collector).authenticate()
-        SessionStore(session_path).validate()
-    finally:
+        ensure_private_directory(session_path.parent)
+        loop = asyncio.new_event_loop()
         try:
-            close()
+            collector, close = _live_collector(loop, session_path)
+            try:
+                cast(Any, collector).authenticate()
+                SessionStore(session_path).validate()
+            finally:
+                close()
         finally:
             loop.close()
+    finally:
+        os.umask(previous_umask)
     _print({"session_path": str(session_path), "status": "authorized"})
     return 0
 

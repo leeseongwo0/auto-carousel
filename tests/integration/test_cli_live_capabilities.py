@@ -382,6 +382,37 @@ def test_reconcile_fixture_requires_complete_exclusive_bounds_before_collector(m
         )
 
 
+def test_auth_telethon_enforces_private_umask_and_restores_caller_umask(tmp_path, monkeypatch) -> None:
+    from newsbot import cli
+
+    state = {"mode": 0o022, "closed": False}
+
+    def fake_umask(mode: int) -> int:
+        previous = int(state["mode"])
+        state["mode"] = mode
+        return previous
+
+    def authenticate() -> None:
+        assert state["mode"] == 0o077
+
+    monkeypatch.setenv("TELEGRAM_SESSION_PATH", str(tmp_path / "newsbot.session"))
+    monkeypatch.setattr(cli, "validate_capabilities", lambda *_: None)
+    monkeypatch.setattr(cli, "ensure_private_directory", lambda _: None)
+    monkeypatch.setattr(cli.os, "umask", fake_umask)
+    monkeypatch.setattr(cli, "SessionStore", lambda _: SimpleNamespace(validate=lambda: None))
+    monkeypatch.setattr(
+        cli,
+        "_live_collector",
+        lambda *_: (
+            SimpleNamespace(authenticate=authenticate),
+            lambda: state.__setitem__("closed", True),
+        ),
+    )
+
+    assert cli.auth_telethon(SimpleNamespace()) == 0
+    assert state == {"mode": 0o022, "closed": True}
+
+
 def test_auth_telethon_fails_closed_before_adapter_import(monkeypatch) -> None:
     from newsbot import cli
 
