@@ -356,6 +356,7 @@ sudo install -o root -g root -m 0755 /opt/newsbot/current/deploy/newsbot_codex_r
 sudo install -o root -g root -m 0755 /opt/newsbot/current/deploy/newsbot_codex_containment.py /usr/local/sbin/newsbot-codex-containment-v1
 sudo install -o root -g root -m 0755 /opt/newsbot/current/deploy/build_codex_manifest.py /usr/local/sbin/newsbot-build-codex-manifest-v1
 sudo install -o root -g root -m 0644 /opt/newsbot/current/src/newsbot/ai/resources/copy_draft.schema.json /usr/local/share/newsbot/copy_draft.schema.json
+sudo install -o root -g root -m 0644 /opt/newsbot/current/deploy/codex-requirements.toml /etc/codex/requirements.toml
 sudo install -o root -g root -m 0440 /opt/newsbot/current/deploy/sudoers/newsbot-codex /etc/sudoers.d/newsbot-codex
 sudo visudo -cf /etc/sudoers.d/newsbot-codex
 sudo install -o root -g root -m 0644 /opt/newsbot/current/deploy/systemd/newsbot-generate-codex.service /etc/systemd/system/

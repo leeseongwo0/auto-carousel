@@ -1,0 +1,14 @@
+default_permissions = "newsbot_generate"
+allowed_approval_policies = ["never"]
+allowed_web_search_modes = []
+allow_remote_control = false
+
+[allowed_permission_profiles]
+newsbot_generate = true
+
+[permissions.newsbot_generate]
+description = "Read-only Newsbot card generation"
+extends = ":read-only"
+
+[permissions.newsbot_generate.filesystem]
+"~/.codex" = "deny"

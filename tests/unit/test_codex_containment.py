@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -30,6 +31,18 @@ def test_manifest_attests_managed_codex_requirements(containment: object) -> Non
 
     assert set(manifest.ARTIFACTS) == set(containment.MANIFEST_ARTIFACTS)
     assert manifest.ARTIFACTS["/etc/codex/requirements.toml"] == 0o644
+
+
+def test_bundled_codex_policy_is_minimal_read_only_and_denies_device_auth() -> None:
+    policy = tomllib.loads((Path(__file__).parents[2] / "deploy/codex-requirements.toml").read_text(encoding="utf-8"))
+
+    assert policy["default_permissions"] == "newsbot_generate"
+    assert policy["allowed_approval_policies"] == ["never"]
+    assert policy["allowed_web_search_modes"] == []
+    assert policy["allow_remote_control"] is False
+    assert policy["allowed_permission_profiles"] == {"newsbot_generate": True}
+    assert policy["permissions"]["newsbot_generate"]["extends"] == ":read-only"
+    assert policy["permissions"]["newsbot_generate"]["filesystem"] == {"~/.codex": "deny"}
 
 
 def _dirty(module: object, *, unit: str | None = None, manifest: str = "m" * 64) -> dict[str, object]:
