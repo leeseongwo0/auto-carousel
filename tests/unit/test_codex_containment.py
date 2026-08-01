@@ -20,6 +20,18 @@ def containment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     return module
 
 
+def test_manifest_attests_managed_codex_requirements(containment: object) -> None:
+    spec = importlib.util.spec_from_file_location(
+        "test_codex_manifest_module", Path(__file__).parents[2] / "deploy/build_codex_manifest.py"
+    )
+    assert spec and spec.loader
+    manifest = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(manifest)
+
+    assert set(manifest.ARTIFACTS) == set(containment.MANIFEST_ARTIFACTS)
+    assert manifest.ARTIFACTS["/etc/codex/requirements.toml"] == 0o644
+
+
 def _dirty(module: object, *, unit: str | None = None, manifest: str = "m" * 64) -> dict[str, object]:
     return {
         "activation": "a" * 32,

@@ -135,16 +135,22 @@ sudo install -o root -g root -m 0644 /opt/newsbot/current/deploy/tmpfiles/newsbo
 sudo install -d -o newsbot -g newsbot -m 0700 /var/lib/newsbot-canary
 sudo -u newsbot sh -c 'umask 077; exec /usr/local/bin/newsbot init-db --db /var/lib/newsbot-canary/newsbot.db'
 sudo systemd-tmpfiles --create /etc/tmpfiles.d/newsbot-codex.conf
-sudo /usr/local/sbin/newsbot-build-codex-manifest-v1
 sudo systemctl daemon-reload</code></pre></section>
 
-<section><h2><span class="step">11</span>보안 policy gate — 여기서 확인 없이 넘어가지 않기</h2><div class="warn"><strong>현재 저장소에는 VPS별 <code>/etc/codex/requirements.toml</code> 완성본과 실제 effective-policy canary가 없습니다.</strong> Codex child가 auth, Newsbot 파일, network, web, MCP, plugin, socket 및 <code>/proc</code> 경로에 접근하지 못한다는 검증 전에는 production timer를 켜면 안 됩니다.</div><button class="copy">복사</button><pre><code>sudoedit /etc/codex/requirements.toml
+<section><h2><span class="step">11</span>보안 policy gate — 통과 전 Codex service 금지</h2><div class="warn"><strong>이 단계는 단순 설치가 아니라 production 차단 gate입니다.</strong> <code>/etc/codex/requirements.toml</code>이 strict read-only profile만 허용하고, 실제 Codex 0.146.0에서 auth·Newsbot 파일·network·web·MCP·plugin·socket·<code>/proc</code> 접근이 모두 거부됨을 확인해야 합니다. 설정 파일만 만들었다고 통과한 것이 아닙니다.</div><button class="copy">복사</button><pre><code>sudoedit /etc/codex/requirements.toml
 sudo chown root:root /etc/codex/requirements.toml
 sudo chmod 0644 /etc/codex/requirements.toml
 
+CODEX_WRAPPER="$(command -v codex)"
+sudo -u newsbot-codex -H "$CODEX_WRAPPER" doctor --summary --no-color
+
+# doctor와 실제 negative canary가 모두 통과한 뒤 manifest에 policy hash를 포함
+sudo /usr/local/sbin/newsbot-build-codex-manifest-v1
+sudo stat -c '%U:%G %a %n' /usr/local/lib/newsbot-codex-manifest-v1.json
+
 # 모든 Codex unit이 inactive이고 cgroup이 비어 있음을 확인한 뒤에만 실행
 sudo /usr/local/sbin/newsbot-codex-containment-v1 reset
-sudo /usr/local/sbin/newsbot-codex-containment-v1 inspect</code></pre></section>
+sudo /usr/local/sbin/newsbot-codex-containment-v1 inspect</code></pre><p>실제 negative canary가 준비되지 않았거나 결과가 불명확하면 12번의 수집·Telegram·Sheets 설정은 계속할 수 있지만 13번 Codex service와 15번 timer는 실행하지 않습니다.</p></section>
 
 <section><button class="copy">복사</button><h2><span class="step">12</span>수집→랭킹→Telegram 후보 질문</h2><pre><code>sudo -u newsbot -H bash
 set -a

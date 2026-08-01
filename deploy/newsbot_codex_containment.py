@@ -31,6 +31,7 @@ MANIFEST_ARTIFACTS = frozenset(
         "/usr/local/libexec/newsbot-codex-runner-v1",
         "/usr/local/sbin/newsbot-codex-containment-v1",
         "/usr/local/share/newsbot/copy_draft.schema.json",
+        "/etc/codex/requirements.toml",
         "/etc/sudoers.d/newsbot-codex",
         "/etc/systemd/system/newsbot-generate-codex.service",
         "/etc/systemd/system/newsbot-generate-codex-canary.service",

@@ -19,6 +19,7 @@ ARTIFACTS = {
     "/usr/local/libexec/newsbot-codex-runner-v1": 0o755,
     "/usr/local/sbin/newsbot-codex-containment-v1": 0o755,
     "/usr/local/share/newsbot/copy_draft.schema.json": 0o644,
+    "/etc/codex/requirements.toml": 0o644,
     "/etc/sudoers.d/newsbot-codex": 0o440,
     "/etc/systemd/system/newsbot-generate-codex.service": 0o644,
     "/etc/systemd/system/newsbot-generate-codex-canary.service": 0o644,
