@@ -26,6 +26,12 @@ def _rate_limit(seconds: object) -> HTTPError:
     return HTTPError("https://api.telegram.invalid", 429, "Too Many Requests", {}, io.BytesIO(body))
 
 
+def test_short_multiline_message_is_not_split() -> None:
+    assert telegram.split_telegram_text("제목: 뉴스\n출처: https://t.me/source/1") == (
+        "제목: 뉴스\n출처: https://t.me/source/1",
+    )
+
+
 def test_send_message_honors_retry_after_then_applies_group_pacing(monkeypatch: pytest.MonkeyPatch) -> None:
     responses: list[object] = [_rate_limit(2), _Response()]
     sleeps: list[float] = []
@@ -57,3 +63,37 @@ def test_retry_after_is_bounded_and_non_rate_limit_errors_are_not_swallowed(
     with pytest.raises(HTTPError) as raised:
         adapter._request("sendMessage", {"chat_id": "-1001", "text": "candidate"})
     assert raised.value.code == 403
+
+
+def test_candidate_notification_contains_only_title_source_and_buttons() -> None:
+    sent: list[tuple[str, object]] = []
+
+    class Adapter(telegram.TelegramApprovalAdapter):
+        def _request(self, method: str, payload: object) -> dict[str, object]:
+            sent.append((method, payload))
+            return {"ok": True}
+
+    service = SimpleNamespace(chat_id=-1001)
+    digest = SimpleNamespace(
+        candidates=(
+            {
+                "candidate_id": 5,
+                "title": "Anthropic 보안 평가 사고",
+                "source_url": "https://t.me/aipost/7687",
+                "score": "0.754928",
+                "rationale": {"large": "internal metadata"},
+            },
+        ),
+        buttons={5: (SimpleNamespace(label="[제작]", token="token"),)},
+    )
+
+    Adapter("token", service).send_candidate_digest(digest)
+
+    assert len(sent) == 1
+    method, payload = sent[0]
+    assert method == "sendMessage"
+    assert payload["text"] == "제목: Anthropic 보안 평가 사고\n출처: https://t.me/aipost/7687"
+    assert "reply_markup" in payload
+    assert "점수" not in payload["text"]
+    assert "근거" not in payload["text"]
+    assert "internal metadata" not in payload["text"]

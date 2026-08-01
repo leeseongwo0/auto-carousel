@@ -59,7 +59,7 @@ def split_telegram_text(text: str, *, limit: int = TELEGRAM_TEXT_LIMIT) -> tuple
                 last_newline = end
         if end == start:
             raise ValueError("a single character exceeds the Telegram UTF-16 limit")
-        split_at = last_newline if last_newline is not None and last_newline > start else end
+        split_at = last_newline if end < len(text) and last_newline is not None and last_newline > start else end
         chunks.append(text[start:split_at])
         start = split_at
     return tuple(chunks)
@@ -111,11 +111,7 @@ class TelegramApprovalAdapter:
             markup = {
                 "inline_keyboard": [[{"text": button.label, "callback_data": button.token}] for button in buttons]
             }
-            warnings = "\n".join(
-                f"경고 ({warning['kind']}): {warning['detail']}" for warning in candidate.get("warnings", ())
-            )
-            text = "후보 #{candidate_id}\n점수: {score}\n근거: {rationale}".format(**candidate)
-            self._send_text(f"{text}\n{warnings}" if warnings else text, markup=markup)
+            self._send_text(f"제목: {candidate['title']}\n출처: {candidate['source_url']}", markup=markup)
 
     def send_review_draft(
         self,

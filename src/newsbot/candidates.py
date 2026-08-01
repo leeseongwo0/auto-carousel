@@ -88,7 +88,8 @@ class CandidateApprovalService:
         with self.storage.transaction() as connection:
             rows = list(
                 connection.execute(
-                    "SELECT c.id, c.rank, c.revision, ce.score, ce.rationale_json "
+                    "SELECT c.id, c.rank, c.revision, ce.score, ce.rationale_json, "
+                    "ce.source_post_version_id AS primary_source_id "
                     "FROM candidates c JOIN candidate_evaluations ce ON ce.id=c.evaluation_id "
                     "WHERE ce.run_id=? AND c.status='pending_selection' ORDER BY c.rank ASC, c.id ASC",
                     (run_id,),
@@ -108,6 +109,9 @@ class CandidateApprovalService:
                 if not self._has_newer_material_source(connection, self._source_ids(connection, int(row["id"])))
             ]
             bindings = {int(row["id"]): self._source_ids(connection, int(row["id"])) for row in rows}
+            displays = {
+                int(row["id"]): self._candidate_display(connection, int(row["primary_source_id"])) for row in rows
+            }
             digest_material = [(int(row["id"]), int(row["revision"]), bindings[int(row["id"])]) for row in rows]
             key = "candidate-{}-{}".format(
                 run_id,
@@ -133,6 +137,8 @@ class CandidateApprovalService:
                     "candidate_id": candidate_id,
                     "rank": row["rank"],
                     "score": row["score"],
+                    "title": displays[candidate_id][0],
+                    "source_url": displays[candidate_id][1],
                     "rationale": json.loads(row["rationale_json"]),
                     "warnings": _warnings(json.loads(row["rationale_json"])),
                     "source_version_ids": source_ids,
@@ -705,6 +711,47 @@ class CandidateApprovalService:
             (candidate_id,),
         ).fetchone()
         return () if row is None else (int(row["source_post_version_id"]),)
+
+    @staticmethod
+    def _candidate_display(connection: Any, source_version_id: int) -> tuple[str, str]:
+        row = connection.execute(
+            "SELECT version.body, version.urls_json, version.channel_handle, "
+            "post.external_post_id, post.source_url "
+            "FROM source_post_versions version "
+            "JOIN source_posts post ON post.id=version.source_post_id "
+            "WHERE version.id=?",
+            (source_version_id,),
+        ).fetchone()
+        if row is None:
+            return ("제목 없음", "링크 없음")
+
+        title = ""
+        try:
+            urls = json.loads(str(row["urls_json"]))
+        except json.JSONDecodeError:
+            urls = []
+        if isinstance(urls, list):
+            title = next(
+                (
+                    str(item["title"]).strip()
+                    for item in urls
+                    if isinstance(item, dict) and isinstance(item.get("title"), str) and str(item["title"]).strip()
+                ),
+                "",
+            )
+        if not title:
+            body = str(row["body"]).strip()
+            title = " ".join((body.splitlines()[0] if body else "제목 없음").split())
+        if len(title) > 100:
+            title = title[:99].rstrip() + "…"
+
+        source_url = str(row["source_url"] or "").strip()
+        if not source_url:
+            handle = str(row["channel_handle"] or "").strip().lstrip("@")
+            external_post_id = str(row["external_post_id"] or "").strip()
+            if handle and external_post_id:
+                source_url = f"https://t.me/{handle}/{external_post_id}"
+        return (title or "제목 없음", source_url or "링크 없음")
 
     @staticmethod
     def _export_source_versions(connection: Any, source_ids: tuple[int, ...]) -> tuple[dict[str, Any], ...]:

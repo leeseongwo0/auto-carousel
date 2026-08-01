@@ -11,7 +11,16 @@ from newsbot.runtime import FixtureClock
 from newsbot.storage import Storage
 
 
-def _candidate(storage: Storage, *, run_key: str = "approval", external_post_id: str = "1") -> int:
+def _candidate(
+    storage: Storage,
+    *,
+    run_key: str = "approval",
+    external_post_id: str = "1",
+    source_url: str | None = None,
+    body: str = "source",
+    channel_handle: str = "",
+    urls_json: str = "[]",
+) -> int:
     with storage.transaction() as connection:
         connection.execute(
             "INSERT INTO runs(run_key, mode, status) VALUES (?, 'fixture', 'done')",
@@ -19,12 +28,15 @@ def _candidate(storage: Storage, *, run_key: str = "approval", external_post_id:
         )
         run_id = connection.execute("SELECT last_insert_rowid()").fetchone()[0]
         connection.execute(
-            "INSERT INTO source_posts(channel_id, external_post_id) VALUES ('channel', ?)",
-            (external_post_id,),
+            "INSERT INTO source_posts(channel_id, external_post_id, source_url) VALUES ('channel', ?, ?)",
+            (external_post_id, source_url),
         )
         post_id = connection.execute("SELECT last_insert_rowid()").fetchone()[0]
         connection.execute(
-            "INSERT INTO source_post_versions(source_post_id, version_key, body) VALUES (?, 'v1', 'source')", (post_id,)
+            "INSERT INTO source_post_versions("
+            "source_post_id, version_key, body, channel_handle, urls_json"
+            ") VALUES (?, 'v1', ?, ?, ?)",
+            (post_id, body, channel_handle, urls_json),
         )
         version_id = connection.execute("SELECT last_insert_rowid()").fetchone()[0]
         connection.execute(
@@ -76,6 +88,23 @@ def _review_generation(storage: Storage, candidate_id: int, *, page_count: int =
         )
         connection.execute("UPDATE candidates SET status='pending_review' WHERE id=?", (candidate_id,))
         return int(generation_id), int(source_version_id)
+
+
+def test_candidate_digest_projects_preview_title_and_telegram_source_only() -> None:
+    storage = Storage.open(":memory:")
+    _candidate(
+        storage,
+        source_url="https://t.me/aipost/7687",
+        body="긴 본문은 Telegram 후보 메시지에 포함되면 안 됩니다.",
+        channel_handle="aipost",
+        urls_json=json.dumps([{"url": "https://example.test", "title": "Anthropic 보안 평가 사고"}]),
+    )
+    service = CandidateApprovalService(storage, chat_id=100, authorized_user_ids={7}, now=FixtureClock().now)
+
+    candidate = service.create_digest(1, actor_id=7).candidates[0]
+
+    assert candidate["title"] == "Anthropic 보안 평가 사고"
+    assert candidate["source_url"] == "https://t.me/aipost/7687"
 
 
 def test_selection_is_provider_free_and_idempotent() -> None:
