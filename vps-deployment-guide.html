@@ -170,7 +170,7 @@ sudo install -o root -g root -m 0755 \
     <pre><code>sudo install -o root -g root -m 0644 \
   /opt/newsbot/current/config/channels.toml /etc/newsbot/config.toml
 
-sudo -u newsbot /usr/local/bin/newsbot init-db --db /var/lib/newsbot/newsbot.db</code></pre>
+sudo -u newsbot sh -c 'umask 077; exec /usr/local/bin/newsbot init-db --db /var/lib/newsbot/newsbot.db'</code></pre>
     <div class="notice"><code>newsbot-generate-codex.service</code>는 설정 경로를 <code>/etc/newsbot/config.toml</code>로 고정 검증합니다. 이 파일을 생략하면 Codex service는 fail closed합니다.</div>
   </section>
 
@@ -207,6 +207,7 @@ GOOGLE_SERVICE_ACCOUNT_FILE=/etc/newsbot/google.json</code></pre>
 set -a
 source /etc/newsbot/newsbot.env
 set +a
+umask 077
 cd /opt/newsbot/current
 
 /usr/local/bin/newsbot init-db --db /var/lib/newsbot/newsbot.db</code></pre>
@@ -368,8 +369,8 @@ sudo systemd-tmpfiles --create /etc/tmpfiles.d/newsbot-codex.conf
 sudo /usr/local/sbin/newsbot-build-codex-manifest-v1
 
 # 4. migration/FK를 확인한 뒤 reset receipt로 최초 clean state를 만든다. absence는 clean이 아니다.
-sudo -u newsbot /usr/local/bin/newsbot init-db --db /var/lib/newsbot/newsbot.db
-sudo -u newsbot /usr/local/bin/newsbot init-db --db /var/lib/newsbot-canary/newsbot.db
+sudo -u newsbot sh -c 'umask 077; exec /usr/local/bin/newsbot init-db --db /var/lib/newsbot/newsbot.db'
+sudo -u newsbot sh -c 'umask 077; exec /usr/local/bin/newsbot init-db --db /var/lib/newsbot-canary/newsbot.db'
 sudo -u newsbot sqlite3 /var/lib/newsbot/newsbot.db 'PRAGMA foreign_key_check'
 sudo /usr/local/sbin/newsbot-codex-containment-v1 reset
 sudo /usr/local/sbin/newsbot-codex-containment-v1 inspect

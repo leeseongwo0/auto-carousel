@@ -75,10 +75,11 @@ NEWSBOT_APPROVER_USER_IDS=
 GOOGLE_SHEETS_SPREADSHEET_ID=
 GOOGLE_SERVICE_ACCOUNT_FILE=/etc/newsbot/google.json</code></pre></section>
 
-<section><button class="copy">복사</button><h2><span class="step">6</span>SQLite 운영 DB 생성</h2><pre><code>sudo -u newsbot /usr/local/bin/newsbot init-db --db /var/lib/newsbot/newsbot.db
+<section><button class="copy">복사</button><h2><span class="step">6</span>SQLite 운영 DB 생성</h2><pre><code>sudo -u newsbot sh -c 'umask 077; exec /usr/local/bin/newsbot init-db --db /var/lib/newsbot/newsbot.db'
 sudo -u newsbot sqlite3 /var/lib/newsbot/newsbot.db \
   "SELECT version FROM schema_migrations ORDER BY version;"
 sudo -u newsbot sqlite3 /var/lib/newsbot/newsbot.db "PRAGMA foreign_key_check;"
+sudo chmod 0600 /var/lib/newsbot/newsbot.db
 sudo stat -c '%U:%G %a %n' /var/lib/newsbot/newsbot.db</code></pre><div class="ok"><code>PRAGMA foreign_key_check</code>가 아무것도 출력하지 않으면 정상입니다.</div></section>
 
 <section><button class="copy">복사</button><h2><span class="step">7</span>Telegram 계정 인증</h2><pre><code>sudo -u newsbot -H bash
@@ -129,7 +130,7 @@ sudo install -o root -g root -m 0644 /opt/newsbot/current/deploy/systemd/newsbot
 sudo install -o root -g root -m 0644 /opt/newsbot/current/deploy/tmpfiles/newsbot-codex.conf /etc/tmpfiles.d/newsbot-codex.conf
 
 sudo install -d -o newsbot -g newsbot -m 0700 /var/lib/newsbot-canary
-sudo -u newsbot /usr/local/bin/newsbot init-db --db /var/lib/newsbot-canary/newsbot.db
+sudo -u newsbot sh -c 'umask 077; exec /usr/local/bin/newsbot init-db --db /var/lib/newsbot-canary/newsbot.db'
 sudo systemd-tmpfiles --create /etc/tmpfiles.d/newsbot-codex.conf
 sudo /usr/local/sbin/newsbot-build-codex-manifest-v1
 sudo systemctl daemon-reload</code></pre></section>
