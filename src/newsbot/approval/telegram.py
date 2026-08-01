@@ -7,15 +7,30 @@ only by explicit send/poll calls.
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
+from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from newsbot.candidates import CandidateApprovalService, CandidateDigest
 
 TELEGRAM_TEXT_LIMIT = 4096
+TELEGRAM_GROUP_SEND_INTERVAL_SECONDS = 3.1
+TELEGRAM_MAX_RETRY_AFTER_SECONDS = 60
+
+
+def _retry_after(error: HTTPError) -> int:
+    try:
+        payload = json.loads(error.read(64 * 1024).decode("utf-8"))
+        seconds = payload["parameters"]["retry_after"]
+    except (KeyError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        return 1
+    if not isinstance(seconds, int) or isinstance(seconds, bool):
+        return 1
+    return min(max(seconds, 1), TELEGRAM_MAX_RETRY_AFTER_SECONDS)
 
 
 def _utf16_units(value: str) -> int:
@@ -61,8 +76,16 @@ class TelegramApprovalAdapter:
             raise ValueError("Telegram bot token is required when invoking the adapter")
         body = urlencode(payload).encode("utf-8")
         request = Request(f"{self.api_base}/bot{self.token}/{method}", data=body, method="POST")
-        with urlopen(request, timeout=20) as response:  # nosec B310: explicit Bot API endpoint
-            decoded = json.loads(response.read().decode("utf-8"))
+        decoded: object = None
+        for attempt in range(3):
+            try:
+                with urlopen(request, timeout=20) as response:  # nosec B310: explicit Bot API endpoint
+                    decoded = json.loads(response.read().decode("utf-8"))
+                break
+            except HTTPError as error:
+                if error.code != 429 or attempt == 2:
+                    raise
+                time.sleep(_retry_after(error))
         if not isinstance(decoded, dict) or not all(isinstance(key, str) for key in decoded):
             raise RuntimeError("Telegram Bot API returned an invalid response")
         result: dict[str, object] = {}
@@ -70,6 +93,8 @@ class TelegramApprovalAdapter:
             result[key] = value
         if not result.get("ok"):
             raise RuntimeError("Telegram Bot API request failed")
+        if method == "sendMessage":
+            time.sleep(TELEGRAM_GROUP_SEND_INTERVAL_SECONDS)
         return result
 
     def _send_text(self, text: str, *, markup: Mapping[str, object] | None = None) -> None:
