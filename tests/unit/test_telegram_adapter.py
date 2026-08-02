@@ -105,3 +105,31 @@ def test_candidate_notification_contains_only_title_source_and_buttons() -> None
     assert "점수" not in payload["text"]
     assert "근거" not in payload["text"]
     assert "internal metadata" not in payload["text"]
+
+
+def test_expired_callback_ack_does_not_hide_durable_approval() -> None:
+    applied: list[str] = []
+
+    class Service:
+        chat_id = -1001
+
+        def apply(self, token: str, *, chat_id: int, user_id: int) -> SimpleNamespace:
+            applied.append(token)
+            return SimpleNamespace(status="approved")
+
+    class Adapter(telegram.TelegramApprovalAdapter):
+        def _request(self, method: str, payload: object) -> dict[str, object]:
+            assert method == "answerCallbackQuery"
+            raise HTTPError("https://api.telegram.invalid", 400, "Bad Request", {}, io.BytesIO(b"query is too old"))
+
+    update = {
+        "callback_query": {
+            "id": "expired",
+            "data": "durable-token",
+            "from": {"id": 42},
+            "message": {"chat": {"id": -1001}},
+        }
+    }
+
+    assert Adapter("token", Service()).handle_update(update) == "approved"
+    assert applied == ["durable-token"]

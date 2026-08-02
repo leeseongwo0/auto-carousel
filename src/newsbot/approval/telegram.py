@@ -165,5 +165,9 @@ class TelegramApprovalAdapter:
         result = self.service.apply(token, chat_id=chat["id"], user_id=user["id"])
         callback_id = callback.get("id")
         if isinstance(callback_id, str):
-            self._request("answerCallbackQuery", {"callback_query_id": callback_id, "text": result.status})
+            try:
+                self._request("answerCallbackQuery", {"callback_query_id": callback_id, "text": result.status})
+            except HTTPError as error:
+                if error.code != 400:
+                    raise
         return result.status
