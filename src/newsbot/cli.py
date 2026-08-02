@@ -1018,6 +1018,26 @@ def _notify_resumed_approval(
         )
 
 
+def _approval_poll_offset(storage: Storage, explicit_offset: int | None) -> int | None:
+    if explicit_offset is not None:
+        return explicit_offset
+    cursor = storage.fetch_one(
+        "SELECT next_offset FROM telegram_update_cursors WHERE stream='approval'"
+    )
+    return None if cursor is None else int(cursor["next_offset"])
+
+
+def _advance_approval_poll_offset(storage: Storage, update_id: int) -> None:
+    with storage.transaction() as connection:
+        connection.execute(
+            "INSERT INTO telegram_update_cursors(stream,next_offset) VALUES ('approval',?) "
+            "ON CONFLICT(stream) DO UPDATE SET "
+            "next_offset=MAX(telegram_update_cursors.next_offset,excluded.next_offset), "
+            "updated_at=CURRENT_TIMESTAMP",
+            (update_id + 1,),
+        )
+
+
 def poll_approvals(args: argparse.Namespace) -> int:
     config: AppConfig | None = None
     capabilities: list[Capability] = [Capability.APPROVE_POLL]
@@ -1035,18 +1055,24 @@ def poll_approvals(args: argparse.Namespace) -> int:
         service = _approval_service(storage)
         adapter = TelegramApprovalAdapter(os.environ["TELEGRAM_BOT_TOKEN"], service)
         payload: dict[str, Any] = {"timeout": str(args.timeout)}
-        if args.offset is not None:
-            payload["offset"] = str(args.offset)
+        poll_offset = _approval_poll_offset(storage, args.offset)
+        if poll_offset is not None:
+            payload["offset"] = str(poll_offset)
         response = adapter._request("getUpdates", payload)
         updates = response.get("result", [])
         if not isinstance(updates, list):
             raise RuntimeError("Telegram Bot API returned an invalid getUpdates result")
-        statuses = [
-            result
-            for update in updates
-            if isinstance(update, dict)
-            if (result := adapter.handle_update(update)) is not None
-        ]
+        statuses: list[str] = []
+        for update in updates:
+            if not isinstance(update, dict):
+                continue
+            update_id = update.get("update_id")
+            if not isinstance(update_id, int) or isinstance(update_id, bool) or update_id < 0:
+                continue
+            result = adapter.handle_update(update)
+            if result is not None:
+                statuses.append(result)
+            _advance_approval_poll_offset(storage, update_id)
         resumed = service.resume_due(SystemClock().now())
         for candidate_id in resumed:
             _notify_resumed_approval(adapter, storage, service, candidate_id, min(service.authorized_user_ids))

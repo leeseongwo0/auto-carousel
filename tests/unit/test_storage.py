@@ -23,11 +23,12 @@ def test_open_initializes_schema_and_applies_migration_once(tmp_path: Path) -> N
             "sheet_remote_operations",
             "sheet_operation_events",
             "sheet_operation_leases",
+            "telegram_update_cursors",
         } <= tables
-        assert storage.fetch_one("SELECT COUNT(*) AS count FROM schema_migrations")["count"] == 5
+        assert storage.fetch_one("SELECT COUNT(*) AS count FROM schema_migrations")["count"] == 6
 
     with Storage.open(database) as storage:
-        assert storage.fetch_one("SELECT COUNT(*) AS count FROM schema_migrations")["count"] == 5
+        assert storage.fetch_one("SELECT COUNT(*) AS count FROM schema_migrations")["count"] == 6
 
 
 def test_storage_enforces_transaction_unique_and_foreign_key_constraints(tmp_path: Path) -> None:

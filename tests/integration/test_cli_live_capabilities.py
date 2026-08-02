@@ -13,6 +13,7 @@ import pytest
 from newsbot.approval.telegram import split_telegram_text
 from newsbot.config import Capability, ConfigError, validate_capabilities
 from newsbot.copywriting import adaptive_page_count
+from newsbot.storage import Storage
 
 
 def test_adaptive_page_count_has_deterministic_bounded_extremes() -> None:
@@ -56,6 +57,20 @@ def test_poll_generation_validates_bot_and_openai_capabilities_before_bot_effect
     with pytest.raises(SystemExit, match="2"):
         cli.main(["poll-approvals", "--process-generation", "--provider", "openai_compatible"])
     assert calls == [(Capability.APPROVE_POLL, Capability.GENERATE_OPENAI)]
+
+
+def test_approval_poll_cursor_is_durable_monotonic_and_explicitly_overridable() -> None:
+    from newsbot import cli
+
+    with Storage.open(":memory:") as storage:
+        assert cli._approval_poll_offset(storage, None) is None
+
+        cli._advance_approval_poll_offset(storage, 10)
+        assert cli._approval_poll_offset(storage, None) == 11
+
+        cli._advance_approval_poll_offset(storage, 4)
+        assert cli._approval_poll_offset(storage, None) == 11
+        assert cli._approval_poll_offset(storage, 7) == 7
 
 
 def test_capability_scoped_commands_appear_in_help_without_optional_imports(capsys) -> None:
