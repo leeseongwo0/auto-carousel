@@ -8,6 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from newsbot.ai.structured_copy import RESPONSE_SCHEMA, SYSTEM_INSTRUCTION
+
 
 @pytest.fixture
 def runner():
@@ -80,13 +82,16 @@ def test_runner_constants_pin_environment_and_codex_argv(runner: object) -> None
     )
     assert runner.RUNNER_CWD == "/var/empty/newsbot-codex"
 
-def test_output_schema_const_properties_declare_boolean_type() -> None:
+def test_bundled_output_schema_matches_runtime_contract() -> None:
     schema = json.loads(
         (Path(__file__).parents[2] / "src/newsbot/ai/resources/copy_draft.schema.json").read_text(encoding="utf-8")
     )
 
+    assert schema == RESPONSE_SCHEMA
     assert schema["properties"]["draft"] == {"type": "boolean", "const": True}
     assert schema["properties"]["source_reported"] == {"type": "boolean", "const": True}
+    assert "exactly page_count total pages" in SYSTEM_INSTRUCTION
+    assert "exact pair from the same supplied evidence" in SYSTEM_INSTRUCTION
 
 
 
