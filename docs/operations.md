@@ -4,7 +4,7 @@
 
 SQLite가 cursor, Telegram notification outbox/chunk attempt, approvals, generation, immutable Sheets handoff, remote operation/lease/probe와 audit의 권위다. 고정 여섯 채널은 `config/channels.toml`에만 정의한다. `newsbot-collect`, `newsbot-telegram`, `newsbot-sheets` service/timer는 모두 `newsbot` UID와 `/etc/newsbot/newsbot.env`, Telethon session, database, locks를 공유한다. 이는 편의와 coordination을 위한 공유 runtime이며 unit 사이 isolation/private mount security boundary가 아니다. Signed provenance and private cross-unit isolation are explicitly out of scope.
 
-Codex는 예외다. 기존 `newsbot-generate-codex.service`/`.timer`는 `newsbot-codex` UID, owner-only `CODEX_HOME`, root-attested no-argument runner와 durable immutable containment authority를 사용한다. non-Codex units와 Codex unit의 credential/containment/restore 절차를 섞지 않는다.
+Codex는 예외다. 기존 `newsbot-generate-codex.service`/`.timer` 자체는 `newsbot` UID로 실행되며, 고정 sudo runner만 login-shell 없는 `newsbot-codex` UID의 owner-only `CODEX_HOME` 경계를 통과한다. root-attested no-argument runner와 durable immutable containment authority는 그대로 유지하고, non-Codex units와 Codex unit의 credential/containment/restore 절차를 섞지 않는다.
 
 ## 일상 상태와 monitoring
 
