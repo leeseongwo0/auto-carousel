@@ -24,11 +24,96 @@ def test_open_initializes_schema_and_applies_migration_once(tmp_path: Path) -> N
             "sheet_operation_events",
             "sheet_operation_leases",
             "telegram_update_cursors",
+            "automation_cutovers",
+            "telegram_notification_outbox",
+            "automation_stream_leases",
         } <= tables
-        assert storage.fetch_one("SELECT COUNT(*) AS count FROM schema_migrations")["count"] == 6
+        assert storage.fetch_one("SELECT COUNT(*) AS count FROM schema_migrations")["count"] == 7
 
     with Storage.open(database) as storage:
-        assert storage.fetch_one("SELECT COUNT(*) AS count FROM schema_migrations")["count"] == 6
+        assert storage.fetch_one("SELECT COUNT(*) AS count FROM schema_migrations")["count"] == 7
+
+
+def test_telegram_outbox_and_attempt_identity_are_immutable_to_direct_sql(tmp_path: Path) -> None:
+    database = tmp_path / "newsbot.sqlite"
+    with Storage.open(database):
+        pass
+
+    connection = sqlite3.connect(database)
+    try:
+        digest = "a" * 64
+        connection.execute(
+            "INSERT INTO telegram_notification_outbox("
+            "id,audience_binding_id,cutover_id,notification_kind,candidate_id,source_set_key,subject_digest,state"
+            ") VALUES(1,1,1,'candidate',1,'source-set',?,'pending')",
+            (digest,),
+        )
+        connection.execute(
+            "INSERT INTO telegram_notification_chunks("
+            "id,notification_id,chunk_index,utf16_length,template_digest,has_buttons"
+            ") VALUES(1,1,0,1,?,0)",
+            (digest,),
+        )
+        connection.execute(
+            "INSERT INTO telegram_chunk_attempts("
+            "id,chunk_id,ordinal,owner_hash,fence,request_sha256,state,prepared_at"
+            ") VALUES(1,1,1,'owner',1,?,'prepared','2026-08-02T00:00:00+00:00')",
+            (digest,),
+        )
+
+        connection.execute(
+            "UPDATE telegram_notification_outbox SET state='claimed',claimed_at='2026-08-02T00:01:00+00:00' WHERE id=1"
+        )
+        connection.execute(
+            "UPDATE telegram_chunk_attempts SET state='possibly_sent',marked_at='2026-08-02T00:01:00+00:00' WHERE id=1"
+        )
+        for statement in (
+            "UPDATE telegram_chunk_attempts SET marked_at='2026-08-02T00:02:00+00:00' WHERE id=1",
+            "UPDATE telegram_chunk_attempts SET settled_at='2026-08-02T00:02:00+00:00' WHERE id=1",
+            "UPDATE telegram_chunk_attempts SET accepted_message_id=9 WHERE id=1",
+        ):
+            with pytest.raises(
+                sqlite3.IntegrityError,
+                match="chunk attempt evidence requires state transition",
+            ):
+                connection.execute(statement)
+        connection.execute(
+            "UPDATE telegram_chunk_attempts "
+            "SET state='accepted',accepted_message_id=9,settled_at='2026-08-02T00:02:00+00:00' "
+            "WHERE id=1"
+        )
+        for statement in (
+            "UPDATE telegram_chunk_attempts SET marked_at='2026-08-02T00:03:00+00:00' WHERE id=1",
+            "UPDATE telegram_chunk_attempts SET settled_at='2026-08-02T00:03:00+00:00' WHERE id=1",
+            "UPDATE telegram_chunk_attempts SET accepted_message_id=10 WHERE id=1",
+        ):
+            with pytest.raises(
+                sqlite3.IntegrityError,
+                match="chunk attempt evidence requires state transition",
+            ):
+                connection.execute(statement)
+
+        for statement, parameters in (
+            ("UPDATE telegram_notification_outbox SET audience_binding_id=2 WHERE id=1", ()),
+            ("UPDATE telegram_notification_outbox SET cutover_id=2 WHERE id=1", ()),
+            ("UPDATE telegram_notification_outbox SET subject_digest=? WHERE id=1", ("b" * 64,)),
+        ):
+            with pytest.raises(sqlite3.IntegrityError, match="notification identity is immutable"):
+                connection.execute(statement, parameters)
+        with pytest.raises(sqlite3.IntegrityError, match="notifications cannot be deleted"):
+            connection.execute("DELETE FROM telegram_notification_outbox WHERE id=1")
+        for statement, parameters in (
+            ("UPDATE telegram_chunk_attempts SET chunk_id=2 WHERE id=1", ()),
+            ("UPDATE telegram_chunk_attempts SET owner_hash='other-owner' WHERE id=1", ()),
+            ("UPDATE telegram_chunk_attempts SET fence=2 WHERE id=1", ()),
+            ("UPDATE telegram_chunk_attempts SET request_sha256=? WHERE id=1", ("b" * 64,)),
+        ):
+            with pytest.raises(sqlite3.IntegrityError, match="chunk attempt identity is immutable"):
+                connection.execute(statement, parameters)
+        with pytest.raises(sqlite3.IntegrityError, match="chunk attempts cannot be deleted"):
+            connection.execute("DELETE FROM telegram_chunk_attempts WHERE id=1")
+    finally:
+        connection.close()
 
 
 def test_storage_enforces_transaction_unique_and_foreign_key_constraints(tmp_path: Path) -> None:

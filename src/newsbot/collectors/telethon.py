@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from typing import Any, TypeVar
@@ -34,6 +35,7 @@ class TelethonCollector:
         max_retries: int = 3,
         retry_delay_seconds: float = 1.0,
         max_flood_wait_seconds: float = 60.0,
+        deadline_at: float | None = None,
     ) -> None:
         if max_retries < 0 or retry_delay_seconds < 0 or max_flood_wait_seconds < 0:
             raise ValueError("Telethon retry limits must be nonnegative")
@@ -44,6 +46,7 @@ class TelethonCollector:
         self._max_retries = max_retries
         self._retry_delay_seconds = retry_delay_seconds
         self._max_flood_wait_seconds = max_flood_wait_seconds
+        self._deadline_at = deadline_at
         self._client: Any | None = None
 
     async def _client_instance(self) -> Any:
@@ -117,9 +120,18 @@ class TelethonCollector:
 
     async def _with_retry(self, operation: Callable[[], Awaitable[_Result]]) -> _Result:
         for attempt in range(self._max_retries + 1):
+            remaining = self._remaining_seconds()
+            if remaining is not None and remaining <= 0:
+                raise TimeoutError("collection application deadline exhausted")
             try:
-                return await operation()
+                if remaining is None:
+                    return await operation()
+                async with asyncio.timeout(remaining):
+                    return await operation()
             except Exception as error:
+                remaining = self._remaining_seconds()
+                if remaining is not None and remaining <= 0:
+                    raise TimeoutError("collection application deadline exhausted") from error
                 flood_wait = _flood_wait_seconds(error)
                 if flood_wait is not None:
                     if flood_wait > self._max_flood_wait_seconds:
@@ -134,8 +146,13 @@ class TelethonCollector:
                     raise
                 if attempt == self._max_retries:
                     raise TelethonRetryError(f"Telethon request failed after {attempt + 1} attempts") from error
+                if remaining is not None:
+                    delay = min(delay, remaining)
                 await self._sleeper(delay)
         raise AssertionError("unreachable")
+
+    def _remaining_seconds(self) -> float | None:
+        return None if self._deadline_at is None else self._deadline_at - time.monotonic()
 
     async def close(self) -> None:
         if self._client is not None:

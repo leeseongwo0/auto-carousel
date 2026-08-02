@@ -1,0 +1,22 @@
+[Unit]
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=newsbot
+Group=newsbot
+WorkingDirectory=/var/lib/newsbot
+EnvironmentFile=/etc/newsbot/newsbot.env
+UMask=0077
+NoNewPrivileges=true
+CapabilityBoundingSet=
+ExecStart=/usr/local/bin/newsbot telegram-tick --config /etc/newsbot/config.toml --db /var/lib/newsbot/newsbot.db --poll-timeout 10 --max-updates 50 --max-notifications 1 --deadline-seconds 60 --lease-seconds 90
+TimeoutStartSec=75
+TimeoutStopSec=10
+KillMode=control-group
+SendSIGKILL=yes
+TasksMax=64
+MemoryMax=512M
+MemorySwapMax=0
+CPUQuota=100%

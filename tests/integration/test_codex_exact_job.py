@@ -67,6 +67,98 @@ def _bind(storage: Storage, job_id: int) -> None:
         )
 
 
+def _activate_cutover(storage: Storage, *, baseline_generation_job_id: int = 0) -> None:
+    digest = "a" * 64
+    now = NOW.isoformat()
+    expires = (NOW + timedelta(minutes=10)).isoformat()
+    with storage.transaction() as db:
+        db.execute(
+            "INSERT INTO sheet_target_bindings(target_ref_sha256,schema_version,sheet_id,sheet_title,oracle_fingerprint,created_at) "
+            "VALUES(?,'workplace-template-v1',0,'workplace',?,?)",
+            (digest, "b" * 64, now),
+        )
+        target_id = int(db.execute("SELECT last_insert_rowid()").fetchone()[0])
+        db.execute(
+            "INSERT INTO telegram_audience_bindings(bot_id_digest,token_hmac,audience_hmac,version,created_at) "
+            "VALUES(?,?,?,?,?)",
+            ("c" * 64, "d" * 64, "e" * 64, 1, now),
+        )
+        audience_id = int(db.execute("SELECT last_insert_rowid()").fetchone()[0])
+        db.execute(
+            "INSERT INTO automation_cutover_proposals("
+            "id,created_at,expires_at,config_digest,frontiers_digest,cursor_digest,intervals_digest,"
+            "candidate_max_id,generation_job_max_id,generation_max_id,decision_event_max_id,handoff_max_id,"
+            "callback_offset,nonterminal_job_count,outbox_count,ready_target_id,ready_target_fingerprint,"
+            "application_release_digest,audience_binding_digest,proposal_sha256"
+            ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "codex-authority-test",
+                now,
+                expires,
+                digest,
+                "f" * 64,
+                "1" * 64,
+                "2" * 64,
+                0,
+                baseline_generation_job_id,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                target_id,
+                digest,
+                "3" * 64,
+                "4" * 64,
+                "5" * 64,
+            ),
+        )
+        db.execute(
+            "INSERT INTO automation_cutovers("
+            "id,proposal_id,audience_binding_id,target_binding_id,release_digest,activated_at,"
+            "baseline_candidate_id,baseline_generation_job_id,baseline_generation_id,"
+            "baseline_decision_event_id,baseline_handoff_id,approval_offset"
+            ") VALUES(1,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "codex-authority-test",
+                audience_id,
+                target_id,
+                "6" * 64,
+                now,
+                0,
+                baseline_generation_job_id,
+                0,
+                0,
+                0,
+                0,
+            ),
+        )
+
+
+def test_post_cutover_codex_refuses_jobs_without_immutable_generation_authority() -> None:
+    storage = Storage.open(":memory:")
+    unbound = _job(storage, 1)
+    bound = _job(storage, 2)
+    _bind(storage, bound)
+    _activate_cutover(storage)
+
+    pipeline = _pipeline(storage)
+    assert pipeline.select_codex_job_id() is None
+    assert (
+        storage.fetch_one("SELECT 1 FROM generation_job_provider_bindings WHERE generation_job_id=?", (unbound,))
+        is None
+    )
+    assert asyncio.run(pipeline.generate_codex_job_exact(bound)) is None
+    assert storage.fetch_one("SELECT status FROM generation_jobs WHERE id=?", (bound,))["status"] == "queued"
+    assert (
+        storage.fetch_one(
+            "SELECT COUNT(*) AS count FROM generation_provider_attempts WHERE generation_job_id=?", (bound,)
+        )["count"]
+        == 0
+    )
+
+
 class InspectingCodex:
     storage: Storage
     job_id: int
@@ -92,6 +184,7 @@ class RaisingCodex:
     async def generate(self, _request):
         raise self.error
 
+
 class FlexibleCodex:
     async def generate(self, request):
         assert request.flexible_page_count is True
@@ -104,7 +197,6 @@ class FlexibleCodex:
                 locale=request.locale,
             )
         )
-
 
 
 def _pipeline(storage: Storage) -> NewsPipeline:

@@ -1,0 +1,13 @@
+[Unit]
+Description=Schedule Newsbot Sheets delivery
+
+[Timer]
+OnBootSec=90s
+OnUnitInactiveSec=1min
+RandomizedDelaySec=10s
+AccuracySec=5s
+Unit=newsbot-sheets.service
+Persistent=false
+
+[Install]
+WantedBy=timers.target

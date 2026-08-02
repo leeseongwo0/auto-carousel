@@ -12,6 +12,7 @@ from secrets import token_hex
 from typing import Any, Protocol
 
 from .ai.base import FactClaim, GenerationProvider, GenerationRequest
+from .automation import AutomationAuthority
 from .candidates import CandidateApprovalService, CandidateDigest
 from .collectors.base import SourceObservation
 from .copywriting import CopyDraft, adaptive_page_count, validate_copy
@@ -310,13 +311,16 @@ class NewsPipeline:
                     (run_id, source_set_key, evaluator_version),
                 ).fetchone()
                 assert row is not None
-                connection.execute(
-                    "INSERT OR IGNORE INTO candidates(evaluation_id, status, rank) VALUES (?, ?, ?)",
-                    (
-                        row["id"],
-                        "pending_selection" if evaluation.eligible else "rejected",
-                        rank if evaluation.eligible else None,
-                    ),
+                inserted = (
+                    connection.execute(
+                        "INSERT OR IGNORE INTO candidates(evaluation_id, status, rank) VALUES (?, ?, ?)",
+                        (
+                            row["id"],
+                            "pending_selection" if evaluation.eligible else "rejected",
+                            rank if evaluation.eligible else None,
+                        ),
+                    ).rowcount
+                    == 1
                 )
                 candidate = connection.execute(
                     "SELECT id FROM candidates WHERE evaluation_id=?", (row["id"],)
@@ -326,6 +330,55 @@ class NewsPipeline:
                     "INSERT OR IGNORE INTO candidate_sources(candidate_id, source_post_version_id) VALUES (?, ?)",
                     ((int(candidate["id"]), version_id) for version_id in version_ids),
                 )
+                if inserted and evaluation.eligible and self._post_frontier_material(connection, version_ids):
+                    AutomationAuthority.enqueue_candidate_notification(
+                        connection,
+                        candidate_id=int(candidate["id"]),
+                        source_set_key=source_set_key,
+                        subject_digest=sha256(f"candidate:{source_set_key}".encode()).hexdigest(),
+                    )
+
+    @staticmethod
+    def _post_frontier_material(connection: Any, version_ids: tuple[int, ...]) -> bool:
+        """Accept only a new post above its frontier or a post-cutover material edit."""
+        if not version_ids:
+            return False
+        rows = tuple(
+            connection.execute(
+                "SELECT post.channel_id,post.external_post_id,cutover.activated_at,"
+                "EXISTS(SELECT 1 FROM source_post_observations observation "
+                "WHERE observation.source_post_version_id=version.id "
+                "AND observation.observed_at>cutover.activated_at "
+                "AND observation.edited_at IS NOT NULL "
+                "AND observation.edited_at>cutover.activated_at) AS post_cutover_material_edit "
+                "FROM source_post_versions version "
+                "JOIN source_posts post ON post.id=version.source_post_id "
+                "JOIN automation_cutovers cutover ON cutover.id=1 "
+                f"WHERE version.id IN ({','.join('?' for _ in version_ids)})",
+                version_ids,
+            )
+        )
+        if not rows:
+            return False
+        frontiers = {
+            str(row["channel_key_digest"]): int(row["upper_message_id"])
+            for row in connection.execute(
+                "SELECT frontier.channel_key_digest,frontier.upper_message_id "
+                "FROM automation_cutovers cutover JOIN automation_proposal_frontiers frontier "
+                "ON frontier.proposal_id=cutover.proposal_id WHERE cutover.id=1"
+            )
+        }
+        for row in rows:
+            frontier = frontiers.get(sha256(str(row["channel_id"]).encode()).hexdigest())
+            try:
+                post_id = int(str(row["external_post_id"]))
+            except ValueError:
+                continue
+            if frontier is not None and post_id > frontier:
+                return True
+            if bool(row["post_cutover_material_edit"]):
+                return True
+        return False
 
     async def generate_selected(self, candidate_id: int, *, page_count: int) -> GenerationResult:
         """Lease one selected job before constructing or calling its provider."""
@@ -535,6 +588,14 @@ class NewsPipeline:
                 "UPDATE candidates SET status='pending_review' WHERE id=? AND status='selected_generation_pending'",
                 (candidate_id,),
             )
+            AutomationAuthority.enqueue_review_notification(
+                connection,
+                generation_id=generation_id,
+                generation_job_id=int(job["id"]),
+                subject_digest=sha256(
+                    json.dumps(generation_payload, ensure_ascii=False, sort_keys=True).encode()
+                ).hexdigest(),
+            )
         return GenerationResult(candidate_id, generation_id, draft, source_ids, False)
 
     def select_codex_job_id(self) -> int | None:
@@ -554,8 +615,13 @@ class NewsPipeline:
                 "JOIN selections s ON s.id=j.selection_id "
                 "JOIN candidates c ON c.id=s.candidate_id "
                 "LEFT JOIN generation_job_provider_bindings b ON b.generation_job_id=j.id "
+                "LEFT JOIN automation_cutovers cutover ON cutover.id=1 "
+                "LEFT JOIN automation_generation_authority authority "
+                "ON authority.generation_job_id=j.id AND authority.cutover_id=cutover.id "
                 "WHERE b.generation_job_id IS NULL AND j.status='queued' "
                 "AND c.status IN ('selected_generation_pending','pending_review') "
+                "AND (cutover.id IS NULL OR (authority.generation_job_id IS NOT NULL "
+                "AND j.id > cutover.baseline_generation_job_id)) "
                 "ORDER BY j.requested_at, j.id LIMIT 1"
             ).fetchone()
             if row is None:
@@ -576,8 +642,13 @@ class NewsPipeline:
             "JOIN selections s ON s.id=j.selection_id "
             "JOIN candidates c ON c.id=s.candidate_id "
             "LEFT JOIN generation_job_retry_state r ON r.generation_job_id=j.id "
+            "LEFT JOIN automation_cutovers cutover ON cutover.id=1 "
+            "LEFT JOIN automation_generation_authority authority "
+            "ON authority.generation_job_id=j.id AND authority.cutover_id=cutover.id "
             "WHERE c.status IN ('selected_generation_pending','pending_review') "
-            "AND COALESCE(r.held_at,'')='' AND r.blocked_by_control_version IS NULL AND ("
+            "AND COALESCE(r.held_at,'')='' AND r.blocked_by_control_version IS NULL "
+            "AND (cutover.id IS NULL OR (authority.generation_job_id IS NOT NULL "
+            "AND j.id > cutover.baseline_generation_job_id)) AND ("
             "(j.status='running' AND j.lease_expires_at < ?) OR "
             "(j.status='failed_recoverable' AND j.retry_at IS NOT NULL AND j.retry_at <= ?) OR "
             "j.status='queued') "
@@ -607,9 +678,13 @@ class NewsPipeline:
                 "JOIN selections s ON s.id=j.selection_id JOIN candidates c ON c.id=s.candidate_id "
                 "JOIN candidate_evaluations ce ON ce.id=c.evaluation_id "
                 "LEFT JOIN generation_job_retry_state r ON r.generation_job_id=j.id "
+                "LEFT JOIN automation_cutovers cutover ON cutover.id=1 "
+                "LEFT JOIN automation_generation_authority authority "
+                "ON authority.generation_job_id=j.id AND authority.cutover_id=cutover.id "
                 "WHERE j.id=? AND c.status IN ('selected_generation_pending','pending_review') "
-                "AND COALESCE(r.held_at,'')='' "
-                "AND r.blocked_by_control_version IS NULL",
+                "AND COALESCE(r.held_at,'')='' AND r.blocked_by_control_version IS NULL "
+                "AND (cutover.id IS NULL OR (authority.generation_job_id IS NOT NULL "
+                "AND j.id > cutover.baseline_generation_job_id))",
                 (generation_job_id,),
             ).fetchone()
             if job is None:
@@ -771,6 +846,12 @@ class NewsPipeline:
             connection.execute(
                 "UPDATE candidates SET status='pending_review' WHERE id=? AND status='selected_generation_pending'",
                 (int(job["candidate_id"]),),
+            )
+            AutomationAuthority.enqueue_review_notification(
+                connection,
+                generation_id=generation_id,
+                generation_job_id=generation_job_id,
+                subject_digest=sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()).hexdigest(),
             )
         return GenerationResult(int(job["candidate_id"]), generation_id, draft, source_ids, False)
 

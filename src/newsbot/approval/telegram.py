@@ -9,19 +9,31 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 from urllib.error import HTTPError
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from newsbot.candidates import CandidateApprovalService, CandidateDigest
 
 TELEGRAM_TEXT_LIMIT = 4096
 TELEGRAM_GROUP_SEND_INTERVAL_SECONDS = 3.1
-TELEGRAM_MAX_RETRY_AFTER_SECONDS = 60
 TELEGRAM_HTTP_TIMEOUT_SECONDS = 20
 TELEGRAM_LONG_POLL_MARGIN_SECONDS = 10
+
+
+class _NoRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, *_args: object, **_kwargs: object) -> None:
+        return None
+
+
+_NO_REDIRECT_OPENER = build_opener(_NoRedirectHandler())
+
+
+def _open_no_redirect(request: Request, *, timeout: float) -> Any:
+    return _NO_REDIRECT_OPENER.open(request, timeout=timeout)
 
 
 def _transport_timeout(method: str, payload: Mapping[str, str]) -> int:
@@ -32,17 +44,6 @@ def _transport_timeout(method: str, payload: Mapping[str, str]) -> int:
     except ValueError:
         long_poll = 0
     return max(TELEGRAM_HTTP_TIMEOUT_SECONDS, min(max(long_poll, 0), 50) + TELEGRAM_LONG_POLL_MARGIN_SECONDS)
-
-
-def _retry_after(error: HTTPError) -> int:
-    try:
-        payload = json.loads(error.read(64 * 1024).decode("utf-8"))
-        seconds = payload["parameters"]["retry_after"]
-    except (KeyError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
-        return 1
-    if not isinstance(seconds, int) or isinstance(seconds, bool):
-        return 1
-    return min(max(seconds, 1), TELEGRAM_MAX_RETRY_AFTER_SECONDS)
 
 
 def _utf16_units(value: str) -> int:
@@ -78,35 +79,67 @@ def split_telegram_text(text: str, *, limit: int = TELEGRAM_TEXT_LIMIT) -> tuple
 
 
 @dataclass(frozen=True, slots=True)
+class TelegramRequestResult:
+    """A redacted, typed result suitable for durable dispatch code."""
+
+    accepted: bool
+    message_id: int | None = None
+    safe_code: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TelegramDeadline:
+    """One monotonic budget shared by a complete dispatch attempt."""
+
+    expires_at: float
+
+    @classmethod
+    def after(cls, seconds: float) -> TelegramDeadline:
+        if seconds <= 0:
+            raise ValueError("deadline must be positive")
+        return cls(time.monotonic() + seconds)
+
+    def remaining(self) -> float:
+        return self.expires_at - time.monotonic()
+
+
+@dataclass(slots=True)
 class TelegramApprovalAdapter:
     token: str
     service: CandidateApprovalService
     api_base: str = "https://api.telegram.org"
 
-    def _request(self, method: str, payload: Mapping[str, str]) -> dict[str, object]:
+    def _request(
+        self,
+        method: str,
+        payload: Mapping[str, str],
+        *,
+        deadline: TelegramDeadline | None = None,
+        pace: bool = True,
+    ) -> dict[str, object]:
         if not self.token:
             raise ValueError("Telegram bot token is required when invoking the adapter")
         body = urlencode(payload).encode("utf-8")
         request = Request(f"{self.api_base}/bot{self.token}/{method}", data=body, method="POST")
         decoded: object = None
-        for attempt in range(3):
-            try:
-                with urlopen(request, timeout=_transport_timeout(method, payload)) as response:  # nosec B310
-                    decoded = json.loads(response.read().decode("utf-8"))
-                break
-            except HTTPError as error:
-                if error.code != 429 or attempt == 2:
-                    raise
-                time.sleep(_retry_after(error))
+        remaining = deadline.remaining() if deadline is not None else float("inf")
+        if remaining <= 0:
+            raise TimeoutError("Telegram request deadline exhausted")
+        try:
+            timeout = min(float(_transport_timeout(method, payload)), remaining)
+            with _open_no_redirect(request, timeout=timeout) as response:  # nosec B310
+                decoded = json.loads(response.read().decode("utf-8"))
+        except HTTPError:
+            raise
         if not isinstance(decoded, dict) or not all(isinstance(key, str) for key in decoded):
             raise RuntimeError("Telegram Bot API returned an invalid response")
-        result: dict[str, object] = {}
-        for key, value in decoded.items():
-            result[key] = value
+        result = dict(decoded)
         if not result.get("ok"):
             raise RuntimeError("Telegram Bot API request failed")
-        if method == "sendMessage":
-            time.sleep(TELEGRAM_GROUP_SEND_INTERVAL_SECONDS)
+        if method == "sendMessage" and pace:
+            delay = TELEGRAM_GROUP_SEND_INTERVAL_SECONDS
+            if deadline is None or delay < deadline.remaining():
+                time.sleep(delay)
         return result
 
     def _send_text(self, text: str, *, markup: Mapping[str, object] | None = None) -> None:
@@ -116,6 +149,61 @@ class TelegramApprovalAdapter:
             if markup is not None and index == len(chunks) - 1:
                 payload["reply_markup"] = json.dumps(markup, ensure_ascii=False)
             self._request("sendMessage", payload)
+
+    def prepare_message_payload(self, text: str, *, markup: Mapping[str, object] | None = None) -> dict[str, str]:
+        if _utf16_units(text) > TELEGRAM_TEXT_LIMIT:
+            raise ValueError("dispatch chunk exceeds Telegram UTF-16 limit")
+        payload = {"chat_id": str(self.service.chat_id), "text": text}
+        if markup is not None:
+            payload["reply_markup"] = json.dumps(markup, ensure_ascii=False)
+        return payload
+
+    def pace_after_send(self, deadline: TelegramDeadline) -> None:
+        delay = TELEGRAM_GROUP_SEND_INTERVAL_SECONDS
+        if delay >= deadline.remaining():
+            raise TimeoutError("Telegram request deadline exhausted")
+        time.sleep(delay)
+
+    def send_prepared_message_once(
+        self,
+        payload: Mapping[str, str],
+        *,
+        deadline: TelegramDeadline,
+    ) -> TelegramRequestResult:
+        """Send exactly one previously attested payload."""
+        try:
+            response = self._request(
+                "sendMessage",
+                payload,
+                deadline=deadline,
+                pace=False,
+            )
+        except TimeoutError:
+            return TelegramRequestResult(False, safe_code="deadline_exhausted")
+        except HTTPError as error:
+            if error.code == 429:
+                return TelegramRequestResult(False, safe_code="rate_limited")
+            if error.code in {400, 401, 403, 404}:
+                return TelegramRequestResult(False, safe_code="transport_rejected")
+            return TelegramRequestResult(False, safe_code="transport_ambiguous")
+        except (OSError, RuntimeError, ValueError):
+            return TelegramRequestResult(False, safe_code="transport_ambiguous")
+        result = response.get("result")
+        message_id = result.get("message_id") if isinstance(result, dict) else None
+        if not isinstance(message_id, int) or isinstance(message_id, bool) or message_id < 1:
+            return TelegramRequestResult(False, safe_code="invalid_response")
+        return TelegramRequestResult(True, message_id=message_id)
+
+    def send_message_once(
+        self,
+        text: str,
+        *,
+        markup: Mapping[str, object] | None = None,
+        deadline: TelegramDeadline,
+    ) -> TelegramRequestResult:
+        """Send exactly one already-selected chunk; callers never retry a subject."""
+        payload = self.prepare_message_payload(text, markup=markup)
+        return self.send_prepared_message_once(payload, deadline=deadline)
 
     def send_candidate_digest(self, digest: CandidateDigest) -> None:
         for candidate in digest.candidates:
@@ -152,7 +240,13 @@ class TelegramApprovalAdapter:
     def send_caption(self, caption_text: str) -> None:
         self._send_text(caption_text)
 
-    def handle_update(self, update: dict[str, Any]) -> str | None:
+    def handle_update(
+        self,
+        update: dict[str, Any],
+        *,
+        automation_lease: Any | None = None,
+        deadline: TelegramDeadline | None = None,
+    ) -> str | None:
         callback = update.get("callback_query")
         if not isinstance(callback, dict):
             return None
@@ -162,12 +256,21 @@ class TelegramApprovalAdapter:
         token = callback.get("data")
         if not isinstance(token, str) or not isinstance(chat.get("id"), int) or not isinstance(user.get("id"), int):
             return None
-        result = self.service.apply(token, chat_id=chat["id"], user_id=user["id"])
+        if automation_lease is None:
+            result = self.service.apply(token, chat_id=chat["id"], user_id=user["id"])
+        else:
+            result = self.service.apply(
+                token,
+                chat_id=chat["id"],
+                user_id=user["id"],
+                automation_lease=automation_lease,
+            )
         callback_id = callback.get("id")
         if isinstance(callback_id, str):
-            try:
-                self._request("answerCallbackQuery", {"callback_query_id": callback_id, "text": result.status})
-            except HTTPError as error:
-                if error.code != 400:
-                    raise
+            with suppress(Exception):
+                self._request(
+                    "answerCallbackQuery",
+                    {"callback_query_id": callback_id, "text": result.status},
+                    deadline=deadline,
+                )
         return result.status

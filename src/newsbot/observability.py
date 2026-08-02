@@ -7,9 +7,9 @@ from typing import Any
 from .storage import Storage
 
 
-def status(storage: Storage) -> dict[str, int]:
+def status(storage: Storage) -> dict[str, int | bool]:
     """Return aggregate counters; no source text, credentials, tokens, or paths."""
-    return {
+    result: dict[str, int | bool] = {
         "runs": _count(storage, "runs"),
         "candidates": _count(storage, "candidates"),
         "selected": _count(storage, "candidates", "status = 'selected_generation_pending'"),
@@ -30,6 +30,8 @@ def status(storage: Storage) -> dict[str, int]:
         "codex_control_events": _count(storage, "generation_provider_control_events"),
         "codex_retry_events": _count(storage, "generation_job_retry_events"),
     }
+    result.update(automation_status(storage))
+    return result
 
 
 def inspect(storage: Storage, run_id: int) -> dict[str, Any]:
@@ -48,6 +50,31 @@ def inspect(storage: Storage, run_id: int) -> dict[str, Any]:
         "provider_calls": _provider_calls(storage, run_id),
         "provider_attempts": _provider_attempts(storage, run_id),
         "provider_calls_before_selection": _provider_calls_before_selection(storage, run_id),
+    }
+
+
+def automation_status(storage: Storage) -> dict[str, int | bool]:
+    """Return migration-007 aggregate health without exposing authority identity."""
+    active = _count(storage, "automation_cutovers") == 1
+    return {
+        "automation_active": active,
+        "automation_open_leases": _count(storage, "automation_stream_leases"),
+        "automation_open_runs": _count(storage, "automation_stream_runs", "finished_at IS NULL"),
+        "automation_pending_notifications": _count(
+            storage, "telegram_notification_outbox", "state IN ('pending','claimed','sending')"
+        ),
+        "automation_ambiguous_notifications": _count(
+            storage, "telegram_notification_outbox", "state IN ('ambiguous','partial_manual_required')"
+        ),
+        "automation_resolved_notifications": _count(
+            storage, "telegram_notification_outbox", "state IN ('resolved_delivered','resolved_abandoned')"
+        ),
+        "automation_postbaseline_handoffs": _count(
+            storage,
+            "sheet_handoffs",
+            "id > COALESCE((SELECT baseline_handoff_id FROM automation_cutovers WHERE id=1),"
+            "9223372036854775807) AND status IN ('pending','retryable','delivering','ambiguous')",
+        ),
     }
 
 

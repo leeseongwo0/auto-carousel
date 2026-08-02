@@ -41,6 +41,7 @@ class Storage:
 
     def __init__(self, database_path: str | Path) -> None:
         path = str(database_path)
+        self._is_memory = path == ":memory:"
         if path != ":memory:":
             Path(path).expanduser().parent.mkdir(parents=True, exist_ok=True)
 
@@ -48,6 +49,8 @@ class Storage:
         self._connection.row_factory = sqlite3.Row
         self._lock = RLock()
         self._lease_authority_hash: str | None = None
+        self._lease_authority_fence: int | None = None
+        self._defer_authority: tuple[int, str | None, str | None] | None = None
         self._configure()
 
     @classmethod
@@ -59,7 +62,11 @@ class Storage:
 
     def _configure(self) -> None:
         with self._lock:
-            self._connection.execute("PRAGMA foreign_keys = ON")
+            self._connection.create_function(
+                "automation_defer_authorized",
+                3,
+                lambda candidate_id, stage, due_at: int(self._defer_authority == (int(candidate_id), stage, due_at)),
+            )
             self._connection.create_function(
                 "sha256_hex",
                 1,
@@ -71,15 +78,28 @@ class Storage:
                 0,
                 lambda: self._lease_authority_hash,
             )
+            self._connection.create_function("lease_fence", 0, lambda: self._lease_authority_fence)
             self._connection.create_function(
                 "aware_epoch_us",
                 1,
                 aware_epoch_us,
                 deterministic=True,
             )
-            self._connection.execute("PRAGMA journal_mode = WAL").fetchone()
-            self._connection.execute("PRAGMA synchronous = NORMAL")
+            journal_mode = str(self._connection.execute("PRAGMA journal_mode = WAL").fetchone()[0]).lower()
+            self._connection.execute("PRAGMA synchronous = FULL")
+            synchronous = int(self._connection.execute("PRAGMA synchronous").fetchone()[0])
+            self._connection.execute("PRAGMA foreign_keys = ON")
+            foreign_keys = int(self._connection.execute("PRAGMA foreign_keys").fetchone()[0])
             self._connection.execute("PRAGMA busy_timeout = 5000")
+            busy_timeout = int(self._connection.execute("PRAGMA busy_timeout").fetchone()[0])
+            expected_journal_mode = "memory" if self._is_memory else "wal"
+            if (journal_mode, synchronous, foreign_keys, busy_timeout) != (
+                expected_journal_mode,
+                2,
+                1,
+                5000,
+            ):
+                raise RuntimeError("SQLite authority pragmas were not applied")
 
     def migrate(self) -> None:
         """Apply each numbered SQL migration once, in filename order."""
@@ -120,7 +140,7 @@ class Storage:
                 if foreign_keys_disabled:
                     self._connection.execute("PRAGMA foreign_keys = OFF")
                 try:
-                    if migration.name == "004_sheets_authority_upgrade.sql":
+                    if migration.name in {"004_sheets_authority_upgrade.sql", "007_systemd_automation.sql"}:
                         self._connection.executescript(f"BEGIN IMMEDIATE;\n{script}\n")
                         violations = self._connection.execute("PRAGMA foreign_key_check").fetchall()
                         if violations:
@@ -197,9 +217,19 @@ class Storage:
         if installed != expected:
             raise RuntimeError("unsupported applied 003 Sheets authority schema; automatic upgrade refused")
 
-    def _authorize_lease(self, owner_token: str) -> None:
+    def _authorize_lease(self, owner_token: str, fence: int | None = None) -> None:
         """Authorize one transaction to write events for the named lease owner."""
         self._lease_authority_hash = sha256(owner_token.encode()).hexdigest()
+        self._lease_authority_fence = fence
+
+    def authorize_defer_transition(
+        self, candidate_id: int, stage: str | None, due_at: str | None, owner_token: str, fence: int
+    ) -> None:
+        """Authorize one exact deferred transition within the active transaction."""
+        if not self._connection.in_transaction:
+            raise RuntimeError("defer authorization requires storage.transaction()")
+        self._authorize_lease(owner_token, fence)
+        self._defer_authority = (candidate_id, stage, due_at)
 
     @contextmanager
     def transaction(self, *, immediate: bool = True) -> Iterator[sqlite3.Connection]:
@@ -217,6 +247,8 @@ class Storage:
                 raise
             finally:
                 self._lease_authority_hash = None
+                self._lease_authority_fence = None
+                self._defer_authority = None
 
     def execute(self, sql: str, parameters: Sequence[Any] = ()) -> sqlite3.Cursor:
         """Execute one statement. Writes require an explicit transaction."""

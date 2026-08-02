@@ -22,6 +22,7 @@ from newsbot.approval.base import (
     issue_callback,
     matches_callback_token,
 )
+from newsbot.automation import StreamLease
 from newsbot.copywriting import (
     BodyPage,
     Caption,
@@ -83,7 +84,6 @@ class CandidateApprovalService:
         self, run_id: int, *, actor_id: int, expires_in: timedelta = timedelta(hours=24)
     ) -> CandidateDigest:
         """Create a candidate-only digest.  It never reads or generates copy."""
-        self.resume_due()
         now = _utc(self.now())
         with self.storage.transaction() as connection:
             rows = list(
@@ -178,7 +178,6 @@ class CandidateApprovalService:
         source_version_ids: tuple[int, ...],
         expires_in: timedelta = timedelta(hours=24),
     ) -> tuple[DigestButton, ...]:
-        self.resume_due()
         now = _utc(self.now())
         with self.storage.transaction() as connection:
             candidate = connection.execute(
@@ -242,7 +241,14 @@ class CandidateApprovalService:
             )
         )
 
-    def apply(self, token: str, *, chat_id: int, user_id: int) -> ApprovalResult:
+    def apply(
+        self,
+        token: str,
+        *,
+        chat_id: int,
+        user_id: int,
+        automation_lease: StreamLease | None = None,
+    ) -> ApprovalResult:
         """Apply one authorized callback. Stale/duplicate callbacks are harmless."""
         if chat_id != self.chat_id or user_id not in self.authorized_user_ids:
             return ApprovalResult("unauthorized")
@@ -260,8 +266,6 @@ class CandidateApprovalService:
             return ApprovalResult("stale")
         if row["consumed_at"] is not None:
             return self._duplicate_result(int(payload["candidate_id"]))
-        if datetime.fromisoformat(row["expires_at"]) <= now:
-            return ApprovalResult("stale")
         stage = ApprovalStage(payload["stage"])
         action = ApprovalAction(row["action"])
         candidate_id = int(payload["candidate_id"])
@@ -273,6 +277,30 @@ class CandidateApprovalService:
                 return ApprovalResult("stale")
             if fresh["consumed_at"] is not None:
                 return self._duplicate_result(candidate_id)
+            cutover = connection.execute("SELECT id FROM automation_cutovers WHERE id=1").fetchone()
+            if datetime.fromisoformat(str(fresh["expires_at"])) <= now and (
+                cutover is None or fresh["notification_id"] is None
+            ):
+                return ApprovalResult("stale")
+            if cutover is not None:
+                notification = connection.execute(
+                    "SELECT state FROM telegram_notification_outbox WHERE id=? AND cutover_id=1 "
+                    "AND state IN ('sent','ambiguous','resolved_delivered')",
+                    (fresh["notification_id"],),
+                ).fetchone()
+                if notification is None or automation_lease is None or automation_lease.stream != "approval_poll":
+                    return ApprovalResult("stale")
+                lease = connection.execute(
+                    "SELECT 1 FROM automation_stream_leases WHERE stream='approval_poll' "
+                    "AND owner_hash=? AND fence=? AND aware_epoch_us(expires_at)>aware_epoch_us(?)",
+                    (
+                        automation_lease.owner_hash,
+                        automation_lease.fence,
+                        now.isoformat(),
+                    ),
+                ).fetchone()
+                if lease is None:
+                    return ApprovalResult("stale")
             candidate = connection.execute("SELECT * FROM candidates WHERE id=?", (candidate_id,)).fetchone()
             if candidate is None:
                 return ApprovalResult("stale")
@@ -383,6 +411,20 @@ class CandidateApprovalService:
                 return ApprovalResult("refreshed", candidate_id)
             if action in (ApprovalAction.DEFER_6H, ApprovalAction.DEFER_24H, ApprovalAction.DEFER_72H):
                 deferred_until = now + _defer_interval(action)
+                if cutover is not None:
+                    if automation_lease is None or fresh["notification_id"] is None:
+                        return ApprovalResult("stale")
+                    connection.execute(
+                        "INSERT INTO automation_defer_authority(notification_id,decision_event_id,candidate_id,stage,due_at,cutover_id) "
+                        "VALUES(?,?,?,?,?,1)",
+                        (
+                            int(fresh["notification_id"]),
+                            event_id,
+                            candidate_id,
+                            stage.value,
+                            deferred_until.isoformat(),
+                        ),
+                    )
                 connection.execute(
                     "UPDATE candidates SET status='deferred', deferred_stage=?, deferred_until=? WHERE id=?",
                     (stage.value, deferred_until.isoformat(), candidate_id),
@@ -423,6 +465,13 @@ class CandidateApprovalService:
                 else:
                     job_id = int(job["id"])
                 self._bind_job_sources(connection, job_id, current_sources)
+                if cutover is not None:
+                    connection.execute(
+                        "INSERT OR IGNORE INTO automation_generation_authority("
+                        "generation_job_id,selection_id,decision_event_id,cutover_id"
+                        ") VALUES(?,?,?,1)",
+                        (job_id, selection_id, event_id),
+                    )
                 connection.execute(
                     "UPDATE candidates SET status='selected_generation_pending' WHERE id=?", (candidate_id,)
                 )
@@ -460,6 +509,13 @@ class CandidateApprovalService:
                 )
                 job_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
                 self._bind_job_sources(connection, job_id, current_sources)
+                if cutover is not None:
+                    connection.execute(
+                        "INSERT INTO automation_generation_authority("
+                        "generation_job_id,selection_id,decision_event_id,cutover_id"
+                        ") VALUES(?,?,?,1)",
+                        (job_id, selection_id, event_id),
+                    )
                 connection.execute(
                     "UPDATE candidates SET status='selected_generation_pending' WHERE id=?",
                     (candidate_id,),
@@ -593,6 +649,8 @@ class CandidateApprovalService:
         due_at = _utc(self.now() if now is None else now)
         resumed: list[int] = []
         with self.storage.transaction() as connection:
+            if connection.execute("SELECT 1 FROM automation_cutovers WHERE id=1").fetchone() is not None:
+                return ()
             rows = tuple(
                 connection.execute(
                     "SELECT id, deferred_stage FROM candidates WHERE status='deferred' AND deferred_until <= ? "

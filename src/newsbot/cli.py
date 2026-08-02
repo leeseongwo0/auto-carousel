@@ -7,7 +7,10 @@ import asyncio
 import json
 import os
 import stat
+import sys
+import time
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
@@ -16,6 +19,7 @@ from typing import Any, Literal, cast
 from zoneinfo import ZoneInfo
 
 from .ai.base import GenerationProvider
+from .approval.base import hash_callback_token
 from .approval.scripted import ScriptedAction, ScriptedApprovalAdapter
 from .candidates import CandidateApprovalService, CandidateDigest
 from .collectors.base import SourceObservation
@@ -25,7 +29,7 @@ from .observability import inspect, status
 from .pipeline import NewsPipeline, _draft_payload
 from .runtime import FixtureClock, SystemClock
 from .secrets import SecretFileError, SessionStore, ensure_private_directory, read_service_account_info
-from .sheets.base import SheetsAdapter
+from .sheets.base import GoogleSheetsDeadlineExceeded, SheetsAdapter
 from .storage import DurableCollection, Storage
 
 CommandHandler = Callable[[argparse.Namespace], int]
@@ -87,6 +91,44 @@ def _database(args: argparse.Namespace) -> Path:
     return args.db if args.db is not None else _path_from_environment("NEWSBOT_DATABASE", "data/newsbot.sqlite")
 
 
+def _attested_runtime_release_digest(
+    stable: Path = Path("/usr/local/bin/newsbot"),
+    *,
+    executing_prefix: Path | None = None,
+) -> str:
+    try:
+        stable_metadata = stable.lstat()
+        if not stat.S_ISLNK(stable_metadata.st_mode):
+            raise RuntimeError("stable newsbot entrypoint is not an attested release link")
+        entrypoint = stable.resolve(strict=True)
+        release_root = entrypoint.parents[2]
+        if entrypoint != release_root / "venv/bin/newsbot":
+            raise RuntimeError("stable newsbot entrypoint has an invalid release layout")
+        runtime_prefix = Path(sys.prefix) if executing_prefix is None else executing_prefix
+        if runtime_prefix.resolve(strict=True) != release_root / "venv":
+            raise RuntimeError("executing runtime does not match the stable release")
+        manifest = release_root / "runtime-manifest.json"
+        metadata = manifest.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise RuntimeError("runtime manifest identity is invalid")
+        payload = manifest.read_bytes()
+        value = json.loads(payload)
+        if not isinstance(value, dict) or value.get("version") != "newsbot-runtime-release-manifest-v1":
+            raise RuntimeError("runtime manifest schema is invalid")
+        if value.get("source_commit") != release_root.name:
+            raise RuntimeError("runtime manifest release identity drifted")
+    except (IndexError, OSError, ValueError, json.JSONDecodeError) as error:
+        raise RuntimeError("runtime release attestation failed") from error
+    return sha256(payload).hexdigest()
+
+
+def _require_runtime_release_digest(expected: str) -> None:
+    if len(expected) != 64 or any(character not in "0123456789abcdef" for character in expected):
+        raise RuntimeError("release digest must be lowercase SHA-256")
+    if _attested_runtime_release_digest() != expected:
+        raise RuntimeError("runtime release digest does not match the stable entrypoint")
+
+
 def _print(value: object) -> None:
     print(json.dumps(value, ensure_ascii=False, sort_keys=True, default=str))
 
@@ -99,6 +141,7 @@ def init_db(args: argparse.Namespace) -> int:
 
 
 def run_fixture(args: argparse.Namespace) -> int:
+    from .automation import automation_lock
     config = _config(args)
     clock = FixtureClock()
     fixture_path = args.fixture
@@ -117,7 +160,9 @@ def run_fixture(args: argparse.Namespace) -> int:
             ).encode()
         ).hexdigest()
     )
-    with Storage.open(config.database_path) as storage:
+    with automation_lock("collect"), Storage.open(config.database_path) as storage:
+        if storage.fetch_one("SELECT 1 FROM automation_cutovers WHERE id=1") is not None:
+            raise RuntimeError("fixture command is disabled after automation cutover")
         from .handoffs import SheetHandoffService
         from .sheets.schema import WORKPLACE_ORACLE_FINGERPRINT
 
@@ -249,25 +294,28 @@ def show_inspect(args: argparse.Namespace) -> int:
 def auth_telethon(args: argparse.Namespace) -> int:
     """Authorize an owner-only local Telethon session."""
     validate_capabilities(Capability.AUTH_TELETHON)
-    session_value = os.environ.get("TELEGRAM_SESSION_PATH")
-    if not session_value:
-        raise ConfigError("missing required environment variables: TELEGRAM_SESSION_PATH")
-    session_path = Path(session_value)
-    previous_umask = os.umask(0o077)
-    try:
-        ensure_private_directory(session_path.parent)
-        loop = asyncio.new_event_loop()
+    from .automation import automation_lock
+
+    with automation_lock("collect"):
+        session_value = os.environ.get("TELEGRAM_SESSION_PATH")
+        if not session_value:
+            raise ConfigError("missing required environment variables: TELEGRAM_SESSION_PATH")
+        session_path = Path(session_value)
+        previous_umask = os.umask(0o077)
         try:
-            collector, close = _live_collector(loop, session_path)
+            ensure_private_directory(session_path.parent)
+            loop = asyncio.new_event_loop()
             try:
-                cast(Any, collector).authenticate()
-                SessionStore(session_path).validate()
+                collector, close = _live_collector(loop, session_path)
+                try:
+                    cast(Any, collector).authenticate()
+                    SessionStore(session_path).validate()
+                finally:
+                    close()
             finally:
-                close()
+                loop.close()
         finally:
-            loop.close()
-    finally:
-        os.umask(previous_umask)
+            os.umask(previous_umask)
     _print({"session_path": str(session_path), "status": "authorized"})
     return 0
 
@@ -314,9 +362,12 @@ def _reconcile_range(args: argparse.Namespace, *, required: bool = False) -> tup
 
 
 def rank(args: argparse.Namespace) -> int:
+    from .automation import automation_lock
     config = _config(args)
     now = datetime.now(UTC)
-    with Storage.open(config.database_path) as storage:
+    with automation_lock("collect"), Storage.open(config.database_path) as storage:
+        if storage.fetch_one("SELECT 1 FROM automation_cutovers WHERE id=1") is not None:
+            raise RuntimeError("legacy command is disabled after automation cutover")
         observations = storage.latest_observations()
         service = CandidateApprovalService(storage, chat_id=1, authorized_user_ids={1}, now=lambda: now)
         pipeline = DurableLivePipeline(storage, config, _live_provider_forbidden, SystemClock())
@@ -339,6 +390,7 @@ def rank(args: argparse.Namespace) -> int:
 
 def reconcile_fixture(args: argparse.Namespace) -> int:
     """Perform bounded fixture recovery without advancing the normal cursor."""
+    from .automation import automation_lock
     range_ids = _reconcile_range(args, required=True)
     config = _config(args)
     channel = next((item for item in config.enabled_channels if item.id == args.channel), None)
@@ -346,7 +398,9 @@ def reconcile_fixture(args: argparse.Namespace) -> int:
         raise ValueError("--channel must identify an enabled channel")
     clock = FixtureClock()
     now = clock.now()
-    with Storage.open(config.database_path) as storage:
+    with automation_lock("collect"), Storage.open(config.database_path) as storage:
+        if storage.fetch_one("SELECT 1 FROM automation_cutovers WHERE id=1") is not None:
+            raise RuntimeError("legacy command is disabled after automation cutover")
         collector: object = FixtureCollector(args.fixture)
         if range_ids is not None:
             collector = _ExactRangeCollector(collector, *range_ids)
@@ -387,13 +441,19 @@ def reconcile_fixture(args: argparse.Namespace) -> int:
     return 0
 
 
-def _live_collector(loop: asyncio.AbstractEventLoop, session_path: Path) -> tuple[object, Callable[[], None]]:
+def _live_collector(
+    loop: asyncio.AbstractEventLoop,
+    session_path: Path,
+    *,
+    deadline_at: float | None = None,
+) -> tuple[object, Callable[[], None]]:
     from .collectors.telethon import TelethonCollector
 
     collector = TelethonCollector(
         int(os.environ["TELEGRAM_API_ID"]),
         os.environ["TELEGRAM_API_HASH"],
         str(session_path),
+        deadline_at=deadline_at,
     )
 
     class SynchronousTelethonScan:
@@ -473,12 +533,13 @@ class DurableLivePipeline(NewsPipeline):
         return source_ids
 
 
-def _collect_live(args: argparse.Namespace, *, reconcile: bool) -> int:
+def _collect_live(args: argparse.Namespace, *, reconcile: bool, config: AppConfig | None = None) -> int:
     range_ids = _reconcile_range(args, required=True) if reconcile else None
     if args.page_size < 1 or args.max_pages < 1:
         raise ValueError("--page-size and --max-pages must be positive")
+    deadline_at = time.monotonic() + float(getattr(args, "deadline", 24 * 60 * 60))
     validate_capabilities(Capability.LIVE_RECONCILE if reconcile else Capability.LIVE_COLLECTION)
-    config = _config(args)
+    config = _config(args) if config is None else config
     channels = tuple(config.enabled_channels)
     if reconcile:
         channels = tuple(channel for channel in channels if channel.id == args.channel)
@@ -486,13 +547,15 @@ def _collect_live(args: argparse.Namespace, *, reconcile: bool) -> int:
             raise ValueError("--channel must identify an enabled channel")
     session_path = SessionStore(os.environ["TELEGRAM_SESSION_PATH"]).validate()
     loop = asyncio.new_event_loop()
-    collector, close = _live_collector(loop, session_path)
+    collector, close = _live_collector(loop, session_path, deadline_at=deadline_at)
     try:
         with Storage.open(config.database_path) as storage:
             durable = DurableCollection(storage)
             counts: dict[str, int] = {}
             channel_errors: dict[str, str] = {}
             for channel in channels:
+                if time.monotonic() >= deadline_at:
+                    raise TimeoutError("collection application deadline exhausted")
                 capture_time = datetime.now(UTC)
                 try:
                     if reconcile:
@@ -519,10 +582,17 @@ def _collect_live(args: argparse.Namespace, *, reconcile: bool) -> int:
                             initial_lookback=timedelta(hours=args.lookback_hours),
                             max_overlap_pages=args.max_pages,
                         ).persisted
+                    if time.monotonic() >= deadline_at:
+                        raise TimeoutError("collection application deadline exhausted")
                 except Exception as error:
                     channel_errors[channel.id] = f"{type(error).__name__}: {error}"
                     if reconcile:
                         raise
+            if channel_errors and bool(getattr(args, "fail_on_channel_error", False)):
+                failed = ", ".join(sorted(channel_errors))
+                raise RuntimeError(f"automated collection failed for channels: {failed}")
+            if time.monotonic() >= deadline_at:
+                raise TimeoutError("collection application deadline exhausted")
             now = datetime.now(UTC)
             observations = storage.latest_observations()
             service = CandidateApprovalService(storage, chat_id=1, authorized_user_ids={1}, now=lambda: now)
@@ -553,15 +623,30 @@ def _collect_live(args: argparse.Namespace, *, reconcile: bool) -> int:
     return 0
 
 
+def _reject_legacy_when_automation_active(args: argparse.Namespace) -> None:
+    with Storage.open(_database(args)) as storage:
+        if storage.fetch_one("SELECT 1 AS active FROM automation_cutovers WHERE id=1") is not None:
+            raise RuntimeError("legacy command is disabled after automation cutover")
+
+
 def collect_live(args: argparse.Namespace) -> int:
-    return _collect_live(args, reconcile=False)
+    from .automation import automation_lock
+
+    with automation_lock("collect"):
+        _reject_legacy_when_automation_active(args)
+        return _collect_live(args, reconcile=False)
 
 
 def reconcile_live(args: argparse.Namespace) -> int:
-    return _collect_live(args, reconcile=True)
+    from .automation import automation_lock
+
+    with automation_lock("collect"):
+        _reject_legacy_when_automation_active(args)
+        return _collect_live(args, reconcile=True)
 
 
 def generate_pending(args: argparse.Namespace) -> int:
+    _reject_legacy_when_automation_active(args)
     if args.provider == "fake" and not args.fixture_only:
         raise ValueError("the fake provider is fixture-only; pass --fixture-only explicitly")
     config = _config(args)
@@ -594,7 +679,17 @@ def _approval_service(storage: Storage) -> CandidateApprovalService:
         raise ConfigError("NEWSBOT_APPROVER_USER_IDS must contain at least one integer user id")
     spreadsheet_id = os.environ.get("GOOGLE_SHEETS_SPREADSHEET_ID", "").strip()
     target_binding_id: int | None = None
-    if spreadsheet_id:
+    cutover_target = storage.fetch_one(
+        "SELECT target.id,target.target_ref_sha256 FROM automation_cutovers cutover "
+        "JOIN sheet_target_bindings target ON target.id=cutover.target_binding_id WHERE cutover.id=1"
+    )
+    if cutover_target is not None:
+        if not spreadsheet_id or sha256(spreadsheet_id.encode()).hexdigest() != str(
+            cutover_target["target_ref_sha256"]
+        ):
+            raise ConfigError("Google Sheets target does not match the active automation cutover")
+        target_binding_id = int(cutover_target["id"])
+    elif spreadsheet_id:
         target = storage.fetch_one(
             "SELECT id FROM sheet_target_bindings WHERE target_ref_sha256=?",
             (sha256(spreadsheet_id.encode()).hexdigest(),),
@@ -937,8 +1032,11 @@ def codex_job_release(args: argparse.Namespace) -> int:
 def notify_candidates(args: argparse.Namespace) -> int:
     validate_capabilities(Capability.NOTIFY_CANDIDATES)
     from .approval.telegram import TelegramApprovalAdapter
+    from .automation import automation_lock
 
-    with Storage.open(_database(args)) as storage:
+    with automation_lock("telegram"), Storage.open(_database(args)) as storage:
+        if storage.fetch_one("SELECT 1 FROM automation_cutovers WHERE id=1") is not None:
+            raise RuntimeError("activated notification must use the fenced dispatcher")
         service = _approval_service(storage)
         digest = service.create_digest(args.run_id, actor_id=args.actor_id)
         TelegramApprovalAdapter(os.environ["TELEGRAM_BOT_TOKEN"], service).send_candidate_digest(digest)
@@ -949,8 +1047,11 @@ def notify_candidates(args: argparse.Namespace) -> int:
 def notify_review(args: argparse.Namespace) -> int:
     validate_capabilities(Capability.NOTIFY_CANDIDATES)
     from .approval.telegram import TelegramApprovalAdapter
+    from .automation import automation_lock
 
-    with Storage.open(_database(args)) as storage:
+    with automation_lock("telegram"), Storage.open(_database(args)) as storage:
+        if storage.fetch_one("SELECT 1 FROM automation_cutovers WHERE id=1") is not None:
+            raise RuntimeError("activated notification must use the fenced dispatcher")
         row = storage.fetch_one(
             "SELECT g.content_json FROM generations g JOIN generation_jobs j ON j.id=g.generation_job_id "
             "JOIN selections s ON s.id=j.selection_id JOIN candidates c ON c.id=s.candidate_id "
@@ -1021,9 +1122,7 @@ def _notify_resumed_approval(
 def _approval_poll_offset(storage: Storage, explicit_offset: int | None) -> int | None:
     if explicit_offset is not None:
         return explicit_offset
-    cursor = storage.fetch_one(
-        "SELECT next_offset FROM telegram_update_cursors WHERE stream='approval'"
-    )
+    cursor = storage.fetch_one("SELECT next_offset FROM telegram_update_cursors WHERE stream='approval'")
     return None if cursor is None else int(cursor["next_offset"])
 
 
@@ -1038,7 +1137,7 @@ def _advance_approval_poll_offset(storage: Storage, update_id: int) -> None:
         )
 
 
-def poll_approvals(args: argparse.Namespace) -> int:
+def _poll_approvals_unlocked(args: argparse.Namespace) -> int:
     config: AppConfig | None = None
     capabilities: list[Capability] = [Capability.APPROVE_POLL]
     if args.process_generation:
@@ -1099,22 +1198,43 @@ def poll_approvals(args: argparse.Namespace) -> int:
     return 0
 
 
+def poll_approvals(args: argparse.Namespace) -> int:
+    from .automation import automation_lock
+
+    with automation_lock("telegram"):
+        _reject_legacy_when_automation_active(args)
+        return _poll_approvals_unlocked(args)
+
+
+def _require_sheets_worker_deadline(args: argparse.Namespace) -> None:
+    deadline = getattr(args, "_sheets_deadline_monotonic", None)
+    if deadline is None:
+        return
+    if time.monotonic() >= deadline:
+        raise GoogleSheetsDeadlineExceeded("Sheets worker deadline exceeded")
+
+
 def _live_sheets(args: argparse.Namespace) -> tuple[AppConfig, SheetsAdapter, str]:
     validate_capabilities(Capability.LIVE_SHEETS)
     config = _config(args)
+    _require_sheets_worker_deadline(args)
     if config.google_service_account_file is None or config.google_sheets_spreadsheet_id is None:
         raise ConfigError("Google Sheets capability is incomplete")
     try:
         credential_info = read_service_account_info(config.google_service_account_file)
     except (OSError, SecretFileError) as error:
         raise ConfigError("Google Sheets credential file is invalid") from error
+    _require_sheets_worker_deadline(args)
     try:
         from .sheets.google import GoogleSheetsAdapter
 
         adapter = GoogleSheetsAdapter.from_credentials(
             credential_info=credential_info,
             spreadsheet_id=config.google_sheets_spreadsheet_id,
+            deadline_monotonic=getattr(args, "_sheets_deadline_monotonic", None),
         )
+    except GoogleSheetsDeadlineExceeded:
+        raise
     except (ImportError, RuntimeError, ValueError) as error:
         raise RuntimeError("Google Sheets capability is unavailable") from error
     return config, adapter, credential_info["client_email"]
@@ -1122,6 +1242,47 @@ def _live_sheets(args: argparse.Namespace) -> tuple[AppConfig, SheetsAdapter, st
 
 def _request_sha256(body: object) -> str:
     return sha256(json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _telegram_markup_identity(
+    storage: Storage, markup: dict[str, object] | None
+) -> tuple[object | None, tuple[str, ...]]:
+    if markup is None:
+        return None, ()
+    keyboard = markup.get("inline_keyboard")
+    if not isinstance(keyboard, list):
+        raise RuntimeError("Telegram markup is invalid")
+    semantic_rows: list[list[dict[str, str]]] = []
+    token_hashes: list[str] = []
+    for row in keyboard:
+        if not isinstance(row, list):
+            raise RuntimeError("Telegram markup is invalid")
+        semantic_row: list[dict[str, str]] = []
+        for button in row:
+            if not isinstance(button, dict):
+                raise RuntimeError("Telegram markup is invalid")
+            label = button.get("text")
+            token = button.get("callback_data")
+            if not isinstance(label, str) or not isinstance(token, str):
+                raise RuntimeError("Telegram markup is invalid")
+            token_hash = hash_callback_token(token)
+            binding = storage.fetch_one(
+                "SELECT action,payload_json FROM callback_tokens WHERE token=?",
+                (token_hash,),
+            )
+            if binding is None:
+                raise RuntimeError("Telegram callback binding drift")
+            payload = json.loads(str(binding["payload_json"]))
+            semantic_row.append(
+                {
+                    "text": label,
+                    "action": str(binding["action"]),
+                    "payload_sha256": _request_sha256(payload),
+                }
+            )
+            token_hashes.append(token_hash)
+        semantic_rows.append(semantic_row)
+    return {"inline_keyboard": semantic_rows}, tuple(token_hashes)
 
 
 def _live_target_binding(service: object, config: AppConfig, *, now: str, oracle_fingerprint: str) -> int:
@@ -1150,6 +1311,16 @@ def sheets_validate(args: argparse.Namespace) -> int:
 
 
 def sheets_bootstrap(args: argparse.Namespace) -> int:
+    from .automation import automation_lock
+
+    config = _config(args)
+    with automation_lock("sheets"), Storage.open(config.database_path) as storage:
+        if storage.fetch_one("SELECT 1 FROM automation_cutovers WHERE id=1") is not None:
+            raise RuntimeError("Sheets bootstrap is disabled after automation cutover")
+        return _sheets_bootstrap_unlocked(args)
+
+
+def _sheets_bootstrap_unlocked(args: argparse.Namespace) -> int:
     config, adapter, email = _live_sheets(args)
     from .handoffs import SheetHandoffService
     from .sheets.base import DeliveryOutcome, MetadataState, SafeCode
@@ -1336,7 +1507,20 @@ def _seoul_date(value: str) -> str:
 
 
 def sheets_deliver(args: argparse.Namespace) -> int:
+    from .automation import automation_lock
+
+    if bool(getattr(args, "_automation_sheets_worker", False)):
+        return _sheets_deliver_unlocked(args)
+    with automation_lock("sheets"):
+        return _sheets_deliver_unlocked(args)
+
+
+def _sheets_deliver_unlocked(args: argparse.Namespace) -> int:
+    _require_sheets_worker_deadline(args)
+    if not bool(getattr(args, "_automation_sheets_worker", False)):
+        _reject_legacy_when_automation_active(args)
     config, adapter, _ = _live_sheets(args)
+    _require_sheets_worker_deadline(args)
     from .handoffs import OperationOutcome, SheetHandoffService
     from .sheets.base import DeliveryOutcome, MetadataState, SafeCode
     from .sheets.schema import (
@@ -1366,6 +1550,7 @@ def sheets_deliver(args: argparse.Namespace) -> int:
         if lease is None:
             _print({"status": "not_acquired"})
             return 0
+        _require_sheets_worker_deadline(args)
         prepared = adapter.prepare_delivery(export_id=export_id, canonical_sha256=payload_sha256, values=values)
         request_sha = prepared.request_sha256
         preflight: Literal["exact", "absent", "conflict"] = (
@@ -1388,8 +1573,10 @@ def sheets_deliver(args: argparse.Namespace) -> int:
                 raise RuntimeError("sheet preflight lease was lost")
             _print({"safe_code": SafeCode.METADATA_CONFLICT.value, "status": "blocked"})
             return 0
+        _require_sheets_worker_deadline(args)
         attestation = adapter.dispatch_credential_attestation()
         adapter.arm_prepared_dispatch()
+        _require_sheets_worker_deadline(args)
         dispatch_at = datetime.now(UTC).isoformat()
         if not service.mark_possibly_sent(
             lease,
@@ -1561,6 +1748,724 @@ def sheets_reconcile(args: argparse.Namespace) -> int:
     return 0
 
 
+def automation_status(args: argparse.Namespace) -> int:
+    """Emit aggregate-only automation health."""
+    with Storage.open(_database(args)) as storage:
+        from .observability import automation_status as aggregate
+
+        _print(aggregate(storage))
+    return 0
+
+
+def automation_quiescence_check(args: argparse.Namespace) -> int:
+    """Return a bounded redacted cutover quiescence assertion."""
+    with Storage.open(_database(args)) as storage:
+        from .automation import AutomationAuthority
+
+        _print({"quiescent": AutomationAuthority(storage).quiescent()})
+    return 0
+
+
+def automation_notification_inspect(args: argparse.Namespace) -> int:
+    """Inspect one notification without disclosing its identity or payload."""
+    with Storage.open(_database(args)) as storage:
+        row = storage.fetch_one(
+            "SELECT outbox.state,"
+            "EXISTS(SELECT 1 FROM automation_cutovers cutover WHERE cutover.id=outbox.cutover_id "
+            "AND cutover.audience_binding_id=outbox.audience_binding_id) AS binding_match "
+            "FROM telegram_notification_outbox outbox WHERE outbox.id=?",
+            (args.intent_id,),
+        )
+        if row is None:
+            raise LookupError("notification intent does not exist")
+        events = storage.fetch_one(
+            "SELECT COUNT(*) AS count FROM telegram_chunk_attempts attempt "
+            "JOIN telegram_notification_chunks chunk ON chunk.id=attempt.chunk_id "
+            "WHERE chunk.notification_id=?",
+            (args.intent_id,),
+        )
+        assert events is not None
+        _print(
+            {
+                "binding_match": bool(row["binding_match"]),
+                "chunk_attempt_count": int(events["count"]),
+                "manual_required": str(row["state"]) in {"ambiguous", "partial_manual_required"},
+                "terminal": str(row["state"]) in {"sent", "canceled", "resolved_delivered", "resolved_abandoned"},
+            }
+        )
+    return 0
+
+
+def _callback_actor_id(authorized_user_ids: set[int] | frozenset[int] | None = None) -> int:
+    raw_actor = os.environ.get("NEWSBOT_CALLBACK_ACTOR_ID", "").strip()
+    try:
+        actor_id = int(raw_actor)
+    except ValueError as error:
+        raise ConfigError("NEWSBOT_CALLBACK_ACTOR_ID must be a positive integer") from error
+    if actor_id < 1:
+        raise ConfigError("NEWSBOT_CALLBACK_ACTOR_ID must be a positive integer")
+    if authorized_user_ids is not None and actor_id not in authorized_user_ids:
+        raise ConfigError("NEWSBOT_CALLBACK_ACTOR_ID must be an authorized approver")
+    return actor_id
+
+
+def _runtime_audience(
+    authority: object,
+    adapter: object,
+    *,
+    require_active: bool = True,
+    deadline: object | None = None,
+) -> int:
+    token = os.environ["TELEGRAM_BOT_TOKEN"]
+    chat_id = os.environ["NEWSBOT_APPROVER_CHAT_ID"].strip()
+    actor = str(_callback_actor_id())
+    users = tuple(value.strip() for value in os.environ["NEWSBOT_APPROVER_USER_IDS"].split(",") if value.strip())
+    if not chat_id or not actor or not users:
+        raise ConfigError("automation audience binding is incomplete")
+    response = cast(Any, adapter)._request("getMe", {}, deadline=deadline)
+    result = response.get("result")
+    bot_id = result.get("id") if isinstance(result, dict) else None
+    if not isinstance(bot_id, int) or isinstance(bot_id, bool) or bot_id < 1:
+        raise RuntimeError("Telegram Bot API returned an invalid getMe result")
+    from .automation import AutomationAuthority
+
+    token_hmac, audience_hmac = AutomationAuthority.audience_hmac(token, chat_id, users, actor)
+    bot_digest = sha256(str(bot_id).encode()).hexdigest()
+    if require_active and not cast(Any, authority).validate_active_audience(
+        bot_id_digest=bot_digest, token_hmac=token_hmac, audience_hmac=audience_hmac
+    ):
+        raise RuntimeError("automation audience binding drift")
+    return int(
+        cast(Any, authority).record_audience_binding(
+            bot_id_digest=bot_digest,
+            token_hmac=token_hmac,
+            audience_hmac=audience_hmac,
+            version=1,
+        )
+    )
+
+
+def _require_production_cutover_baseline(storage: Storage) -> None:
+    baseline = storage.fetch_one(
+        "SELECT candidate.id AS candidate_id,generation.id AS generation_id,"
+        "generation.status AS generation_status,"
+        "1+json_array_length(json_extract(generation.content_json,'$.bodies')) AS page_count,"
+        "handoff.id AS handoff_id,handoff.status AS handoff_status "
+        "FROM candidates candidate "
+        "JOIN selections selection ON selection.candidate_id=candidate.id "
+        "JOIN generation_jobs job ON job.selection_id=selection.id "
+        "JOIN generations generation ON generation.generation_job_id=job.id "
+        "JOIN sheet_handoffs handoff ON handoff.generation_id=generation.id "
+        "WHERE candidate.id=12 AND generation.id=1 AND handoff.id=1"
+    )
+    cursor = storage.fetch_one("SELECT next_offset FROM telegram_update_cursors WHERE stream='approval'")
+    sheets_history = storage.fetch_one("SELECT COUNT(*) AS count FROM sheet_remote_operations")
+    if (
+        baseline is None
+        or int(baseline["candidate_id"]) != 12
+        or int(baseline["generation_id"]) != 1
+        or str(baseline["generation_status"]) != "current"
+        or int(baseline["page_count"]) != 4
+        or int(baseline["handoff_id"]) != 1
+        or str(baseline["handoff_status"]) != "delivered"
+        or cursor is None
+        or int(cursor["next_offset"]) <= 0
+        or sheets_history is None
+        or int(sheets_history["count"]) <= 0
+    ):
+        raise RuntimeError("production cutover baseline does not match")
+
+
+def automation_cutover_preview(args: argparse.Namespace) -> int:
+    from .approval.telegram import TelegramApprovalAdapter
+    from .automation import AutomationAuthority, CutoverProposal, Frontier, cutover_locks
+    from .config import validate_automation_bindings
+
+    validate_capabilities((Capability.LIVE_COLLECTION, Capability.NOTIFY_CANDIDATES, Capability.LIVE_SHEETS))
+    config = _config(args)
+    validate_automation_bindings(config)
+    now = datetime.now(UTC)
+    with cutover_locks():
+        _require_runtime_release_digest(args.release_digest)
+        loop = asyncio.new_event_loop()
+        try:
+            session = SessionStore(os.environ["TELEGRAM_SESSION_PATH"]).validate()
+            collector, close = _live_collector(loop, session)
+            try:
+                with Storage.open(config.database_path) as storage:
+                    _require_production_cutover_baseline(storage)
+                    authority = AutomationAuthority(storage)
+                    if not authority.quiescent():
+                        raise RuntimeError("automation is not quiescent")
+                    def persist_preview() -> None:
+                        service = _approval_service(storage)
+                        adapter = TelegramApprovalAdapter(os.environ["TELEGRAM_BOT_TOKEN"], service)
+                        response = adapter._request("getMe", {})
+                        result = response.get("result")
+                        bot_id = result.get("id") if isinstance(result, dict) else None
+                        if not isinstance(bot_id, int) or isinstance(bot_id, bool) or bot_id < 1:
+                            raise RuntimeError("Telegram Bot API returned an invalid getMe result")
+                        token_hmac, audience_hmac = AutomationAuthority.audience_hmac(
+                            os.environ["TELEGRAM_BOT_TOKEN"],
+                            os.environ["NEWSBOT_APPROVER_CHAT_ID"].strip(),
+                            tuple(v.strip() for v in os.environ["NEWSBOT_APPROVER_USER_IDS"].split(",") if v.strip()),
+                            os.environ["NEWSBOT_CALLBACK_ACTOR_ID"].strip(),
+                        )
+                        bot_id_digest = sha256(str(bot_id).encode()).hexdigest()
+                        audience_id = authority.record_audience_binding(
+                            bot_id_digest=bot_id_digest,
+                            token_hmac=token_hmac,
+                            audience_hmac=audience_hmac,
+                            version=authority.next_audience_version(bot_id_digest),
+                        )
+                        frontiers = tuple(
+                            Frontier(
+                                sha256(channel.id.encode()).hexdigest(),
+                                int(cast(Any, collector).latest_message_id(channel) or 0),
+                                now,
+                            )
+                            for channel in config.enabled_channels
+                        )
+                        spreadsheet_id = config.google_sheets_spreadsheet_id
+                        if not spreadsheet_id:
+                            raise RuntimeError("Sheets target is not configured")
+                        target = storage.fetch_one(
+                            "SELECT target.id,target.target_ref_sha256 FROM sheet_target_bindings target "
+                            "JOIN sheet_bootstraps bootstrap ON bootstrap.target_binding_id=target.id "
+                            "WHERE bootstrap.status='ready' AND target.target_ref_sha256=?",
+                            (sha256(spreadsheet_id.encode()).hexdigest(),),
+                        )
+                        if target is None:
+                            raise RuntimeError("configured Sheets target is not ready")
+                        tables = ("candidates", "generation_jobs", "generations", "decision_events", "sheet_handoffs")
+                        maxima_values: list[int] = []
+                        for table in tables:
+                            maximum = storage.fetch_one(f"SELECT COALESCE(MAX(id),0) AS value FROM {table}")
+                            if maximum is None:
+                                raise RuntimeError("automation baseline query failed")
+                            maxima_values.append(int(maximum["value"]))
+                        maxima = tuple(maxima_values)
+                        cursor = storage.fetch_one(
+                            "SELECT next_offset FROM telegram_update_cursors WHERE stream='approval'"
+                        )
+                        offset = 0 if cursor is None else int(cursor["next_offset"])
+                        receipt = authority.persist_proposal(
+                            CutoverProposal(
+                                args.proposal_id,
+                                config.digest,
+                                sha256(str(offset).encode()).hexdigest(),
+                                sha256(b"quiescent").hexdigest(),
+                                int(target["id"]),
+                                str(target["target_ref_sha256"]),
+                                args.release_digest,
+                                sha256(str(audience_id).encode()).hexdigest(),
+                                cast(tuple[int, int, int, int, int], maxima),
+                                offset,
+                                frontiers,
+                            ),
+                            now=now,
+                        )
+                        _print({"proposal_sha256": receipt, "status": "previewed"})
+                    persist_preview()
+            finally:
+                close()
+        finally:
+            loop.close()
+    return 0
+
+
+def automation_cutover_apply(args: argparse.Namespace) -> int:
+    from .approval.telegram import TelegramApprovalAdapter
+    from .automation import AutomationAuthority, cutover_locks
+    from .config import validate_automation_bindings
+
+    validate_capabilities((Capability.NOTIFY_CANDIDATES, Capability.LIVE_SHEETS))
+    config = _config(args)
+    validate_automation_bindings(config)
+    def apply_locked(storage: Storage) -> None:
+        authority = AutomationAuthority(storage)
+        service = _approval_service(storage)
+        audience_id = _runtime_audience(
+            authority, TelegramApprovalAdapter(os.environ["TELEGRAM_BOT_TOKEN"], service), require_active=False
+        )
+        expected_frontiers = {sha256(channel.id.encode()).hexdigest() for channel in config.enabled_channels}
+
+        def validate_snapshot() -> bool:
+            proposal = storage.fetch_one(
+                "SELECT config_digest,cursor_digest,intervals_digest,ready_target_fingerprint "
+                "FROM automation_cutover_proposals WHERE id=?",
+                (args.proposal_id,),
+            )
+            frontiers = storage.fetch_all(
+                "SELECT channel_key_digest FROM automation_proposal_frontiers WHERE proposal_id=?",
+                (args.proposal_id,),
+            )
+            cursor = storage.fetch_one("SELECT next_offset FROM telegram_update_cursors WHERE stream='approval'")
+            offset = 0 if cursor is None else int(cursor["next_offset"])
+            return bool(
+                authority.quiescent()
+                and proposal is not None
+                and config.google_sheets_spreadsheet_id is not None
+                and str(proposal["ready_target_fingerprint"])
+                == sha256(config.google_sheets_spreadsheet_id.encode()).hexdigest()
+                and str(proposal["config_digest"]) == config.digest
+                and str(proposal["cursor_digest"]) == sha256(str(offset).encode()).hexdigest()
+                and str(proposal["intervals_digest"]) == sha256(b"quiescent").hexdigest()
+                and {str(row["channel_key_digest"]) for row in frontiers} == expected_frontiers
+            )
+
+        result = authority.apply_proposal(
+            args.proposal_id,
+            args.proposal_sha256,
+            audience_binding_id=audience_id,
+            release_digest=args.release_digest,
+            now=datetime.now(UTC),
+            validate=validate_snapshot,
+        )
+        _print({"changed": bool(result["changed"]), "status": str(result["status"])})
+
+    with cutover_locks():
+        _require_runtime_release_digest(args.release_digest)
+        with Storage.open(_database(args)) as storage:
+            apply_locked(storage)
+    return 0
+
+
+def automation_release_activate(args: argparse.Namespace) -> int:
+    from .automation import AutomationAuthority, cutover_locks
+
+    def activate_locked(storage: Storage) -> None:
+        authority = AutomationAuthority(storage)
+        result = authority.activate_release(
+            args.release_digest,
+            now=datetime.now(UTC),
+            validate=authority.quiescent,
+        )
+        _print(
+            {
+                "activation_id": cast(int, result["activation_id"]),
+                "changed": bool(result["changed"]),
+                "status": str(result["status"]),
+            }
+        )
+
+    with cutover_locks():
+        _require_runtime_release_digest(args.release_digest)
+        with Storage.open(_database(args)) as storage:
+            activate_locked(storage)
+    return 0
+
+
+def automation_collect_once(args: argparse.Namespace) -> int:
+    from .automation import AutomationAuthority, automation_lock
+
+    validate_capabilities(Capability.LIVE_COLLECTION)
+    with automation_lock("collect"), Storage.open(_database(args)) as storage:
+        authority = AutomationAuthority(storage)
+        config = _config(args)
+        configured_frontiers = tuple(sha256(channel.id.encode()).hexdigest() for channel in config.enabled_channels)
+        active_cutover = storage.fetch_one(
+            "SELECT proposal.config_digest FROM automation_cutovers cutover "
+            "JOIN automation_cutover_proposals proposal ON proposal.id=cutover.proposal_id WHERE cutover.id=1"
+        )
+        active_frontiers = tuple(frontier.channel_key_digest for frontier in authority.active_frontiers())
+        if active_cutover is None:
+            raise RuntimeError("automated collection requires an active cutover")
+        if (
+            len(configured_frontiers) != 6
+            or len(set(configured_frontiers)) != 6
+            or tuple(sorted(configured_frontiers)) != active_frontiers
+            or str(active_cutover["config_digest"]) != config.digest
+        ):
+            raise RuntimeError("automated collection configuration drifted from the active cutover")
+        lease = authority.acquire_lease(
+            "collect",
+            now=datetime.now(UTC),
+            lease_seconds=int(getattr(args, "lease_seconds", 225)),
+        )
+        outcome = "failed"
+        try:
+            result = _collect_live(
+                argparse.Namespace(**vars(args), fail_on_channel_error=True),
+                reconcile=False,
+                config=config,
+            )
+            outcome = "done"
+            return result
+        finally:
+            authority.release_lease(lease, now=datetime.now(UTC), outcome=outcome)
+
+
+def _notification_payload(
+    storage: Storage,
+    service: CandidateApprovalService,
+    notification_id: int,
+    *,
+    actor_id: int,
+) -> tuple[str, dict[str, object] | None]:
+    row = storage.fetch_one(
+        "SELECT notification_kind,candidate_id,generation_id,defer_authority_id FROM telegram_notification_outbox WHERE id=?",
+        (notification_id,),
+    )
+    if row is None:
+        raise RuntimeError("notification disappeared")
+    if row["notification_kind"] == "candidate":
+        candidate = storage.fetch_one(
+            "SELECT candidate.id,candidate_evaluations.run_id FROM candidates candidate "
+            "JOIN candidate_evaluations ON candidate_evaluations.id=candidate.evaluation_id WHERE candidate.id=?",
+            (int(row["candidate_id"]),),
+        )
+        if candidate is None:
+            raise RuntimeError("candidate notification binding drift")
+        digest = service.create_digest(int(candidate["run_id"]), actor_id=actor_id)
+        item = next(
+            (value for value in digest.candidates if int(value["candidate_id"]) == int(row["candidate_id"])), None
+        )
+        if item is None:
+            raise RuntimeError("candidate notification is no longer eligible")
+        buttons = digest.buttons[int(row["candidate_id"])]
+        return (
+            f"제목: {item['title']}\n출처: {item['source_url']}",
+            {"inline_keyboard": [[{"text": button.label, "callback_data": button.token}] for button in buttons]},
+        )
+    if row["notification_kind"] == "review":
+        generation = storage.fetch_one(
+            "SELECT generation.id,generation.content_json,selection.candidate_id FROM generations generation "
+            "JOIN generation_jobs job ON job.id=generation.generation_job_id "
+            "JOIN selections selection ON selection.id=job.selection_id "
+            "WHERE generation.id=? AND generation.status='current'",
+            (int(row["generation_id"]),),
+        )
+        if generation is None:
+            raise RuntimeError("review notification binding drift")
+        sources = storage.fetch_all(
+            "SELECT source_post_version_id FROM generation_sources WHERE generation_id=? ORDER BY source_post_version_id",
+            (int(generation["id"]),),
+        )
+        source_version_ids = tuple(int(source["source_post_version_id"]) for source in sources)
+        if not source_version_ids:
+            raise RuntimeError("review notification has no source binding")
+        buttons = service.review_buttons(
+            int(generation["candidate_id"]),
+            int(generation["id"]),
+            actor_id=actor_id,
+            source_version_ids=source_version_ids,
+        )
+        return (
+            json.dumps(json.loads(str(generation["content_json"])), ensure_ascii=False, sort_keys=True),
+            {"inline_keyboard": [[{"text": button.label, "callback_data": button.token}] for button in buttons]},
+        )
+    authority = storage.fetch_one(
+        "SELECT defer.candidate_id,defer.stage FROM automation_defer_authority defer "
+        "WHERE defer.id=? AND defer.cutover_id=1",
+        (int(row["defer_authority_id"]),),
+    )
+    if authority is None:
+        raise RuntimeError("resume notification binding drift")
+    candidate_id = int(authority["candidate_id"])
+    if str(authority["stage"]) == "selection":
+        candidate = storage.fetch_one(
+            "SELECT candidate_evaluations.run_id FROM candidates "
+            "JOIN candidate_evaluations ON candidate_evaluations.id=candidates.evaluation_id "
+            "WHERE candidates.id=? AND candidates.status='pending_selection'",
+            (candidate_id,),
+        )
+        if candidate is None:
+            raise RuntimeError("resumed selection is no longer eligible")
+        digest = service.create_digest(int(candidate["run_id"]), actor_id=actor_id)
+        item = next(
+            (value for value in digest.candidates if int(value["candidate_id"]) == candidate_id),
+            None,
+        )
+        if item is None:
+            raise RuntimeError("resumed selection is no longer eligible")
+        buttons = digest.buttons[candidate_id]
+        return (
+            f"제목: {item['title']}\n출처: {item['source_url']}",
+            {"inline_keyboard": [[{"text": button.label, "callback_data": button.token}] for button in buttons]},
+        )
+    generation = storage.fetch_one(
+        "SELECT generation.id,generation.content_json FROM generations generation "
+        "JOIN generation_jobs job ON job.id=generation.generation_job_id "
+        "JOIN selections selection ON selection.id=job.selection_id "
+        "WHERE selection.candidate_id=? AND generation.status='current' "
+        "ORDER BY generation.id DESC LIMIT 1",
+        (candidate_id,),
+    )
+    if generation is None:
+        raise RuntimeError("resumed review is no longer eligible")
+    sources = storage.fetch_all(
+        "SELECT source_post_version_id FROM generation_sources WHERE generation_id=? ORDER BY source_post_version_id",
+        (int(generation["id"]),),
+    )
+    source_version_ids = tuple(int(source["source_post_version_id"]) for source in sources)
+    buttons = service.review_buttons(
+        candidate_id,
+        int(generation["id"]),
+        actor_id=actor_id,
+        source_version_ids=source_version_ids,
+    )
+    return (
+        json.dumps(json.loads(str(generation["content_json"])), ensure_ascii=False, sort_keys=True),
+        {"inline_keyboard": [[{"text": button.label, "callback_data": button.token}] for button in buttons]},
+    )
+
+
+def telegram_tick(args: argparse.Namespace) -> int:
+    from .approval.telegram import TelegramApprovalAdapter, TelegramDeadline, split_telegram_text
+    from .automation import AutomationAuthority, automation_lock
+
+    validate_capabilities(Capability.APPROVE_POLL)
+    with automation_lock("telegram"), Storage.open(_database(args)) as storage:
+        authority = AutomationAuthority(storage)
+        service = _approval_service(storage)
+        adapter = TelegramApprovalAdapter(os.environ["TELEGRAM_BOT_TOKEN"], service)
+        tick_deadline = TelegramDeadline.after(args.deadline)
+        audience_binding_id = _runtime_audience(authority, adapter, deadline=tick_deadline)
+        poll = authority.acquire_lease(
+            "approval_poll",
+            now=datetime.now(UTC),
+            lease_seconds=int(getattr(args, "lease_seconds", 90)),
+        )
+        poll_outcome = "failed"
+        handled = 0
+        try:
+            response = adapter._request(
+                "getUpdates",
+                {
+                    "timeout": str(args.timeout),
+                    "limit": str(args.limit),
+                    "offset": str(_approval_poll_offset(storage, None) or 0),
+                },
+                deadline=tick_deadline,
+            )
+            updates = response.get("result")
+            if not isinstance(updates, list):
+                raise RuntimeError("Telegram Bot API returned an invalid getUpdates result")
+            for update in updates:
+                if not isinstance(update, dict) or not isinstance(update.get("update_id"), int):
+                    continue
+                callback = update.get("callback_query")
+                token = callback.get("data") if isinstance(callback, dict) else None
+                admitted = (
+                    isinstance(token, str)
+                    and storage.fetch_one(
+                        "SELECT 1 FROM callback_tokens token JOIN telegram_notification_outbox outbox "
+                        "ON outbox.id=token.notification_id WHERE token.token=? "
+                        "AND outbox.cutover_id=1 AND outbox.audience_binding_id=? "
+                        "AND outbox.state IN ('sent','ambiguous','resolved_delivered')",
+                        (hash_callback_token(token), audience_binding_id),
+                    )
+                    is not None
+                )
+                if admitted:
+                    adapter.handle_update(update, automation_lease=poll, deadline=tick_deadline)
+                    handled += 1
+                _advance_approval_poll_offset(storage, int(update["update_id"]))
+            poll_outcome = "done"
+        finally:
+            authority.release_lease(poll, now=datetime.now(UTC), outcome=poll_outcome)
+        dispatch = authority.acquire_lease(
+            "telegram_dispatch",
+            now=datetime.now(UTC),
+            lease_seconds=int(getattr(args, "lease_seconds", 90)),
+        )
+        dispatch_outcome = "failed"
+        try:
+            authority.resume_due_and_enqueue(dispatch, now=datetime.now(UTC))
+            claim = authority.claim_next_notification(dispatch, now=datetime.now(UTC))
+            if claim is None:
+                _print({"handled": handled, "status": "no_work"})
+                dispatch_outcome = "done"
+                return 0
+            if claim.state == "sending" and authority.recover_possibly_sent(
+                claim.notification_id, dispatch, now=datetime.now(UTC)
+            ):
+                _print({"handled": handled, "status": "ambiguous_recovered"})
+                dispatch_outcome = "done"
+                return 0
+            text, markup = _notification_payload(
+                storage,
+                service,
+                claim.notification_id,
+                actor_id=_callback_actor_id(service.authorized_user_ids),
+            )
+            chunks = split_telegram_text(text)
+            markup_identity, _callback_token_hashes = _telegram_markup_identity(storage, markup)
+            metadata = tuple(
+                (
+                    len(chunk.encode("utf-16-le", "surrogatepass")) // 2,
+                    _request_sha256(
+                        {
+                            "text": chunk,
+                            "markup": markup_identity if index == len(chunks) - 1 else None,
+                        }
+                    ),
+                    index == len(chunks) - 1 and markup is not None,
+                )
+                for index, chunk in enumerate(chunks)
+            )
+            authority.create_notification_chunks(claim.notification_id, metadata)
+            next_chunk = authority.next_chunk(claim.notification_id, dispatch, now=datetime.now(UTC))
+            if next_chunk is None:
+                _print({"handled": handled, "status": "no_work"})
+                dispatch_outcome = "done"
+                return 0
+            chunk_id, chunk_index, template_digest, has_buttons = next_chunk
+            audience = storage.fetch_one(
+                "SELECT outbox.audience_binding_id FROM telegram_notification_outbox outbox "
+                "WHERE outbox.id=? AND outbox.cutover_id=1 AND outbox.audience_binding_id=?",
+                (claim.notification_id, audience_binding_id),
+            )
+            if audience is None:
+                raise RuntimeError("notification audience binding drift")
+            prepared_payload = adapter.prepare_message_payload(
+                chunks[chunk_index],
+                markup=markup if has_buttons else None,
+            )
+            attempt = authority.prepare_chunk_attempt(
+                claim.notification_id,
+                chunk_id,
+                _request_sha256(prepared_payload),
+                dispatch,
+                now=datetime.now(UTC),
+            )
+            if has_buttons:
+                callback_linked = bool(_callback_token_hashes)
+                for token_hash in _callback_token_hashes:
+                    token_row = storage.fetch_one(
+                        "SELECT id FROM callback_tokens WHERE token=?",
+                        (token_hash,),
+                    )
+                    if token_row is None or not authority.link_callback(
+                        int(token_row["id"]),
+                        claim.notification_id,
+                        attempt,
+                        dispatch,
+                        now=datetime.now(UTC),
+                    ):
+                        callback_linked = False
+                        break
+                if not callback_linked:
+                    authority.settle_attempt(
+                        attempt,
+                        "abandoned_pre_marker",
+                        dispatch,
+                        now=datetime.now(UTC),
+                    )
+                    _print({"handled": handled, "status": "callback_link_failed"})
+                    dispatch_outcome = "done"
+                    return 0
+            if tick_deadline.remaining() <= 0:
+                authority.settle_attempt(attempt, "abandoned_pre_marker", dispatch, now=datetime.now(UTC))
+                _print({"handled": handled, "status": "deadline_exhausted"})
+                dispatch_outcome = "done"
+                return 0
+            authority.mark_possibly_sent(attempt, dispatch, now=datetime.now(UTC))
+            result = adapter.send_prepared_message_once(
+                prepared_payload,
+                deadline=tick_deadline,
+            )
+            if result.accepted:
+                authority.settle_attempt(
+                    attempt, "accepted", dispatch, now=datetime.now(UTC), accepted_message_id=result.message_id
+                )
+                with suppress(TimeoutError):
+                    adapter.pace_after_send(tick_deadline)
+            elif result.safe_code == "rate_limited":
+                authority.settle_attempt(
+                    attempt,
+                    "trusted_rejected",
+                    dispatch,
+                    now=datetime.now(UTC),
+                    retryable=True,
+                )
+            elif result.safe_code == "transport_rejected":
+                authority.settle_attempt(attempt, "trusted_rejected", dispatch, now=datetime.now(UTC))
+            else:
+                authority.settle_attempt(attempt, "ambiguous", dispatch, now=datetime.now(UTC))
+            _print({"handled": handled, "status": "dispatched"})
+            dispatch_outcome = "done"
+            return 0
+        finally:
+            authority.release_lease(dispatch, now=datetime.now(UTC), outcome=dispatch_outcome)
+
+
+def sheets_deliver_pending_once(args: argparse.Namespace) -> int:
+    from .automation import AutomationAuthority, automation_lock
+    from .handoffs import SheetHandoffService
+
+    deadline_seconds = int(getattr(args, "deadline", 90))
+    if deadline_seconds < 0:
+        raise ValueError("--deadline-seconds must not be negative")
+    worker_args = argparse.Namespace(
+        **vars(args),
+        _sheets_deadline_monotonic=time.monotonic() + deadline_seconds,
+        _automation_sheets_worker=True,
+    )
+    with automation_lock("sheets"), Storage.open(_database(worker_args)) as storage:
+        authority = AutomationAuthority(storage)
+        lease = authority.acquire_lease(
+            "sheets_delivery",
+            now=datetime.now(UTC),
+            lease_seconds=int(getattr(worker_args, "lease_seconds", 135)),
+        )
+        outcome = "failed"
+        try:
+            _require_sheets_worker_deadline(worker_args)
+            target = storage.fetch_one("SELECT target_binding_id FROM automation_cutovers WHERE id=1")
+            if target is None:
+                _print({"status": "no_work"})
+                outcome = "done"
+                return 0
+            SheetHandoffService(storage).recover_expired_pre_marker(
+                int(target["target_binding_id"]), datetime.now(UTC).isoformat()
+            )
+            _require_sheets_worker_deadline(worker_args)
+            handoffs = authority.post_baseline_handoff_ids(1)
+            if not handoffs:
+                _print({"status": "no_work"})
+                outcome = "done"
+                return 0
+            result = _sheets_deliver_unlocked(argparse.Namespace(**vars(worker_args), handoff_id=handoffs[0]))
+            outcome = "done"
+            return result
+        except GoogleSheetsDeadlineExceeded:
+            _print({"status": "deadline_exhausted"})
+            return 0
+        finally:
+            authority.release_lease(lease, now=datetime.now(UTC), outcome=outcome)
+
+
+def automation_notification_resolve(args: argparse.Namespace) -> int:
+    """Resolve only through the authority's supported immutable transition API."""
+    with Storage.open(_database(args)) as storage:
+        from .automation import AutomationAuthority
+
+        state = storage.fetch_one("SELECT state FROM telegram_notification_outbox WHERE id=?", (args.intent_id,))
+        if state is None:
+            raise LookupError("notification intent does not exist")
+        expected = str(state["state"])
+        if args.expected_status != "manual_required" or expected not in {"ambiguous", "partial_manual_required"}:
+            raise RuntimeError("notification is not in the expected manual-required state")
+        if args.actor_id < 1:
+            raise ValueError("--actor-id must be positive")
+        resolution = "resolved_delivered" if args.resolution == "delivered" else "resolved_abandoned"
+        expected_reason = "transport_verified" if resolution == "resolved_delivered" else "operator_abandoned"
+        if args.reason_code != expected_reason:
+            raise ValueError("resolution and reason code do not match")
+        changed = AutomationAuthority(storage).resolve_notification(
+            args.intent_id,
+            cast(Literal["ambiguous", "partial_manual_required"], expected),
+            cast(Literal["resolved_delivered", "resolved_abandoned"], resolution),
+            actor_id=args.actor_id,
+            reason_code=cast(Literal["transport_verified", "operator_abandoned"], args.reason_code),
+            now=datetime.now(UTC),
+        )
+        _print({"changed": changed, "resolved": changed})
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="newsbot", description="Local-first Telegram news digest workflow")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -1723,6 +2628,92 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--handoff-id", type=int, required=True)
         elif name in {"sheets-reconcile", "sheets-retry-blocked"}:
             command.add_argument("--operation-id", type=int, required=True)
+        command.set_defaults(handler=handler)
+    for name, handler, help_text in (
+        ("automation-status", automation_status, "show redacted automation aggregates"),
+        ("automation-quiescence-check", automation_quiescence_check, "check bounded automation quiescence"),
+        (
+            "automation-notification-inspect",
+            automation_notification_inspect,
+            "inspect one notification without content",
+        ),
+        (
+            "automation-notification-resolve",
+            automation_notification_resolve,
+            "settle an eligible ambiguous notification without resend",
+        ),
+        (
+            "automation-cutover-preview",
+            automation_cutover_preview,
+            "capture a bounded immutable cutover proposal",
+        ),
+        (
+            "automation-cutover-apply",
+            automation_cutover_apply,
+            "apply an exact immutable cutover proposal",
+        ),
+        (
+            "automation-release-activate",
+            automation_release_activate,
+            "append a quiescent compatible runtime activation",
+        ),
+        (
+            "automation-collect-once",
+            automation_collect_once,
+            "run one fenced automatic collection",
+        ),
+        ("telegram-tick", telegram_tick, "run one fenced Telegram worker tick"),
+        (
+            "sheets-deliver-pending-once",
+            sheets_deliver_pending_once,
+            "deliver one fenced post-baseline Sheets handoff",
+        ),
+    ):
+        command = commands.add_parser(name, help=help_text)
+        command.add_argument("--db", type=Path)
+        if name == "automation-notification-inspect":
+            command.add_argument("--intent-id", type=int, required=True)
+        elif name == "automation-notification-resolve":
+            command.add_argument("--intent-id", type=int, required=True)
+            command.add_argument("--expected-status", choices=("manual_required",), required=True)
+            command.add_argument("--resolution", choices=("delivered", "abandoned"), required=True)
+            command.add_argument("--actor-id", type=int, required=True)
+            command.add_argument(
+                "--reason-code",
+                choices=("transport_verified", "operator_abandoned"),
+                required=True,
+            )
+        elif name == "automation-cutover-preview":
+            command.add_argument("--config", type=Path, default=Path("config/channels.toml"))
+            command.add_argument("--proposal-id", required=True)
+            command.add_argument("--release-digest", required=True)
+        elif name == "automation-cutover-apply":
+            command.add_argument("--config", type=Path, default=Path("config/channels.toml"))
+            command.add_argument("--proposal-id", required=True)
+            command.add_argument("--proposal-sha256", required=True)
+            command.add_argument("--release-digest", required=True)
+        elif name == "automation-release-activate":
+            command.add_argument("--release-digest", required=True)
+        elif name == "automation-collect-once":
+            command.add_argument("--config", type=Path, default=Path("config/channels.toml"))
+            command.add_argument("--page-size", type=int, default=100)
+            command.add_argument("--max-pages", type=int, default=10)
+            command.add_argument("--lookback-hours", type=int, default=24)
+            command.add_argument("--deadline-seconds", dest="deadline", type=int, default=180)
+            command.add_argument("--lease-seconds", dest="lease_seconds", type=int, default=225)
+        elif name == "telegram-tick":
+            command.add_argument("--config", type=Path, default=Path("config/channels.toml"))
+            command.add_argument("--poll-timeout", dest="timeout", type=int, choices=range(0, 51), default=10)
+            command.add_argument("--max-updates", dest="limit", type=int, choices=range(1, 101), default=50)
+            command.add_argument("--max-notifications", type=int, choices=(1,), default=1)
+            command.add_argument("--deadline-seconds", dest="deadline", type=int, default=60)
+            command.add_argument("--lease-seconds", dest="lease_seconds", type=int, default=90)
+        elif name == "sheets-deliver-pending-once":
+            command.add_argument("--config", type=Path, default=Path("config/channels.toml"))
+            command.add_argument("--max-handoffs", type=int, choices=(1,), default=1)
+            command.add_argument("--deadline-seconds", dest="deadline", type=int, default=90)
+            command.add_argument("--lease-seconds", dest="lease_seconds", type=int, default=135)
+            command.add_argument("--sheet-lease-seconds", type=int, choices=(300,), default=300)
         command.set_defaults(handler=handler)
     return parser
 

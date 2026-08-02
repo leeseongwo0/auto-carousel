@@ -247,6 +247,14 @@ class AppConfig:
         ).hexdigest()
 
 
+def validate_automation_bindings(config: AppConfig) -> None:
+    """Reassert the immutable six-channel worker contract at each entrypoint."""
+    channels = config.enabled_channels
+    handles = frozenset(channel.handle.casefold() for channel in channels)
+    if len(channels) != 6 or handles != _REQUIRED_CHANNEL_HANDLES:
+        raise ConfigError("automation requires exactly the six audited enabled channels")
+
+
 def _decimal(value: Any, name: str) -> Decimal:
     try:
         parsed = Decimal(str(value))

@@ -6,7 +6,7 @@ import hashlib
 import json
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from math import ceil
@@ -15,6 +15,7 @@ from typing import Any
 from .base import (
     DeliveryOutcome,
     DispatchCredentialAttestation,
+    GoogleSheetsDeadlineExceeded,
     MetadataState,
     PreparedSheetMutation,
     SafeCode,
@@ -33,8 +34,59 @@ from .schema import (
 
 _SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
 _MAX_ERROR_BYTES = 1_048_576
-_WHOLE_CALL_SECONDS = 195
+_WHOLE_CALL_SECONDS = 85
 _CONNECT_SECONDS = 10
+
+
+def _call_before_deadline[Result](
+    operation: Callable[[], Result],
+    deadline_monotonic: float | None,
+) -> Result:
+    remaining = _remaining_deadline(deadline_monotonic)
+    if remaining is None:
+        return operation()
+    completed = threading.Event()
+    result: list[Result] = []
+    errors: list[BaseException] = []
+
+    def invoke() -> None:
+        try:
+            result.append(operation())
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            completed.set()
+
+    thread = threading.Thread(target=invoke, daemon=True)
+    thread.start()
+    if not completed.wait(remaining):
+        raise GoogleSheetsDeadlineExceeded("Sheets worker deadline exceeded")
+    if errors:
+        raise errors[0]
+    return result[0]
+
+
+def _remaining_deadline(deadline_monotonic: float | None) -> float | None:
+    if deadline_monotonic is None:
+        return None
+    remaining = deadline_monotonic - time.monotonic()
+    if remaining <= 0:
+        raise GoogleSheetsDeadlineExceeded("Sheets worker deadline exceeded")
+    return remaining
+
+
+def _request_timeout(deadline_monotonic: float | None) -> float:
+    remaining = _remaining_deadline(deadline_monotonic)
+    return _CONNECT_SECONDS if remaining is None else min(_CONNECT_SECONDS, remaining)
+
+
+def _set_service_timeout(service: object, timeout: float) -> None:
+    http = getattr(service, "_http", None)
+    if http is not None:
+        http.timeout = timeout
+        nested_http = getattr(http, "http", None)
+        if nested_http is not None:
+            nested_http.timeout = timeout
 
 
 class GoogleSheetsAdapter:
@@ -54,6 +106,7 @@ class GoogleSheetsAdapter:
         credential_refreshed_at: str | None = None,
         credential_expires_at: str | None = None,
         credential_scope_ok: bool = False,
+        deadline_monotonic: float | None = None,
     ) -> None:
         if not spreadsheet_id:
             raise ValueError("spreadsheet_id is required")
@@ -71,6 +124,7 @@ class GoogleSheetsAdapter:
             if credential_refreshed_at is not None and credential_expires_at is not None
             else None
         )
+        self._deadline_monotonic = deadline_monotonic
 
     @classmethod
     def from_credentials(
@@ -78,6 +132,7 @@ class GoogleSheetsAdapter:
         *,
         credential_info: Mapping[str, str],
         spreadsheet_id: str,
+        deadline_monotonic: float | None = None,
     ) -> GoogleSheetsAdapter:
         """Construct the optional client lazily from one validated credential snapshot."""
         if not spreadsheet_id:
@@ -91,13 +146,26 @@ class GoogleSheetsAdapter:
             from googleapiclient.discovery import build  # type: ignore[import-untyped]
         except ImportError as exc:  # pragma: no cover - depends on optional extra
             raise RuntimeError("Google Sheets support requires the sheets extra") from exc
+        _remaining_deadline(deadline_monotonic)
         try:
             credentials = Credentials.from_service_account_info(  # type: ignore[no-untyped-call]
                 dict(credential_info), scopes=[_SHEETS_SCOPE]
             )
-            credentials.refresh(Request())
+            request = Request()
+
+            def refresh_request(*args: object, **kwargs: object) -> object:
+                kwargs["timeout"] = _request_timeout(deadline_monotonic)
+                return request(*args, **kwargs)
+
+            _call_before_deadline(
+                lambda: credentials.refresh(refresh_request),
+                deadline_monotonic,
+            )
             if _token_lifetime_short(credentials.expiry):
-                credentials.refresh(Request())
+                _call_before_deadline(
+                    lambda: credentials.refresh(refresh_request),
+                    deadline_monotonic,
+                )
             if not credentials.token:
                 raise RuntimeError("credential refresh returned no access token")
             if _token_lifetime_short(credentials.expiry):
@@ -118,6 +186,9 @@ class GoogleSheetsAdapter:
                 static_discovery=True,
             )
             mutation_service._newsbot_one_attempt_http = mutation_http
+            _remaining_deadline(deadline_monotonic)
+        except GoogleSheetsDeadlineExceeded:
+            raise
         except Exception as exc:
             raise RuntimeError("Google Sheets credential initialization failed") from exc
         refreshed_at = datetime.now(UTC)
@@ -133,6 +204,7 @@ class GoogleSheetsAdapter:
             credential_refreshed_at=refreshed_at.isoformat(),
             credential_expires_at=expiry.isoformat(),
             credential_scope_ok=bool(credentials.has_scopes([_SHEETS_SCOPE])),
+            deadline_monotonic=deadline_monotonic,
         )
 
     def prepare_bootstrap(self, *, service_account_email: str) -> PreparedSheetMutation:
@@ -243,10 +315,11 @@ class GoogleSheetsAdapter:
         """Start the absolute mutation deadline before the durable marker."""
         if self._dispatch_armed:
             raise RuntimeError("prepared dispatch is already armed")
+        remaining = _remaining_deadline(self._deadline_monotonic)
         self._dispatch_armed = True
         transport = getattr(self._mutation_service, "_newsbot_one_attempt_http", None)
         if transport is not None:
-            transport.arm()
+            transport.arm(_WHOLE_CALL_SECONDS if remaining is None else min(_WHOLE_CALL_SECONDS, remaining))
 
     def probe_bootstrap(self, *, service_account_email: str) -> SheetProbe:
         """Read-only proof of exact controls after an ambiguous bootstrap."""
@@ -295,16 +368,25 @@ class GoogleSheetsAdapter:
             return SheetProbe(metadata=MetadataState.ABSENT, safe_code=SafeCode.AMBIGUOUS)
 
     def _read_document(self) -> Mapping[str, Any]:
+        timeout = _request_timeout(self._deadline_monotonic)
+        _set_service_timeout(self._service, timeout)
         direct = getattr(self._service, "get_document", None)
         if callable(direct):
-            result = direct(self._spreadsheet_id)
+            result = _call_before_deadline(
+                lambda: direct(self._spreadsheet_id),
+                self._deadline_monotonic,
+            )
         else:
             request = self._service.spreadsheets().get(
                 spreadsheetId=self._spreadsheet_id,
                 includeGridData=True,
                 fields="sheets(properties,data(startRow,startColumn,rowData(values(userEnteredValue,note,dataValidation))),merges,protectedRanges(range,description,warningOnly,editors(users,groups,domainUsersCanEdit))),developerMetadata(metadataKey,metadataValue,visibility,location)",
             )
-            result = request.execute(num_retries=0)
+            result = _call_before_deadline(
+                lambda: request.execute(num_retries=0),
+                self._deadline_monotonic,
+            )
+        _remaining_deadline(self._deadline_monotonic)
         if not isinstance(result, Mapping):
             raise ValueError("invalid Sheets read response")
         return result
@@ -312,6 +394,8 @@ class GoogleSheetsAdapter:
     def _read_document_for_preparation(self) -> Mapping[str, Any]:
         try:
             return self._read_document()
+        except GoogleSheetsDeadlineExceeded:
+            raise
         except Exception as exc:
             raise RuntimeError("Google Sheets preparation read failed") from exc
 
@@ -435,11 +519,13 @@ class _SingleAttemptHttp:
 
             self._http._conn_request = guarded_connection_request  # type: ignore[attr-defined]
 
-    def arm(self) -> None:
+    def arm(self, timeout_seconds: float = _WHOLE_CALL_SECONDS) -> None:
         if self._deadline is not None:
             raise RuntimeError("mutation transport already armed")
-        self._deadline = time.monotonic() + _WHOLE_CALL_SECONDS
-        self._watchdog = threading.Timer(_WHOLE_CALL_SECONDS, self._expire)
+        if timeout_seconds <= 0:
+            raise GoogleSheetsDeadlineExceeded("Sheets worker deadline exceeded")
+        self._deadline = time.monotonic() + timeout_seconds
+        self._watchdog = threading.Timer(timeout_seconds, self._expire)
         self._watchdog.daemon = True
         self._watchdog.start()
 

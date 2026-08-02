@@ -271,8 +271,16 @@ def test_deep_reconcile_never_moves_normal_cursor(tmp_path):
     assert after == before
 
 
-def test_fixture_reconcile_is_bounded_and_cursor_neutral(tmp_path):
-    from newsbot import cli
+def test_fixture_reconcile_is_bounded_and_cursor_neutral(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+
+    from newsbot import automation, cli
+
+    @contextmanager
+    def no_lock(*_args, **_kwargs):
+        yield
+
+    monkeypatch.setattr(automation, "automation_lock", no_lock)
 
     fixture_path = tmp_path / "messages.json"
     _fixture(

@@ -1,0 +1,13 @@
+[Unit]
+Description=Schedule Newsbot Telegram processing
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=20s
+RandomizedDelaySec=0
+AccuracySec=1s
+Unit=newsbot-telegram.service
+Persistent=false
+
+[Install]
+WantedBy=timers.target

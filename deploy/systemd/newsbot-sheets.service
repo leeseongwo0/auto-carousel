@@ -1,0 +1,22 @@
+[Unit]
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=newsbot
+Group=newsbot
+WorkingDirectory=/var/lib/newsbot
+EnvironmentFile=/etc/newsbot/newsbot.env
+UMask=0077
+NoNewPrivileges=true
+CapabilityBoundingSet=
+ExecStart=/usr/local/bin/newsbot sheets-deliver-pending-once --config /etc/newsbot/config.toml --db /var/lib/newsbot/newsbot.db --max-handoffs 1 --deadline-seconds 90 --lease-seconds 135 --sheet-lease-seconds 300
+TimeoutStartSec=120
+TimeoutStopSec=10
+KillMode=control-group
+SendSIGKILL=yes
+TasksMax=64
+MemoryMax=768M
+MemorySwapMax=0
+CPUQuota=100%

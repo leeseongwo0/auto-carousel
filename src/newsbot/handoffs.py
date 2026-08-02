@@ -986,6 +986,15 @@ class SheetHandoffService:
                 (safe_error_code or outcome, target_binding_id),
             )
 
+    def recover_expired_pre_marker(self, target_binding_id: int, now: str) -> None:
+        """Settle only proven-not-dispatched expired work for one target.
+
+        This is intentionally target-scoped so an automatic delivery worker cannot
+        inspect or recover another target's operation.
+        """
+        with self.storage.transaction() as connection:
+            self._recover_expired_pre_marker(connection, target_binding_id, now)
+
     def _recover_expired_pre_marker(self, connection: sqlite3.Connection, target_binding_id: int, now: str) -> None:
         row = connection.execute(
             "SELECT o.id,o.operation_kind,o.handoff_id,o.last_fence_version,l.id AS lease_id "

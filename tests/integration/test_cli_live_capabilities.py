@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -14,6 +15,17 @@ from newsbot.approval.telegram import split_telegram_text
 from newsbot.config import Capability, ConfigError, validate_capabilities
 from newsbot.copywriting import adaptive_page_count
 from newsbot.storage import Storage
+
+
+@pytest.fixture(autouse=True)
+def isolated_automation_locks(monkeypatch: pytest.MonkeyPatch) -> None:
+    from newsbot import automation
+
+    @contextmanager
+    def no_lock(*_args: object, **_kwargs: object):
+        yield
+
+    monkeypatch.setattr(automation, "automation_lock", no_lock)
 
 
 def test_adaptive_page_count_has_deterministic_bounded_extremes() -> None:
@@ -135,9 +147,15 @@ def test_live_sheets_uses_one_validated_credential_snapshot(monkeypatch, tmp_pat
             raise AssertionError("credential file reopened")
         return credential_info
 
-    def construct_from_snapshot(*, credential_info: dict[str, str], spreadsheet_id: str) -> object:
+    def construct_from_snapshot(
+        *,
+        credential_info: dict[str, str],
+        spreadsheet_id: str,
+        deadline_monotonic: float | None = None,
+    ) -> object:
         assert credential_info is credential_info_snapshot
         assert spreadsheet_id == "sheet"
+        assert deadline_monotonic is None
         return adapter
 
     credential_info_snapshot = credential_info
@@ -221,6 +239,7 @@ def test_sheets_bootstrap_redacts_pre_dispatch_provider_errors(
         "_live_sheets",
         lambda _args: (config, adapter, "bot@example.invalid"),
     )
+    monkeypatch.setattr(cli, "_config", lambda _args: config)
 
     with pytest.raises(RuntimeError) as error:
         cli.sheets_bootstrap(SimpleNamespace())
@@ -340,7 +359,7 @@ def test_targeted_live_reconcile_failure_is_nonzero_and_does_not_emit_digest(tmp
     monkeypatch.setattr(cli, "_config", lambda _: config)
     monkeypatch.setattr(cli, "SessionStore", lambda _: SimpleNamespace(validate=lambda: tmp_path / "session"))
     monkeypatch.setenv("TELEGRAM_SESSION_PATH", str(tmp_path / "session"))
-    monkeypatch.setattr(cli, "_live_collector", lambda *_: (object(), lambda: None))
+    monkeypatch.setattr(cli, "_live_collector", lambda *_, **__: (object(), lambda: None))
 
     def fail_reconcile(*_: object, **__: object) -> int:
         raise RuntimeError("targeted reconciliation failed")

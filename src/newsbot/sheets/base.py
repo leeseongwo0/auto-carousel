@@ -13,6 +13,10 @@ from enum import StrEnum
 from typing import Protocol
 
 
+class GoogleSheetsDeadlineExceeded(RuntimeError):
+    """The caller's absolute Sheets worker deadline elapsed."""
+
+
 class SafeCode(StrEnum):
     TEMPLATE_DRIFT = "template_drift"
     METADATA_CONFLICT = "metadata_conflict"

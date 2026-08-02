@@ -3,399 +3,137 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Newsbot VPS 쉬운 설치·운영 가이드</title>
+  <title>Newsbot VPS 설치·복구 가이드</title>
   <style>
-    :root { color-scheme: light dark; --bg:#f5f7fb; --panel:#fff; --text:#172033; --muted:#59657a; --accent:#2457d6; --warn:#a65200; --ok:#18794e; --border:#dbe1ec; --code:#101827; }
-    @media (prefers-color-scheme: dark) { :root { --bg:#0d1118; --panel:#151b25; --text:#e8edf7; --muted:#aeb8ca; --accent:#80a7ff; --warn:#ffb45f; --ok:#70d6a7; --border:#2a3444; --code:#090d14; } }
-    * { box-sizing:border-box; }
-    body { margin:0; background:var(--bg); color:var(--text); font:16px/1.65 system-ui,-apple-system,"Segoe UI",sans-serif; }
-    main { max-width:980px; margin:auto; padding:36px 20px 80px; }
-    header, section { background:var(--panel); border:1px solid var(--border); border-radius:14px; padding:24px 28px; margin-bottom:18px; }
-    h1 { margin:0 0 8px; font-size:2rem; }
-    h2 { margin:0 0 14px; font-size:1.35rem; }
-    h3 { margin:22px 0 8px; font-size:1.05rem; }
-    p, li { max-width:82ch; }
-    .subtitle, .muted { color:var(--muted); }
-    .notice { border-left:5px solid var(--warn); background:color-mix(in srgb,var(--warn) 9%,var(--panel)); padding:14px 16px; border-radius:8px; }
-    .ok { border-left:5px solid var(--ok); background:color-mix(in srgb,var(--ok) 9%,var(--panel)); padding:14px 16px; border-radius:8px; }
-    nav ul { columns:2; padding-left:20px; }
-    a { color:var(--accent); }
-    code { font-family:ui-monospace,SFMono-Regular,Consolas,monospace; }
-    pre { background:var(--code); color:#e8edf7; overflow:auto; border-radius:9px; padding:16px; font-size:.88rem; line-height:1.5; }
-    table { width:100%; border-collapse:collapse; }
-    th,td { border-bottom:1px solid var(--border); padding:10px; text-align:left; vertical-align:top; }
-    .steps { counter-reset:step; list-style:none; padding:0; }
-    .steps > li { counter-increment:step; padding:10px 0 10px 46px; position:relative; }
-    .steps > li::before { content:counter(step); position:absolute; left:0; top:8px; width:30px; height:30px; display:grid; place-items:center; border-radius:50%; background:var(--accent); color:white; font-weight:700; }
-    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:12px; }
-    .card { border:1px solid var(--border); border-radius:10px; padding:14px 16px; }
-    .card h3 { margin-top:0; }
-    .yes,.partial,.no { display:inline-block; border-radius:999px; padding:2px 9px; color:white; font-size:.8rem; font-weight:700; }
-    .yes { background:var(--ok); }
-    .partial { background:var(--warn); }
-    .no { background:#b42318; }
-    .checklist { list-style:"□  "; }
-    .flow { display:flex; flex-wrap:wrap; gap:7px; align-items:center; }
-    .flow span { border:1px solid var(--border); border-radius:8px; padding:7px 10px; }
-    .flow b { color:var(--accent); }
-    details { border:1px solid var(--border); border-radius:9px; padding:10px 14px; margin:10px 0; }
-    summary { cursor:pointer; font-weight:700; }
-    footer { color:var(--muted); text-align:center; padding:20px; }
+    :root{color-scheme:light dark;font-family:system-ui,sans-serif;line-height:1.6}body{margin:auto;max-width:980px;padding:24px;background:#f5f7fb;color:#172033}section,header{background:#fff;border:1px solid #dbe1ec;border-radius:12px;padding:20px;margin:16px 0}pre{overflow:auto;background:#101827;color:#e8edf7;padding:14px;border-radius:8px}code{font-family:ui-monospace,monospace}.warn{border-left:5px solid #a65200;padding-left:14px}.ok{border-left:5px solid #18794e;padding-left:14px}@media(prefers-color-scheme:dark){body{background:#0d1118;color:#e8edf7}section,header{background:#151b25;border-color:#2a3444}}
   </style>
 </head>
 <body>
-<main>
-  <header>
-    <h1>Newsbot VPS 쉬운 설치·운영 가이드</h1>
-    <p class="subtitle">Telegram 수집·승인, Google Sheets 전달, Codex CLI device-auth 생성을 안전하게 구성하는 순서</p>
-    <div class="notice"><strong>BLOCK 규칙:</strong> effective permission profile 증거, cgroup-empty proof, clean/reset receipt가 참조된 containment state, migration/manifest 일치, secret/sentinel 비유출, 축소되지 않은 policy 중 하나라도 없거나 불명확하면 production을 시작하지 않습니다.</div>
-  </header>
+<header>
+  <h1>Newsbot VPS 설치·복구 가이드</h1>
+  <p>여섯 Telegram 채널을 자동 수집하고, 사람의 두 번의 승인 뒤 Sheets에 전달하는 초보자용 순서입니다. 명령은 VPS에서 실행합니다.</p>
+  <p class="warn"><strong>중요:</strong> <code>REPLACE_…</code> 값은 명시적 placeholder입니다. 실제 commit/digest/path로만 바꾸고 secret 값은 terminal, 문서, log에 붙여 넣지 마십시오. Telegram 또는 Sheets 효과가 ambiguous하면 자동으로 명령을 다시 실행하지 않습니다.</p>
+</header>
 
-  <section id="quick-start">
-    <h2>0. 먼저 이것만 보면 됩니다</h2>
-    <ol class="steps">
-      <li>로컬의 완성된 코드만 VPS의 <code>/opt/newsbot</code>으로 복사합니다.</li>
-      <li>VPS에 <code>newsbot</code> 전용 사용자와 비밀 파일 디렉터리를 만듭니다.</li>
-      <li>VPS에서 새 운영 DB <code>/var/lib/newsbot/newsbot.db</code>를 생성합니다. 로컬 데모 DB는 복사하지 않습니다.</li>
-      <li>VPS에서 <code>auth-telethon</code>을 실행해 Telegram 계정에 한 번 로그인합니다.</li>
-      <li>Telegram Bot 토큰과 승인자 ID를 설정하고 소량 수집을 시험합니다.</li>
-      <li>Google 자격증명을 옮기고 Sheets validate/bootstrap을 실행합니다.</li>
-      <li><code>newsbot-codex</code>에서 pinned Codex device login과 containment/policy canary를 통과한 뒤 one-job 자동 실행을 활성화합니다.</li>
-    </ol>
-    <div class="ok"><strong>핵심:</strong> 코드는 로컬에서 만들고, 실제 DB·Telegram session·자동 실행은 VPS에 둡니다.</div>
-  </section>
+<section>
+<h2>1. 소스 갱신과 release 변수</h2>
+<pre><code>sudo git -C /opt/newsbot/current pull --ff-only origin main
+cd /opt/newsbot/current
+export RELEASE_GIT_SHA=REPLACE_WITH_APPROVED_40_HEX_COMMIT_SHA
+export UV_SHA256=REPLACE_WITH_APPROVED_UV_ARTIFACT_SHA256
+export RELEASE_DIGEST=SET_AFTER_BUILD_FROM_RUNTIME_MANIFEST_SHA256
+export PROPOSAL_ID=REPLACE_WITH_NEW_OPERATOR_PROPOSAL_ID
+sudo install -d -o root -g root -m 0755 /opt/newsbot/releases/$RELEASE_GIT_SHA/src
+sudo git -C /opt/newsbot/current archive $RELEASE_GIT_SHA | sudo tar -x -C /opt/newsbot/releases/$RELEASE_GIT_SHA/src
+sudo chown -R root:root /opt/newsbot/releases/$RELEASE_GIT_SHA</code></pre>
+<p>Git commit과 artifact digest는 승인된 release record에서 얻습니다. source tree, DB, session, Google JSON을 서로 복사하지 않습니다.</p>
+</section>
 
-  <section id="readiness">
-    <h2>현재 구현 상태와 원하는 전체 흐름</h2>
-    <div class="flow" aria-label="전체 처리 흐름">
-      <span>6개 채널 수집</span><b>→</b><span>중복 제거·랭킹</span><b>→</b>
-      <span>Telegram 제작 여부 질문</span><b>→</b><span>사람의 [제작] 승인</span><b>→</b>
-      <span>Codex 카드뉴스 초안</span><b>→</b><span>사람의 [시트 전달] 승인</span><b>→</b>
-      <span>Google Sheets workplace 행 추가</span>
-    </div>
-    <p><strong>결론:</strong> 각 단계의 핵심 기능과 영속 상태는 구현되어 있지만, 지금 저장소만 설치하면 이 흐름 전체가 자동으로 주기 실행되지는 않습니다. 현재 배포 artifact에는 <strong>Codex 생성 timer만</strong> 있습니다. 수집→랭킹→후보 알림, Telegram callback polling, 승인된 handoff의 Sheets 전달을 반복하는 service/timer 또는 단일 coordinator가 추가로 필요합니다.</p>
-    <div class="grid">
-      <div class="card"><h3><span class="yes">가능</span> 수집·평가</h3><p>Telethon으로 고정된 6개 채널을 읽고 SQLite에 관찰·중복·랭킹 상태를 저장합니다.</p></div>
-      <div class="card"><h3><span class="yes">가능</span> Telegram 승인</h3><p>후보의 <code>[제작]</code> callback과 생성 원고의 <code>[시트 전달]</code> callback을 권한 있는 사용자에게만 허용합니다.</p></div>
-      <div class="card"><h3><span class="yes">가능</span> Codex 생성</h3><p>선택된 정확한 job 하나를 device-auth Codex provider로 생성하고 검토 대기 상태로 둡니다.</p></div>
-      <div class="card"><h3><span class="yes">가능</span> Sheets 전달</h3><p>최종 승인된 immutable handoff 하나를 고정 <code>workplace</code> 탭에 새 행으로 전달합니다.</p></div>
-      <div class="card"><h3><span class="partial">추가 필요</span> 전체 자동 스케줄</h3><p>수집/랭킹/알림, callback polling, Sheets outbox 전달 timer가 아직 배포 파일로 묶이지 않았습니다.</p></div>
-      <div class="card"><h3><span class="partial">확인 필요</span> AI 3 + Blockchain 3</h3><p>현재 6개 handle은 고정되어 있지만 설정에는 채널별 AI/Blockchain 구분 필드가 없습니다. 특히 <code>exilist_official</code>은 이름상 AI 소스입니다. 정확한 3:3 목록인지 운영자가 먼저 확인해야 합니다.</p></div>
-    </div>
-    <div class="notice"><strong>승인은 두 번입니다.</strong> 첫 번째 <code>[제작]</code>은 생성 허가이고, 두 번째 <code>[시트 전달]</code>은 생성된 원고를 검토한 뒤 Google Sheets에 보낼 최종 승인입니다. 첫 승인 즉시 Sheets에 쓰는 구조가 아닙니다.</div>
-  </section>
-
-  <section>
-    <h2>목차</h2>
-    <nav><ul>
-      <li><a href="#layout">권장 디렉터리</a></li><li><a href="#prepare">VPS 준비</a></li>
-      <li><a href="#transfer">코드 전송</a></li><li><a href="#install">패키지 설치</a></li>
-      <li><a href="#env">환경 변수</a></li><li><a href="#telegram">Telegram 연결</a></li>
-      <li><a href="#readiness">현재 가능 범위</a></li><li><a href="#oauth">Codex device auth</a></li>
-      <li><a href="#sheets">Google Sheets</a></li><li><a href="#manual-flow">전체 수동 검증</a></li>
-      <li><a href="#systemd">one-job cutover</a></li><li><a href="#backup">rollback</a></li>
-    </ul></nav>
-  </section>
-
-  <section id="layout">
-    <h2>1. 권장 디렉터리</h2>
-    <pre><code>/opt/newsbot/releases/A/         현재 또는 이전에 검증된 root-owned release
-/opt/newsbot/releases/B/         다음 pinned release
-/opt/newsbot/current             현재 slot symlink(운영자만 교체)
-/var/lib/newsbot/newsbot.db      운영 SQLite
-/var/lib/newsbot/telegram/       Telethon session
-/var/lib/newsbot-codex/.codex/   newsbot-codex 전용 ChatGPT device auth
-/var/lib/newsbot-containment/    root-owned dirty|clean state와 immutable receipts
-/etc/newsbot/newsbot.env         Telegram/Sheets 전용 환경 변수
-/var/lib/newsbot/google/        Google service account 전용 0700 디렉터리
-/etc/codex/requirements.toml     root-managed Codex permission profile</code></pre>
-    <p>기존 <code>var/demo/newsbot.db</code>는 fixture 데이터와 실제 데모 전달 기록이 섞여 있으므로 운영 DB로 복사하지 않고 새 DB를 만듭니다.</p>
-  </section>
-
-  <section id="prepare">
-    <h2>2. VPS 준비</h2>
-    <pre><code>sudo apt update
-sudo apt install -y curl git rsync sqlite3 ca-certificates nodejs npm
-
-sudo useradd --system --create-home --home-dir /var/lib/newsbot \
-  --shell /usr/sbin/nologin newsbot
-sudo useradd --system --create-home --home-dir /var/lib/newsbot-codex \
-  --shell /usr/sbin/nologin newsbot-codex
-sudo install -d -o root -g root -m 0755 /opt/newsbot/releases
-sudo install -d -o root -g root -m 0755 /usr/local/libexec /usr/local/share/newsbot
-sudo install -d -o newsbot -g newsbot -m 0700 /var/lib/newsbot/telegram
-sudo install -d -o newsbot -g newsbot -m 0700 /var/lib/newsbot/google
+<section>
+<h2>2. 계정·디렉터리·환경 파일</h2>
+<pre><code>sudo useradd --system --create-home --home-dir /var/lib/newsbot --shell /usr/sbin/nologin newsbot || true
+sudo useradd --system --create-home --home-dir /var/lib/newsbot-codex --shell /usr/sbin/nologin newsbot-codex || true
+sudo install -d -o newsbot -g newsbot -m 0700 /var/lib/newsbot/telegram /var/lib/newsbot/google
+sudo install -d -o newsbot -g newsbot -m 0700 /var/lib/newsbot/locks
+for lock in collect telegram sheets; do sudo install -o newsbot -g newsbot -m 0600 /dev/null "/var/lib/newsbot/locks/$lock.lock"; done
+sudo -u newsbot sqlite3 /var/lib/newsbot/newsbot.db 'PRAGMA user_version;'
 sudo install -d -o newsbot-codex -g newsbot-codex -m 0700 /var/lib/newsbot-codex/.codex
 sudo install -d -o root -g root -m 0700 /var/lib/newsbot-containment
-sudo install -d -o root -g root -m 0755 /var/empty/newsbot-provider /var/empty/newsbot-codex
+sudo install -d -o root -g root -m 0700 /var/backups/newsbot
 sudo install -d -o root -g newsbot -m 0750 /etc/newsbot
-sudo install -d -o root -g root -m 0755 /etc/codex
-
-sudo timedatectl set-ntp true
-timedatectl status</code></pre>
-  </section>
-
-  <section id="transfer">
-    <h2>3. 코드 전송</h2>
-    <p>가장 안전한 방식은 현재 완성본을 private Git 저장소의 릴리스 커밋으로 고정한 뒤 VPS에서 clone하는 것입니다. 현재 작업 트리를 직접 전송한다면 로컬에서 다음을 실행합니다.</p>
-    <pre><code>rsync -az \
-  --exclude '.git/' \
-  --exclude '.venv/' \
-  --exclude '.env' \
-  --exclude 'var/' \
-  --exclude 'artifacts/' \
-  --exclude '.pytest_cache/' \
-  --exclude '.mypy_cache/' \
-  ./ USER@VPS:/tmp/newsbot-release/</code></pre>
-    <p>VPS에서 B slot에만 배치합니다. release manifest가 각 executable, schema와 data artifact의 pinned checksum/owner/mode를 검증한 뒤에만 current를 atomically B로 바꿉니다.</p>
-    <pre><code>sudo rsync -a --delete /tmp/newsbot-release/ /opt/newsbot/releases/B/
-sudo chown -R root:root /opt/newsbot/releases/B
-sudo ln -s /opt/newsbot/releases/B /opt/newsbot/.current-B
-sudo mv -T /opt/newsbot/.current-B /opt/newsbot/current</code></pre>
-    <div class="notice"><code>--delete</code>는 <code>/opt/newsbot</code>처럼 newsbot 전용 디렉터리에만 사용합니다. <code>.env</code>, Telegram session, Google JSON, DB는 Git이나 코드 묶음으로 전송하지 않습니다.</div>
-  </section>
-
-  <section id="install">
-    <h2>4. Python과 Newsbot 설치</h2>
-    <p>release 디렉터리는 root가 소유하므로 그 안에 <code>.venv</code>를 만들지 않습니다. 고정된 별도 virtualenv에 설치하고 systemd가 사용하는 실행 파일을 만듭니다.</p>
-    <pre><code>sudo apt install -y python3.12 python3.12-venv
-sudo python3.12 -m venv /opt/newsbot/venv
-sudo /opt/newsbot/venv/bin/pip install --upgrade pip
-sudo /opt/newsbot/venv/bin/pip install \
-  "/opt/newsbot/current[telegram,sheets]"
-
-sudo install -o root -g root -m 0755 \
-  /opt/newsbot/venv/bin/newsbot /usr/local/bin/newsbot
-/usr/local/bin/newsbot --help</code></pre>
-    <p>새 release마다 같은 virtualenv에 다시 설치한 뒤 <code>/usr/local/bin/newsbot</code>을 다시 복사합니다. <code>uv.lock</code>의 정확한 dependency pin을 적용하려면 staging에서 <code>uv sync --frozen</code>으로 wheel을 만들고 그 wheel을 이 virtualenv에 설치합니다.</p>
-    <h3>운영 설정을 고정 경로에 설치</h3>
-    <pre><code>sudo install -o root -g root -m 0644 \
-  /opt/newsbot/current/config/channels.toml /etc/newsbot/config.toml
-
-sudo -u newsbot sh -c 'umask 077; exec /usr/local/bin/newsbot init-db --db /var/lib/newsbot/newsbot.db'</code></pre>
-    <div class="notice"><code>newsbot-generate-codex.service</code>는 설정 경로를 <code>/etc/newsbot/config.toml</code>로 고정 검증합니다. 이 파일을 생략하면 Codex service는 fail closed합니다.</div>
-  </section>
-
-  <section id="env">
-    <h2>5. 환경 파일</h2>
-    <pre><code>sudo install -o newsbot -g newsbot -m 0600 /dev/null /etc/newsbot/newsbot.env
+sudo install -o newsbot -g newsbot -m 0600 /dev/null /etc/newsbot/newsbot.env
+sudo install -o root -g root -m 0644 /opt/newsbot/releases/$RELEASE_GIT_SHA/src/config/channels.toml /etc/newsbot/config.toml
 sudoedit /etc/newsbot/newsbot.env</code></pre>
-    <pre><code>NEWSBOT_DATABASE=/var/lib/newsbot/newsbot.db
+<p>새 호스트에서만 DB/lock file을 release window 전에 provision합니다. 이것은 schema migration이 아니며 <code>init-db</code>는 switch 뒤에 실행합니다. 이후 post-007 release에서는 existing SQLite authority나 lock file을 다시 만들거나 바꾸지 않습니다.</p>
+<p>환경 파일에는 Telegram API ID/HASH, owner-only <code>TELEGRAM_SESSION_PATH</code>, Bot token, approver chat/user IDs, 그 목록 안의 단 한 명인 <code>NEWSBOT_CALLBACK_ACTOR_ID</code>, Sheets ID 및 owner-only service-account JSON 경로를 설정합니다. secret 값 자체를 이 문서에 쓰지 마십시오.</p>
+<p class="warn">collect/telegram/sheets unit은 모두 <code>newsbot</code> UID, 이 env file, Telethon session과 locks를 공유합니다. 이 세 unit 사이에 cross-unit isolation/private mounts는 없습니다. Signed provenance and private cross-unit isolation are explicitly out of scope.</p>
+</section>
 
-TELEGRAM_API_ID=
-TELEGRAM_API_HASH=
-TELEGRAM_SESSION_PATH=/var/lib/newsbot/telegram/newsbot.session
+<section>
+<h2>3. Telegram과 Google 준비</h2>
+<pre><code>sudo -u newsbot -H bash -c 'set -a; . /etc/newsbot/newsbot.env; set +a; /usr/local/bin/newsbot auth-telethon'
+sudo chmod 0700 /var/lib/newsbot/telegram
+sudo chmod 0600 /var/lib/newsbot/telegram/newsbot.session
+sudo install -o newsbot -g newsbot -m 0600 /secure/operator-provided-service-account.json /var/lib/newsbot/google/service-account.json
+sudo -u newsbot -H bash -c 'set -a; . /etc/newsbot/newsbot.env; set +a; /usr/local/bin/newsbot sheets-validate --config /etc/newsbot/config.toml --db /var/lib/newsbot/newsbot.db'
+sudo -u newsbot -H bash -c 'set -a; . /etc/newsbot/newsbot.env; set +a; /usr/local/bin/newsbot sheets-bootstrap --config /etc/newsbot/config.toml --db /var/lib/newsbot/newsbot.db'</code></pre>
+<p>Telethon 최초 인증은 VPS의 대화형 terminal에서 한 번만 합니다. Google service account는 사전에 목표 spreadsheet의 정확한 <code>workplace</code> 탭에 공유합니다. bot은 기존 행 또는 다른 탭을 수정하지 않습니다.</p>
+</section>
 
-TELEGRAM_BOT_TOKEN=
-NEWSBOT_APPROVER_CHAT_ID=
-NEWSBOT_APPROVER_USER_IDS=
-
-GOOGLE_SHEETS_SPREADSHEET_ID=
-GOOGLE_SERVICE_ACCOUNT_FILE=/var/lib/newsbot/google/service-account.json</code></pre>
-    <table>
-      <thead><tr><th>값</th><th>용도</th></tr></thead>
-      <tbody>
-        <tr><td>TELEGRAM_API_ID / HASH</td><td>Telethon을 통한 채널 뉴스 수집. my.telegram.org에서 발급합니다.</td></tr>
-        <tr><td>TELEGRAM_BOT_TOKEN</td><td>후보·원고 알림과 승인 callback. BotFather에서 발급합니다.</td></tr>
-        <tr><td>APPROVER 값</td><td>승인을 받을 chat ID와 허용된 Telegram user ID 목록입니다.</td></tr>
-      </tbody>
-    </table>
-  </section>
-
-  <section id="telegram">
-    <h2>6. Telegram 연결</h2>
-    <h3>운영 DB 초기화</h3>
-    <pre><code>sudo -u newsbot -H bash
-set -a
-source /etc/newsbot/newsbot.env
-set +a
-umask 077
-cd /opt/newsbot/current
-
-/usr/local/bin/newsbot init-db --db /var/lib/newsbot/newsbot.db</code></pre>
-    <h3>Telethon 최초 인증</h3>
-    <pre><code>/usr/local/bin/newsbot auth-telethon</code></pre>
-    <p>전화번호, Telegram 인증 코드, 필요하면 2FA 암호를 입력합니다. 이 작업은 VPS의 대화형 터미널에서 한 번 수행합니다.</p>
-    <pre><code>chmod 0700 /var/lib/newsbot/telegram
-chmod 0600 /var/lib/newsbot/telegram/newsbot.session</code></pre>
-    <h3>소량 라이브 검증</h3>
-    <pre><code>/usr/local/bin/newsbot collect-live \
-  --config /etc/newsbot/config.toml \
-  --db /var/lib/newsbot/newsbot.db \
-  --lookback-hours 24 --page-size 50 --max-pages 2
-
-/usr/local/bin/newsbot rank \
-  --config /etc/newsbot/config.toml \
-  --db /var/lib/newsbot/newsbot.db
-
-/usr/local/bin/newsbot status --db /var/lib/newsbot/newsbot.db</code></pre>
-    <div class="notice">로컬과 VPS에서 같은 Telethon session으로 동시에 수집하지 않습니다. 초기에는 page cap을 작게 유지해 FloodWait와 대량 수집을 피합니다.</div>
-  </section>
-
-  <section id="oauth">
-    <h2>7. Codex CLI device auth</h2>
-    <p><code>codex_cli</code>는 API key/OAuth gateway가 아닌 ChatGPT device auth provider이며, 카드뉴스 생성 모델은 <code>gpt-5.6-terra</code>로 고정됩니다. GPT-5.6 지원을 위해 Codex CLI <code>0.146.0</code>을 정확히 pin합니다.</p>
-    <pre><code>sudo npm install -g @openai/codex@0.146.0
-test "$(codex --version)" = "codex-cli 0.146.0"
-
-sudo -u newsbot-codex -H /usr/local/bin/codex login --device-auth
-sudo -u newsbot-codex -H /usr/local/bin/codex login status
-sudo stat -c '%U:%G %a %n' /var/lib/newsbot-codex /var/lib/newsbot-codex/.codex</code></pre>
-    <p>auth를 복사·출력·환경 변수화하지 않으며 Newsbot은 읽을 수 없습니다. 계정에 <code>gpt-5.6-terra</code> 접근 권한이 없거나 pinned CLI에서 모델 확인이 실패하면 rollout을 중단합니다.</p>
-    <p>pinned binary, runner, schema, requirements, sudoers, unit은 root-owned regular non-symlink이며 release manifest의 checksum/owner/mode와 일치해야 합니다. managed effective profile은 read-only 최소 권한이고 Newsbot/ChatGPT auth, network, web, MCP/apps/plugins, remote control, approval escalation 및 alternate <code>/proc</code>/FD/socket/descendant 경로를 deny한 실제 canary receipt가 필요합니다. configured intent만으로는 충분하지 않습니다.</p>
-  </section>
-
-  <section id="sheets">
-    <h2>8. Google Sheets 연결</h2>
-    <pre><code>scp /secure/path/google-service-account.json USER@VPS:/tmp/google.json
-
-sudo install -d -o newsbot -g newsbot -m 0700 /var/lib/newsbot/google
-sudo install -o newsbot -g newsbot -m 0600 /tmp/google.json /var/lib/newsbot/google/service-account.json
-sudo rm -f /tmp/google.json
-sudo stat -c '%U:%G %a %n' /var/lib/newsbot/google /var/lib/newsbot/google/service-account.json</code></pre>
-    <p>newsbot 사용자 shell에서 환경 파일을 불러온 뒤:</p>
-    <pre><code>/usr/local/bin/newsbot sheets-validate \
-  --config /etc/newsbot/config.toml --db /var/lib/newsbot/newsbot.db
-
-/usr/local/bin/newsbot sheets-bootstrap \
-  --config /etc/newsbot/config.toml --db /var/lib/newsbot/newsbot.db
-
-/usr/local/bin/newsbot sheets-status \
-  --config /etc/newsbot/config.toml --db /var/lib/newsbot/newsbot.db</code></pre>
-    <p>고정된 <code>workplace</code> 탭만 대상으로 하며 <code>Demo</code> 탭에는 쓰지 않습니다.</p>
-  </section>
-
-  <section id="manual-flow">
-    <h2>9. 자동화 전에 전체 흐름을 수동으로 한 번 검증</h2>
-    <p>아래 검증이 모두 성공하기 전에는 timer를 켜지 않습니다. 환경 파일을 읽은 <code>newsbot</code> shell에서 실행합니다.</p>
-    <pre><code>sudo -u newsbot -H bash
-set -a
-source /etc/newsbot/newsbot.env
-set +a
-cd /opt/newsbot/current
-
-# A. 새 게시물 수집 및 랭킹
-/usr/local/bin/newsbot collect-live \
-  --config /etc/newsbot/config.toml \
-  --db /var/lib/newsbot/newsbot.db \
-  --lookback-hours 24 --page-size 50 --max-pages 2
-/usr/local/bin/newsbot rank \
-  --config /etc/newsbot/config.toml \
-  --db /var/lib/newsbot/newsbot.db
-
-# B. 직전 rank 출력의 run_id를 넣어 후보 질문 전송
-/usr/local/bin/newsbot notify-candidates \
-  --db /var/lib/newsbot/newsbot.db \
-  --run-id RUN_ID --actor-id APPROVER_USER_ID
-
-# C. Telegram callback을 한 번 처리
-# Telegram에서 [제작]을 누른 뒤 반복 실행
-/usr/local/bin/newsbot poll-approvals \
-  --config /etc/newsbot/config.toml \
-  --db /var/lib/newsbot/newsbot.db \
-  --timeout 20
-
-# D. Codex 생성은 직접 runner를 실행하지 않고 service로만 실행
-exit
-sudo systemctl start newsbot-generate-codex.service
+<section>
+<h2>4. backup, quiescence, versioned runtime build와 switch</h2>
+<pre><code>sudo systemctl disable --now newsbot-collect.timer newsbot-telegram.timer newsbot-sheets.timer newsbot-generate-codex.timer
+for unit in newsbot-collect.service newsbot-telegram.service newsbot-sheets.service newsbot-generate-codex.service; do test "$(systemctl is-active "$unit" || true)" = inactive; done
 sudo /usr/local/sbin/newsbot-codex-containment-v1 inspect
+sudo install -d -o root -g root -m 0700 /var/backups/newsbot
+sudo sqlite3 /var/lib/newsbot/newsbot.db ".backup /var/backups/newsbot/newsbot-before-$RELEASE_GIT_SHA.db"
+sudo chown root:root /var/backups/newsbot/newsbot-before-$RELEASE_GIT_SHA.db
+sudo chmod 0600 /var/backups/newsbot/newsbot-before-$RELEASE_GIT_SHA.db
+sudo sh -c 'umask 077; printf "quiescent\n" > /var/lib/newsbot/quiescence-proof'
+sudo /opt/newsbot/releases/$RELEASE_GIT_SHA/src/deploy/build_newsbot_release.py --uv-sha256 $UV_SHA256 build $RELEASE_GIT_SHA --quiescence-proof /var/lib/newsbot/quiescence-proof
+sudo test -f /opt/newsbot/releases/$RELEASE_GIT_SHA/runtime-manifest.json
+export RELEASE_DIGEST="$(sha256sum /opt/newsbot/releases/$RELEASE_GIT_SHA/runtime-manifest.json | cut -d' ' -f1)"
+sudo /opt/newsbot/releases/$RELEASE_GIT_SHA/src/deploy/build_newsbot_release.py --uv-sha256 $UV_SHA256 switch $RELEASE_GIT_SHA --quiescence-proof /var/lib/newsbot/quiescence-proof
+sudo rm -f /var/lib/newsbot/quiescence-proof</code></pre>
+<p>현 stable release의 non-migrating helper가 build와 switch 전후에 disabled timers, inactive services, read-only application DB, collect → Telegram → Sheets canonical flock 및 Codex clean containment를 재검증합니다. switch에서는 이 세 validated <code>newsbot:newsbot</code>, regular, single-link, <code>0600</code> lock descriptor를 final pre-swap check, <code>os.replace</code>, target attestation까지 계속 보유하며 missing/invalid/replaced lock file은 거부합니다. 따라서 switch 전에는 <code>init-db</code>, cutover preview/apply 또는 다른 migration-capable 명령을 실행하지 않습니다. runtime manifest의 SHA-256을 확인한 값만 <code>RELEASE_DIGEST</code>에 넣습니다.</p>
+</section>
 
-# E. 생성된 원고 알림은 newsbot shell에서 안전하게 전송
-sudo -u newsbot -H bash
-set -a
-source /etc/newsbot/newsbot.env
-set +a
-/usr/local/bin/newsbot notify-review \
-  --db /var/lib/newsbot/newsbot.db \
-  --candidate-id CANDIDATE_ID --generation-id GENERATION_ID \
-  --actor-id APPROVER_USER_ID
-
-# F. Telegram에서 [시트 전달]을 누른 뒤 callback 처리
-/usr/local/bin/newsbot poll-approvals \
-  --config /etc/newsbot/config.toml \
-  --db /var/lib/newsbot/newsbot.db \
-  --timeout 20
-
-# 생성된 handoff_id를 확인한 다음 정확히 한 건 전달
-/usr/local/bin/newsbot sheets-deliver \
-  --config /etc/newsbot/config.toml \
-  --db /var/lib/newsbot/newsbot.db \
-  --handoff-id HANDOFF_ID
-
-/usr/local/bin/newsbot sheets-status \
-  --config /etc/newsbot/config.toml \
-  --db /var/lib/newsbot/newsbot.db
-exit</code></pre>
-    <div class="notice">실제 자동 운영에서는 Telegram/Sheets secret을 argv나 shell history에 넣지 않고, root-owned <code>EnvironmentFile=</code>을 가진 전용 systemd unit으로 polling과 delivery를 실행합니다.</div>
-    <h3>timer 활성화 전 체크리스트</h3>
-    <ul class="checklist">
-      <li>6개 채널 handle이 실제 의도한 AI 3개/Blockchain 3개와 일치한다.</li>
-      <li>같은 Telethon session을 다른 PC에서 동시에 사용하지 않는다.</li>
-      <li>후보 질문은 승인 그룹에만 도착하고 비승인 사용자의 callback은 거부된다.</li>
-      <li>Codex canary 뒤 containment가 attested <code>clean</code>이고 cgroup이 비어 있다.</li>
-      <li>두 번째 승인 전에는 Sheets handoff/delivery가 생기지 않는다.</li>
-      <li>전달 행은 정확히 <code>workplace</code> 탭에 한 번만 추가된다.</li>
-    </ul>
-  </section>
-
-  <section id="systemd">
-    <h2>10. Codex one-job systemd activation과 A/B cutover</h2>
-    <p>production, manual, live/canary는 직접 Newsbot/Codex/runner를 실행하지 않습니다. <code>newsbot-generate-codex.service</code> 한 activation은 frozen job 하나만 처리하고 <code>newsbot-generate-codex.timer</code>만 재발행합니다. <code>N&gt;1</code>, <code>--max-jobs</code>, service loop는 없습니다.</p>
-    <pre><code># 1. timer를 멈추고 마지막 activation/cgroup이 비었는지 확인
-sudo systemctl disable --now newsbot-generate-codex.timer
-sudo systemctl is-active newsbot-generate-codex.service
-
-# 2. DB backup 후 fixed artifact를 설치한다. Codex 0.146.0의 실제 resolved binary를 regular file로 복사한다.
-sudo -u newsbot sqlite3 /var/lib/newsbot/newsbot.db ".backup '/var/lib/newsbot/newsbot-pre-B.db'"
-test "$(codex --version)" = "codex-cli 0.146.0"
-CODEX_NATIVE="$(npm root -g)/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex"
-test -x "$CODEX_NATIVE"
-"$CODEX_NATIVE" --version
-sudo install -o root -g root -m 0755 "$CODEX_NATIVE" /usr/local/libexec/codex-v0.146.0
-sudo install -o root -g root -m 0755 /opt/newsbot/current/deploy/newsbot_codex_runner.py /usr/local/libexec/newsbot-codex-runner-v1
-sudo install -o root -g root -m 0755 /opt/newsbot/current/deploy/newsbot_codex_containment.py /usr/local/sbin/newsbot-codex-containment-v1
-sudo install -o root -g root -m 0755 /opt/newsbot/current/deploy/build_codex_manifest.py /usr/local/sbin/newsbot-build-codex-manifest-v1
-sudo install -o root -g root -m 0644 /opt/newsbot/current/src/newsbot/ai/resources/copy_draft.schema.json /usr/local/share/newsbot/copy_draft.schema.json
-sudo install -o root -g root -m 0644 /opt/newsbot/current/deploy/codex-requirements.toml /etc/codex/requirements.toml
-sudo install -o root -g root -m 0440 /opt/newsbot/current/deploy/sudoers/newsbot-codex /etc/sudoers.d/newsbot-codex
-sudo visudo -cf /etc/sudoers.d/newsbot-codex
-sudo install -o root -g root -m 0644 /opt/newsbot/current/deploy/systemd/newsbot-generate-codex.service /etc/systemd/system/
-sudo install -o root -g root -m 0644 /opt/newsbot/current/deploy/systemd/newsbot-generate-codex-canary.service /etc/systemd/system/
-sudo install -o root -g root -m 0644 /opt/newsbot/current/deploy/systemd/newsbot-generate-codex.timer /etc/systemd/system/
-sudo install -o root -g root -m 0644 /opt/newsbot/current/deploy/tmpfiles/newsbot-codex.conf /etc/tmpfiles.d/newsbot-codex.conf
-
-# 3. persistent/runtime directory, lock, host-specific manifest를 순서대로 만든다.
-sudo install -d -o root -g root -m 0700 /var/lib/newsbot-containment /var/lib/newsbot-containment/audit
-sudo install -d -o root -g root -m 0755 /var/empty/newsbot-provider /var/empty/newsbot-codex
-sudo install -d -o newsbot -g newsbot -m 0700 /var/lib/newsbot-canary
-sudo systemd-tmpfiles --create /etc/tmpfiles.d/newsbot-codex.conf
-sudo /usr/local/sbin/newsbot-build-codex-manifest-v1
-
-# 4. migration/FK를 확인한 뒤 reset receipt로 최초 clean state를 만든다. absence는 clean이 아니다.
-sudo -u newsbot sh -c 'umask 077; exec /usr/local/bin/newsbot init-db --db /var/lib/newsbot/newsbot.db'
-sudo -u newsbot sh -c 'umask 077; exec /usr/local/bin/newsbot init-db --db /var/lib/newsbot-canary/newsbot.db'
-sudo -u newsbot sqlite3 /var/lib/newsbot/newsbot.db 'PRAGMA foreign_key_check'
-sudo /usr/local/sbin/newsbot-codex-containment-v1 reset
-sudo /usr/local/sbin/newsbot-codex-containment-v1 inspect
+<section>
+<h2>5. 여섯 non-Codex unit 설치, migration, cutover receipt</h2>
+<pre><code>sudo install -o root -g root -m 0644 /opt/newsbot/releases/$RELEASE_GIT_SHA/src/deploy/systemd/newsbot-collect.service /etc/systemd/system/newsbot-collect.service
+sudo install -o root -g root -m 0644 /opt/newsbot/releases/$RELEASE_GIT_SHA/src/deploy/systemd/newsbot-collect.timer /etc/systemd/system/newsbot-collect.timer
+sudo install -o root -g root -m 0644 /opt/newsbot/releases/$RELEASE_GIT_SHA/src/deploy/systemd/newsbot-telegram.service /etc/systemd/system/newsbot-telegram.service
+sudo install -o root -g root -m 0644 /opt/newsbot/releases/$RELEASE_GIT_SHA/src/deploy/systemd/newsbot-telegram.timer /etc/systemd/system/newsbot-telegram.timer
+sudo install -o root -g root -m 0644 /opt/newsbot/releases/$RELEASE_GIT_SHA/src/deploy/systemd/newsbot-sheets.service /etc/systemd/system/newsbot-sheets.service
+sudo install -o root -g root -m 0644 /opt/newsbot/releases/$RELEASE_GIT_SHA/src/deploy/systemd/newsbot-sheets.timer /etc/systemd/system/newsbot-sheets.timer
+for unit in newsbot-collect.service newsbot-collect.timer newsbot-telegram.service newsbot-telegram.timer newsbot-sheets.service newsbot-sheets.timer; do sudo cmp -s "/opt/newsbot/releases/$RELEASE_GIT_SHA/src/deploy/systemd/$unit" "/etc/systemd/system/$unit"; done
 sudo systemctl daemon-reload
+sudo -u newsbot /usr/local/bin/newsbot init-db --db /var/lib/newsbot/newsbot.db
+sudo -u newsbot -H bash -c 'set -a; . /etc/newsbot/newsbot.env; set +a; exec /usr/local/bin/newsbot "$@"' _ automation-cutover-preview --config /etc/newsbot/config.toml --db /var/lib/newsbot/newsbot.db --proposal-id "$PROPOSAL_ID" --release-digest "$RELEASE_DIGEST"</code></pre>
+<p>preview stdout에서 proposal receipt SHA-256을 읽어 다음 변수에 정확히 넣습니다.</p>
+<pre><code>export PREVIEW_PROPOSAL_SHA256=REPLACE_WITH_EXACT_PREVIEW_RECEIPT_SHA256
+sudo -u newsbot -H bash -c 'set -a; . /etc/newsbot/newsbot.env; set +a; exec /usr/local/bin/newsbot "$@"' _ automation-cutover-apply --config /etc/newsbot/config.toml --db /var/lib/newsbot/newsbot.db --proposal-id "$PROPOSAL_ID" --proposal-sha256 "$PREVIEW_PROPOSAL_SHA256" --release-digest "$RELEASE_DIGEST"</code></pre>
+<p>이 block은 최초 switch 뒤 initial schema/cutover를 위한 것이다. 007을 마친 이후 release/rollback은 compatible한 forward switch만 수행하고 immutable SQLite history를 초기화, delete, update 또는 backup restore하지 않는다. proposal ID, SHA-256, release digest가 하나라도 다르면 apply하지 않습니다.</p>
+<pre><code># 후속 compatible release/rollback에서만 실행
+sudo -u newsbot /usr/local/bin/newsbot automation-release-activate \
+  --db /var/lib/newsbot/newsbot.db \
+  --release-digest "$RELEASE_DIGEST"</code></pre>
+<p>세 release/cutover 명령은 stable <code>/usr/local/bin/newsbot</code> symlink가 가리키는 versioned runtime manifest의 schema, source directory identity와 SHA-256을 직접 재검증하며 임의·과거 digest를 거부합니다.</p>
+</section>
 
-# 5. provider-free Telegram/Sheets와 effective-policy negative canary 뒤 Codex canary/live를 각각 한 번만 실행한다.
-sudo systemctl start newsbot-generate-codex-canary.service
+<section>
+<h2>6. no-work canary, timer enable 순서, E2E 확인</h2>
+<pre><code>sudo systemctl start newsbot-telegram.service
+sudo systemctl start newsbot-sheets.service
+sudo systemctl start newsbot-collect.service
+sudo systemctl enable --now newsbot-telegram.timer
+sudo systemctl enable --now newsbot-sheets.timer
+sudo systemctl enable --now newsbot-collect.timer
+sudo systemctl status newsbot-telegram.timer newsbot-sheets.timer newsbot-collect.timer
+sudo -u newsbot /usr/local/bin/newsbot automation-status --db /var/lib/newsbot/newsbot.db</code></pre>
+<p>enable 순서는 반드시 Telegram → Sheets → collection입니다. E2E에서는 후보 알림, 사람의 <code>[제작]</code> 승인, 1–8페이지 <code>gpt-5.6-terra</code> draft, 사람의 정확한 draft <code>[시트 전달]</code> 승인, workplace 한 행 append와 metadata idempotency를 확인합니다.</p>
+</section>
+
+<section>
+<h2>7. Codex device auth와 별도 restoration gate</h2>
+<pre><code>test "$(/usr/local/libexec/codex-v0.146.0 --version)" = "codex-cli 0.146.0"
+sudo stat -c '%U:%G %a %n' /usr/local/libexec/codex-v0.146.0 /usr/local/libexec/newsbot-codex-runner-v1
+sudo /usr/local/sbin/newsbot-build-codex-manifest-v1
 sudo /usr/local/sbin/newsbot-codex-containment-v1 inspect
-sudo systemctl start newsbot-generate-codex.service
-sudo /usr/local/sbin/newsbot-codex-containment-v1 inspect
+sudo -u newsbot-codex -H /usr/local/libexec/codex-v0.146.0 login status
+sudo systemctl status newsbot-generate-codex.service
 sudo systemctl enable --now newsbot-generate-codex.timer</code></pre>
-    <p>pre-start helper는 SQLite/runner/Codex보다 먼저 durable state를 <code>dirty</code>로 fsync합니다. 정상 종료는 recursive cgroup-empty proof와 immutable clean-completion receipt를 durable하게 쓴 뒤에만 receipt를 참조하는 <code>clean</code> state가 됩니다. state/receipt 부재·불일치, <code>dirty</code>, residue, failed cleanup 또는 reboot는 inspect/reset 외 모든 activation을 막습니다.</p>
-    <p>기존 Telegram 수집 timer와 Sheets validate/bootstrap/delivery 절차는 별도이며 그대로 유지합니다. canary에는 effective policy, secret/sentinel 비유출, runner/schema/manifest, cgroup residue와 Sheets의 기존 검증을 포함합니다.</p>
-  </section>
+<p>Codex는 실제 <strong>두 단계 UID boundary</strong>다. device auth/provider credential은 login-shell 없는 <code>newsbot-codex</code> UID의 owner-only <code>CODEX_HOME</code>에서만 수행하고, root-owned no-argument containment runner가 immutable authority/receipt를 attest한 activation만 별도로 그 UID에 전달한다. 마지막 enable 전에는 existing Codex containment 절차대로 inactive/cgroup-empty proof, clean/reset receipt가 참조된 immutable authority, migration/manifest/effective-profile attestation, provider-free canary, one-job canary와 one-job live activation을 모두 통과해야 합니다. 기존 Codex one-job timer는 위 세 timer와 합치거나 대체하지 않습니다.</p>
+</section>
 
-  <section id="backup">
-    <h2>11. rollback</h2>
-    <p>실패하면 먼저 Codex timer와 runner activation을 중지하고 검증된 이전 A/B pin으로만 되돌립니다. DB migration은 forward-only입니다. attempts, generations, provider control/retry events, containment receipts, Sheets 행·metadata·controls를 삭제·수정·DB restore로 되돌리지 말고 교정 release와 새 immutable audit event로 전진합니다.</p>
-    <div class="ok"><strong>완료 기준:</strong> 실제 VPS에서 effective policy와 negative-surface canary가 통과하고, migration/manifest가 일치하며, state가 attested receipt를 참조하는 <code>clean</code>이고, canary와 live one-job activation 뒤 cgroup이 비었으며 기존 Telegram/Sheets canary가 성공해야 합니다.</div>
-  </section>
-
-  <footer>생성일: 2026-07-31 · Newsbot VPS deployment reference</footer>
-</main>
+<section>
+<h2>8. 실패 복구와 rollback</h2>
+<pre><code>sudo systemctl disable --now newsbot-collect.timer newsbot-telegram.timer newsbot-sheets.timer newsbot-generate-codex.timer
+for unit in newsbot-collect.service newsbot-telegram.service newsbot-sheets.service newsbot-generate-codex.service; do test "$(systemctl is-active "$unit" || true)" = inactive; done
+sudo /usr/local/sbin/newsbot-codex-containment-v1 inspect
+sudo -u newsbot /usr/local/bin/newsbot automation-notification-inspect --db /var/lib/newsbot/newsbot.db --intent-id REPLACE_WITH_NOTIFICATION_INTENT_ID</code></pre>
+<p class="warn">urgent stop 중 Telegram/Sheets/Codex 원격 효과가 불명확하면 재시도하지 말고 timer를 멈춥니다. notification은 verified transport evidence가 있을 때만 immutable resolution 하며, Sheets는 exact metadata probe/운영자 판단만 사용합니다.</p>
+<p>rollback은 initial cutover 후 007-compatible한 이전 verified runtime release로의 <strong>forward</strong> switch입니다. migration, cursor/outbox, attempts, Sheets/Telegram history, audit receipt를 DB backup으로 restore하거나 delete/update하지 않습니다. correction release와 새 cutover/audit로 복구합니다.</p>
+</section>
 </body>
 </html>

@@ -1,13 +1,14 @@
 import asyncio
 import json
 import socket
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from newsbot import cli
+from newsbot import automation, cli
 from newsbot.ai.fake import FakeGenerationProvider
 from newsbot.approval.scripted import ScriptedAction, ScriptedApprovalAdapter
 from newsbot.candidates import CandidateApprovalService
@@ -21,6 +22,12 @@ from newsbot.storage import Storage
 
 def test_fixture_run_is_offline_and_idempotent(tmp_path, monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    @contextmanager
+    def no_lock(*_args, **_kwargs):
+        yield
+
+    monkeypatch.setattr(automation, "automation_lock", no_lock)
     monkeypatch.delenv("TELEGRAM_API_ID", raising=False)
     fixture = tmp_path / "fixture.json"
     fixture.write_text(
@@ -133,6 +140,11 @@ def test_scripted_fixture_rerun_reuses_ready_export(tmp_path, capsys, monkeypatc
         return original_socket(family, *args, **kwargs)
 
     monkeypatch.setattr(socket, "socket", deny_network_socket)
+    @contextmanager
+    def no_lock(*_args, **_kwargs):
+        yield
+
+    monkeypatch.setattr(automation, "automation_lock", no_lock)
     root = Path(__file__).parents[2]
     fixture = root / "tests/fixtures/channel_messages.json"
     database = tmp_path / "newsbot.sqlite"

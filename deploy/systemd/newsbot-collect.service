@@ -1,0 +1,22 @@
+[Unit]
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=newsbot
+Group=newsbot
+WorkingDirectory=/var/lib/newsbot
+EnvironmentFile=/etc/newsbot/newsbot.env
+UMask=0077
+NoNewPrivileges=true
+CapabilityBoundingSet=
+ExecStart=/usr/local/bin/newsbot automation-collect-once --config /etc/newsbot/config.toml --db /var/lib/newsbot/newsbot.db --lookback-hours 24 --page-size 50 --max-pages 2 --deadline-seconds 180 --lease-seconds 225
+TimeoutStartSec=210
+TimeoutStopSec=10
+KillMode=control-group
+SendSIGKILL=yes
+TasksMax=64
+MemoryMax=512M
+MemorySwapMax=0
+CPUQuota=100%
