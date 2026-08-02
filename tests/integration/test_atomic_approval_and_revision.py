@@ -1,11 +1,9 @@
-import asyncio
 import json
 import sqlite3
 from datetime import UTC, datetime
 
 import pytest
 
-from newsbot.ai.fake import FakeGenerationProvider
 from newsbot.approval.scripted import ScriptedAction, ScriptedApprovalAdapter
 from newsbot.candidates import CandidateApprovalService
 from newsbot.exports import generation_claim_payload
@@ -237,23 +235,6 @@ def test_regenerate_supersedes_old_review_and_keeps_one_current_generation() -> 
     assert storage.fetch_one("SELECT COUNT(*) AS n FROM generations WHERE status='current'")["n"] == 0
 
 
-def test_page_successor_persists_the_bounded_intent_across_retry() -> None:
-    storage = Storage.open(":memory:")
-    candidate_id, generation_id, source_id = _review_state(storage, pages=2)
-    service = _service(storage)
-    increment = _button(service, candidate_id, generation_id, source_id, "page_increment")
-    assert service.apply(increment, chat_id=1, user_id=2).status == "queued"
-    with storage.transaction() as connection:
-        connection.execute("UPDATE generation_jobs SET status='failed_recoverable' WHERE status='queued'")
-    pipeline = NewsPipeline(storage, object(), FakeGenerationProvider(), FixtureClock())
-    generated = asyncio.run(pipeline.generate_selected(candidate_id, page_count=1))
-    assert generated.draft.page_count == 3
-    assert (
-        storage.fetch_one(
-            "SELECT requested_page_count FROM generation_jobs WHERE status='succeeded' ORDER BY id DESC LIMIT 1"
-        )["requested_page_count"]
-        == 3
-    )
 
 
 def test_terminal_edit_retains_approved_attempt_and_allows_one_new_attempt() -> None:

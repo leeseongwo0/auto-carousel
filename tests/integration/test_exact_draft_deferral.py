@@ -191,23 +191,11 @@ def test_review_callback_rejects_superseded_or_revision_mismatched_digest() -> N
 @pytest.mark.parametrize(
     "action, delay", [(ApprovalAction.DEFER_6H, 6), (ApprovalAction.DEFER_24H, 24), (ApprovalAction.DEFER_72H, 72)]
 )
-def test_deferral_resumes_exact_selection_and_review_stages(action: ApprovalAction, delay: int) -> None:
+def test_deferral_resumes_exact_selection_stage(action: ApprovalAction, delay: int) -> None:
     storage = Storage.open(":memory:")
     clock = FixtureClock(datetime(2026, 7, 29, tzinfo=UTC))
-    candidate_id, generation_id, source_id = _setup(storage)
+    candidate_id, _, _ = _setup(storage)
     service = _service(storage, clock)
-    token = _button(service, candidate_id, generation_id, source_id, action)
-    assert ScriptedApprovalAdapter(service).apply(ScriptedAction(token, 10, 20)).status == "deferred"
-    assert service.resume_due(clock.now()) == ()
-    clock.advance(timedelta(hours=delay))
-    assert service.resume_due(clock.now()) == (candidate_id,)
-    assert service.resume_due(clock.now()) == ()
-    assert storage.fetch_one("SELECT status FROM candidates WHERE id=?", (candidate_id,))["status"] == "pending_review"
-    assert service.apply(token, chat_id=10, user_id=20).status == "stale"
-    fresh_review_token = _button(service, candidate_id, generation_id, source_id, action)
-    assert service.apply(fresh_review_token, chat_id=10, user_id=20).status == "deferred"
-    clock.advance(timedelta(hours=delay))
-    assert service.resume_due(clock.now()) == (candidate_id,)
     with storage.transaction() as connection:
         connection.execute("UPDATE candidates SET status='pending_selection' WHERE id=?", (candidate_id,))
     selection_token = next(
@@ -215,12 +203,15 @@ def test_deferral_resumes_exact_selection_and_review_stages(action: ApprovalActi
         for button in service.create_digest(1, actor_id=20).buttons[candidate_id]
         if button.action is action
     )
-    assert service.apply(selection_token, chat_id=10, user_id=20).status == "deferred"
+    assert ScriptedApprovalAdapter(service).apply(ScriptedAction(selection_token, 10, 20)).status == "deferred"
+    assert service.resume_due(clock.now()) == ()
     clock.advance(timedelta(hours=delay))
     assert service.resume_due(clock.now()) == (candidate_id,)
+    assert service.resume_due(clock.now()) == ()
     assert (
         storage.fetch_one("SELECT status FROM candidates WHERE id=?", (candidate_id,))["status"] == "pending_selection"
     )
+    assert service.apply(selection_token, chat_id=10, user_id=20).status == "stale"
 
 
 def test_server_warnings_are_rendered_in_telegram_and_exports() -> None:

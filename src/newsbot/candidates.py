@@ -231,13 +231,7 @@ class CandidateApprovalService:
             for action in (
                 ApprovalAction.APPROVE_HANDOFF,
                 ApprovalAction.REGENERATE,
-                ApprovalAction.PAGE_INCREMENT,
-                ApprovalAction.PAGE_DECREMENT,
-                ApprovalAction.DEFER_6H,
-                ApprovalAction.DEFER_24H,
-                ApprovalAction.DEFER_72H,
                 ApprovalAction.REJECT,
-                ApprovalAction.REFRESH,
             )
         )
 

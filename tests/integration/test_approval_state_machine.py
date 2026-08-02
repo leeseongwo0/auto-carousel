@@ -1,5 +1,4 @@
 import json
-import sqlite3
 from datetime import UTC, datetime
 
 import pytest
@@ -141,7 +140,7 @@ def test_unauthorized_callback_does_not_select() -> None:
     assert storage.fetch_one("SELECT COUNT(*) AS n FROM generation_jobs")["n"] == 0
 
 
-def test_review_generation_and_page_requests_are_bound_to_the_candidate() -> None:
+def test_review_controls_are_three_actions_and_bound_to_the_candidate() -> None:
     storage = Storage.open(":memory:")
     candidate_id = _candidate(storage)
     other_candidate_id = _candidate(storage, run_key="other", external_post_id="2")
@@ -156,27 +155,19 @@ def test_review_generation_and_page_requests_are_bound_to_the_candidate() -> Non
             actor_id=7,
             source_version_ids=(source_version_id,),
         )
-    assert storage.fetch_one("SELECT status FROM candidates WHERE id=?", (candidate_id,))["status"] == "pending_review"
 
-    buttons = service.review_buttons(candidate_id, generation_id, actor_id=7, source_version_ids=(source_version_id,))
-    increment = next(button.token for button in buttons if button.action.value == "page_increment")
-    decrement = next(button.token for button in buttons if button.action.value == "page_decrement")
-    assert service.apply(increment, chat_id=100, user_id=7).status == "queued"
-    assert service.apply(decrement, chat_id=100, user_id=7).status == "stale"
-    job_kinds = {
-        row["job_kind"]
-        for row in storage.fetch_all("SELECT job_kind FROM generation_jobs WHERE job_kind LIKE 'page:%'")
-    }
-    assert job_kinds == {"page:3:1"}
-    with pytest.raises(sqlite3.IntegrityError, match="immutable"), storage.transaction() as connection:
-        connection.execute(
-            "UPDATE generations SET content_json=? WHERE id=?",
-            (json.dumps({"pages": [{} for _ in range(8)]}), generation_id),
-        )
-    with pytest.raises(ValueError, match="exact current generation binding"):
-        service.review_buttons(candidate_id, generation_id, actor_id=7, source_version_ids=(source_version_id,))
-    assert "page:9" not in {
-        row["job_kind"]
-        for row in storage.fetch_all("SELECT job_kind FROM generation_jobs WHERE job_kind LIKE 'page:%'")
-    }
+    buttons = service.review_buttons(
+        candidate_id,
+        generation_id,
+        actor_id=7,
+        source_version_ids=(source_version_id,),
+    )
+    assert [button.action.value for button in buttons] == [
+        "approve_handoff",
+        "regenerate",
+        "reject",
+    ]
+    assert [button.label for button in buttons] == ["승인", "재생성", "거절"]
+    assert storage.fetch_one("SELECT status FROM candidates WHERE id=?", (candidate_id,))["status"] == "pending_review"
+    assert storage.fetch_one("SELECT COUNT(*) AS n FROM generation_jobs WHERE job_kind LIKE 'page:%'")["n"] == 0
     assert storage.fetch_one("SELECT COUNT(*) AS n FROM export_outbox")["n"] == 0
