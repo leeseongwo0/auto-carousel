@@ -42,21 +42,25 @@ def remaining(deadline):
     return value
 
 
-def attest_dir(path, mode):
+def attest_dir(path, mode, group=0):
     value = os.stat(path, follow_symlinks=False)
-    if not stat.S_ISDIR(value.st_mode) or value.st_uid != 0 or value.st_gid != 0 or stat.S_IMODE(value.st_mode) != mode:
+    if (
+        not stat.S_ISDIR(value.st_mode)
+        or value.st_uid != 0
+        or value.st_gid != group
+        or stat.S_IMODE(value.st_mode) != mode
+    ):
         raise RunnerError(21)
 
 
 def acquire_lock():
-    attest_dir(LOCK_DIR, 0o750)
-    fd = os.open(os.path.join(LOCK_DIR, LOCK_NAME), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
-    value = os.fstat(fd)
     try:
         group = pwd.getpwnam(RUNNER_USER).pw_gid
     except KeyError:
-        os.close(fd)
         raise RunnerError(21) from None
+    attest_dir(LOCK_DIR, 0o750, group)
+    fd = os.open(os.path.join(LOCK_DIR, LOCK_NAME), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    value = os.fstat(fd)
     if (
         not stat.S_ISREG(value.st_mode)
         or value.st_uid != 0

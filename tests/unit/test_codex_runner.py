@@ -81,6 +81,24 @@ def test_runner_constants_pin_environment_and_codex_argv(runner: object) -> None
     assert runner.RUNNER_CWD == "/var/empty/newsbot-codex"
 
 
+
+def test_attest_dir_accepts_fixed_runner_group_only(runner: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        runner.os,
+        "stat",
+        lambda path, **_: SimpleNamespace(
+            st_mode=runner.stat.S_IFDIR | 0o750,
+            st_uid=0,
+            st_gid=997,
+        ),
+    )
+
+    runner.attest_dir(runner.LOCK_DIR, 0o750, 997)
+
+    with pytest.raises(runner.RunnerError) as raised:
+        runner.attest_dir(runner.LOCK_DIR, 0o750)
+    assert raised.value.code == 21
+
 def test_execute_maps_auth_and_generation_failure_codes_without_running_codex(
     runner: object, monkeypatch: pytest.MonkeyPatch
 ) -> None:
