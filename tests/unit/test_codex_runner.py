@@ -90,7 +90,8 @@ def test_bundled_output_schema_matches_runtime_contract() -> None:
     assert schema == RESPONSE_SCHEMA
     assert schema["properties"]["draft"] == {"type": "boolean", "const": True}
     assert schema["properties"]["source_reported"] == {"type": "boolean", "const": True}
-    assert "exactly page_count total pages" in SYSTEM_INSTRUCTION
+    assert "page_count_mode is flexible" in SYSTEM_INSTRUCTION
+    assert "concise Korean card-news copy" in SYSTEM_INSTRUCTION
     assert "exact pair from the same supplied evidence" in SYSTEM_INSTRUCTION
 
 

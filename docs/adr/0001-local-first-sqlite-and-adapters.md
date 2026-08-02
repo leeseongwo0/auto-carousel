@@ -9,7 +9,7 @@
 
 권한 있는 `[제작]` 선택만 candidate, digest, 정렬된 source-version binding을 가진 generation job을 만든다. generation job은 SQLite lease와 `failed_recoverable` 상태로 중단 또는 provider failure 뒤 재시도된다. 정확한 current draft의 review 승인만 canonical export outbox를 원자적으로 만든다.
 
-출력은 선택 source body에 따라 적응적으로 1–8페이지다. Telegram preview는 UTF-16 4096 code unit 이하로 분할한다. outbox mismatch는 파일을 보존하고 `corrupt`로 남긴다. Figma 편집과 Instagram 게시도 수동 경계다.
+최초 출력은 AI가 선택 source body의 분량에 따라 간결한 카드뉴스 문체로 1–8페이지 중 가장 짧고 유용한 수를 선택한다. 사전 계산한 고정 페이지 수는 강제하지 않고, 명시적인 페이지 증감 수정만 정확한 페이지 수를 요구한다. Telegram preview는 UTF-16 4096 code unit 이하로 분할한다. outbox mismatch는 파일을 보존하고 `corrupt`로 남긴다. Figma 편집과 Instagram 게시도 수동 경계다.
 
 ## 배경과 동인
 
@@ -21,7 +21,7 @@
 - **선택 전 모든 후보 생성:** provider 비용과 credential/network 노출을 늘리고 선택과 검토를 혼동한다.
 - **선택 callback에서 동기 생성:** callback retry와 provider failure가 선택을 막는다.
 - **PostgreSQL/Redis/별도 service:** 현재 규모에서는 coordination만 늘린다.
-- **고정 페이지 수:** 구현된 적응형 1–8페이지와 맞지 않는다.
+- **고정 또는 사전 계산 페이지 수:** AI가 근거 분량에 따라 선택하는 1–8페이지 정책과 맞지 않는다.
 
 ## 결과와 범위 경계
 

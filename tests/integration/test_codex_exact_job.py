@@ -92,6 +92,20 @@ class RaisingCodex:
     async def generate(self, _request):
         raise self.error
 
+class FlexibleCodex:
+    async def generate(self, request):
+        assert request.flexible_page_count is True
+        return await FakeGenerationProvider().generate(
+            type(request)(
+                request.candidate_id,
+                request.source_version_ids,
+                3,
+                request.facts,
+                locale=request.locale,
+            )
+        )
+
+
 
 def _pipeline(storage: Storage) -> NewsPipeline:
     return NewsPipeline(storage, SimpleNamespace(), lambda: None, FixtureClock(NOW))
@@ -198,17 +212,20 @@ def test_same_job_exact_replay_returns_existing_current_generation(monkeypatch) 
     )
 
 
-def test_exact_job_materializes_adaptive_page_count_for_initial_approval(monkeypatch) -> None:
+def test_initial_exact_job_allows_provider_selected_page_count(monkeypatch) -> None:
     storage = Storage.open(":memory:")
     job = _job(storage, 1, page_count=None)
     _bind(storage, job)
-    monkeypatch.setattr("newsbot.ai.codex_cli.CodexCliProvider", FakeGenerationProvider)
+    monkeypatch.setattr("newsbot.ai.codex_cli.CodexCliProvider", FlexibleCodex)
 
     result = asyncio.run(_pipeline(storage).generate_codex_job_exact(job))
 
     assert result is not None
-    assert result.draft.page_count == 1
-    assert storage.fetch_one(
-        "SELECT requested_page_count FROM generation_jobs WHERE id=?",
-        (job,),
-    )["requested_page_count"] == 1
+    assert result.draft.page_count == 3
+    assert (
+        storage.fetch_one(
+            "SELECT requested_page_count FROM generation_jobs WHERE id=?",
+            (job,),
+        )["requested_page_count"]
+        is None
+    )

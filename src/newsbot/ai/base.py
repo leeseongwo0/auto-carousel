@@ -53,6 +53,7 @@ class GenerationRequest:
     page_count: int
     facts: tuple[FactClaim, ...]
     locale: str = "ko-KR"
+    flexible_page_count: bool = False
 
     def __post_init__(self) -> None:
         if self.candidate_id <= 0:
@@ -63,6 +64,8 @@ class GenerationRequest:
             raise ValueError("source_version_ids must be sorted and unique")
         if not 1 <= self.page_count <= 8:
             raise ValueError("page_count must be between 1 and 8")
+        if not isinstance(self.flexible_page_count, bool):
+            raise ValueError("flexible_page_count must be boolean")
         allowed_sources = set(self.source_version_ids)
         if any(fact.source_version_id not in allowed_sources for fact in self.facts):
             raise ValueError("facts must belong to the selected source versions")

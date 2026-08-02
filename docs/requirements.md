@@ -26,7 +26,7 @@ durable containment authority는 항상 존재하는 `/var/lib/newsbot-containme
 
 ## 카드, 캡션, 출처
 
-`page_count`는 표지를 포함한 총 페이지 수이며 선택된 source body에서 결정론적으로 1–8을 고른다. 1페이지는 표지 전용이며, 2–8페이지는 표지와 `page_count - 1`개 본문으로 구성된다. 생성 요청의 페이지 수는 검증되며 범위를 벗어나거나 text limit을 넘는 초안은 거절된다.
+최초 원고의 `page_count`는 표지를 포함한 총 페이지 수이며 AI가 선택된 근거의 분량에 따라 1–8에서 가장 짧고 유용한 수를 선택한다. 1페이지는 표지 전용이고, 2–8페이지는 표지와 1–7개 본문으로 구성된다. 최초 생성은 사전 계산한 페이지 수를 강제하지 않으며, 명시적인 페이지 증감 수정만 요청된 총 페이지 수를 정확히 검증한다. 문체는 간결한 카드뉴스 문체여야 하고 각 본문 페이지는 240 Unicode code point, 소제목은 35 Unicode code point를 넘을 수 없다. 범위나 text limit을 넘는 초안은 거절된다.
 
 Telegram 미리보기는 4096 UTF-16 code unit 이하로 분할한다. surrogate pair를 분리하지 않으며, 조각을 이어 붙이면 원문과 같다. Instagram 캡션은 승인 원고의 텍스트이며, Figma 편집과 Instagram 게시 자동화는 없다.
 

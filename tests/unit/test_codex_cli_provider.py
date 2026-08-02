@@ -9,11 +9,11 @@ from newsbot.ai import codex_cli
 from newsbot.ai.base import FactClaim, GenerationRequest
 
 
-def _request() -> GenerationRequest:
+def _request(*, page_count: int = 1, flexible_page_count: bool = False) -> GenerationRequest:
     return GenerationRequest(
         candidate_id=1,
         source_version_ids=(1,),
-        page_count=1,
+        page_count=page_count,
         facts=(
             FactClaim(
                 id="claim_a",
@@ -29,6 +29,7 @@ def _request() -> GenerationRequest:
                 uncertainty=(),
             ),
         ),
+        flexible_page_count=flexible_page_count,
     )
 
 
@@ -75,6 +76,18 @@ def test_request_envelope_is_canonical_and_launch_surface_is_fixed() -> None:
     )
     assert codex_cli._ENV == {"LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"}
     assert codex_cli._CWD == "/var/empty/newsbot-provider"
+
+
+def test_flexible_request_exposes_range_policy_and_accepts_model_selected_page_count() -> None:
+    request = _request(page_count=8, flexible_page_count=True)
+    payload = json.loads(codex_cli._serialize_evidence_for_runner(request))
+
+    assert payload["page_count"] == 8
+    assert payload["page_count_mode"] == "flexible"
+    assert codex_cli._decode_draft(json.dumps(_draft()).encode(), request).page_count == 1
+
+    with pytest.raises(codex_cli.CodexInvalidDraftError):
+        codex_cli._decode_draft(json.dumps(_draft()).encode(), _request(page_count=8))
 
 
 def test_core_accepts_exact_input_cap_and_rejects_one_byte_over(monkeypatch: pytest.MonkeyPatch) -> None:

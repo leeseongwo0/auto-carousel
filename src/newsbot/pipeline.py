@@ -639,7 +639,11 @@ class NewsPipeline:
             )
             if not due:
                 return None
-            if job["requested_page_count"] is None:
+            flexible_page_count = str(job["job_kind"]) == "initial"
+            if flexible_page_count:
+                page_count = 8
+                stored_page_count = None
+            elif job["requested_page_count"] is None:
                 marks = ",".join("?" for _ in source_ids)
                 source_rows = connection.execute(
                     f"SELECT body FROM source_post_versions WHERE id IN ({marks}) ORDER BY id",
@@ -649,8 +653,10 @@ class NewsPipeline:
                     str(job["job_kind"]),
                     adaptive_page_count(str(row["body"]) for row in source_rows),
                 )
+                stored_page_count = page_count
             else:
                 page_count = int(job["requested_page_count"])
+                stored_page_count = page_count
             if not 1 <= page_count <= 8:
                 return None
             if job["status"] == "running":
@@ -663,14 +669,14 @@ class NewsPipeline:
             leased = connection.execute(
                 "UPDATE generation_jobs SET status='running', attempts=attempts+1, lease_token=?, "
                 "lease_expires_at=?, started_at=?, retry_at=NULL, error_message=NULL, "
-                "requested_page_count=COALESCE(requested_page_count, ?) WHERE id=? "
+                "requested_page_count=? WHERE id=? "
                 "AND ((status='running' AND lease_expires_at < ?) OR "
                 "(status='failed_recoverable' AND retry_at <= ?) OR status='queued')",
                 (
                     lease_token,
                     lease_until.isoformat(),
                     now.isoformat(),
-                    page_count,
+                    stored_page_count,
                     generation_job_id,
                     now.isoformat(),
                     now.isoformat(),
@@ -705,12 +711,18 @@ class NewsPipeline:
             from .ai.codex_cli import CodexCliProvider
 
             draft = await CodexCliProvider().generate(
-                GenerationRequest(int(job["candidate_id"]), source_ids, page_count, facts)
+                GenerationRequest(
+                    int(job["candidate_id"]),
+                    source_ids,
+                    page_count,
+                    facts,
+                    flexible_page_count=flexible_page_count,
+                )
             )
             validate_copy(
                 draft,
                 allowed_claim_sources={fact.id: fact.source_version_id for fact in facts},
-                expected_page_count=page_count,
+                expected_page_count=None if flexible_page_count else page_count,
             )
             payload = _draft_payload(draft)
             payload["claim_manifest"] = [_fact_payload(fact) for fact in facts]
