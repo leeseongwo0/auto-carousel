@@ -100,11 +100,13 @@ class NewsPipeline:
         )
         self._persist_candidates(run_id, evaluations, canonical_observations, observation_ids, now)
         if existing_run is not None:
-            return CandidateStageResult(
-                run_id,
-                self._existing_digest(run_id),
-                self._routed_counts(run_id),
+            pending = self.storage.fetch_one(
+                "SELECT 1 FROM candidates c JOIN candidate_evaluations ce ON ce.id=c.evaluation_id "
+                "WHERE ce.run_id=? AND c.status='pending_selection'",
+                (run_id,),
             )
+            digest = approval_service.create_digest(run_id, actor_id=actor_id) if pending is not None else None
+            return CandidateStageResult(run_id, digest, self._routed_counts(run_id))
         pending = self.storage.fetch_one(
             "SELECT 1 FROM candidates c JOIN candidate_evaluations ce ON ce.id=c.evaluation_id "
             "WHERE ce.run_id=? AND c.status='pending_selection'",
@@ -124,13 +126,6 @@ class NewsPipeline:
             assert row is not None
             return int(row["id"])
 
-    def _existing_digest(self, run_id: int) -> CandidateDigest | None:
-        row = self.storage.fetch_one(
-            "SELECT id FROM digests WHERE run_id=? ORDER BY id DESC LIMIT 1",
-            (run_id,),
-        )
-        return None if row is None else CandidateDigest(int(row["id"]), run_id, 1, (), {})
-
     def _routed_counts(self, run_id: int) -> Mapping[NewsOutcome, int]:
         rows = self.storage.fetch_all(
             "SELECT outcome,COUNT(*) AS count FROM news_policy_evaluations policy "
@@ -139,6 +134,7 @@ class NewsPipeline:
             (run_id,),
         )
         return {NewsOutcome(str(row["outcome"])): int(row["count"]) for row in rows}
+
     def _persist_sources(self, observations: Sequence[SourceObservation], now: datetime) -> dict[tuple[str, str], int]:
         result: dict[tuple[str, str], int] = {}
         with self.storage.transaction() as connection:
@@ -324,7 +320,9 @@ class NewsPipeline:
                     (run_id, source_set_key, evaluator_version),
                 ).fetchone()
                 assert row is not None
-                policy = evaluate_news_policy(evaluation.observations, self.config, ranking_eligible=evaluation.eligible)
+                policy = evaluate_news_policy(
+                    evaluation.observations, self.config, ranking_eligible=evaluation.eligible
+                )
                 policy_facts = tuple(
                     observation_facts(observation, self.config)
                     for observation in sorted(
@@ -414,13 +412,21 @@ class NewsPipeline:
                 if inserted and binding_id is not None and policy.outcome is NewsOutcome.AMBIGUOUS:
                     sampled = _utc(self.clock.now()).astimezone(ZoneInfo("Asia/Seoul"))
                     assigned_date = sampled.date() if sampled.hour < 12 else sampled.date() + timedelta(days=1)
-                    opens = datetime.combine(assigned_date, datetime.min.time(), ZoneInfo("Asia/Seoul")).replace(hour=12)
+                    opens = datetime.combine(assigned_date, datetime.min.time(), ZoneInfo("Asia/Seoul")).replace(
+                        hour=12
+                    )
                     connection.execute(
                         "INSERT OR IGNORE INTO ambiguous_digest_windows("
                         "scheduled_local_date,config_binding_id,opens_at,closes_at,state,created_at"
                         ") VALUES(?,?,?,?,?,?)",
-                        (assigned_date.isoformat(), binding_id, opens.astimezone(UTC).isoformat(),
-                         (opens + timedelta(hours=1)).astimezone(UTC).isoformat(), "collecting", now.isoformat()),
+                        (
+                            assigned_date.isoformat(),
+                            binding_id,
+                            opens.astimezone(UTC).isoformat(),
+                            (opens + timedelta(hours=1)).astimezone(UTC).isoformat(),
+                            "collecting",
+                            now.isoformat(),
+                        ),
                     )
                     window = connection.execute(
                         "SELECT id FROM ambiguous_digest_windows WHERE scheduled_local_date=?",
@@ -433,8 +439,16 @@ class NewsPipeline:
                         "INSERT OR IGNORE INTO ambiguous_digest_items("
                         "window_id,news_policy_evaluation_id,source_post_version_id,normalized_title,ordering_timestamp,"
                         "story_key,content_key,created_at) VALUES(?,?,?,?,?,?,?,?)",
-                        (int(window["id"]), policy_id, version_id, title, now.isoformat(),
-                         evaluation.story_key, evaluation.content_key, now.isoformat()),
+                        (
+                            int(window["id"]),
+                            policy_id,
+                            version_id,
+                            title,
+                            now.isoformat(),
+                            evaluation.story_key,
+                            evaluation.content_key,
+                            now.isoformat(),
+                        ),
                     )
 
     @staticmethod

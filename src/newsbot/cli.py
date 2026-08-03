@@ -143,6 +143,7 @@ def init_db(args: argparse.Namespace) -> int:
 
 def run_fixture(args: argparse.Namespace) -> int:
     from .automation import automation_lock
+
     config = _config(args)
     clock = FixtureClock()
     fixture_path = args.fixture
@@ -366,6 +367,7 @@ def _reconcile_range(args: argparse.Namespace, *, required: bool = False) -> tup
 
 def rank(args: argparse.Namespace) -> int:
     from .automation import automation_lock
+
     config = _config(args)
     now = datetime.now(UTC)
     with automation_lock("collect"), Storage.open(config.database_path) as storage:
@@ -381,12 +383,12 @@ def rank(args: argparse.Namespace) -> int:
         )
         _print(
             {
-            "candidate_count": len(stage.selection_digest.candidates) if stage.selection_digest is not None else 0,
-            "digest_id": stage.selection_digest.id if stage.selection_digest is not None else None,
-            "mode": "rank",
-            "routed_counts": {outcome.value: count for outcome, count in stage.routed_counts.items()},
-            "run_id": stage.run_id,
-            "status": "pending_selection" if stage.selection_digest is not None else "no_immediate_candidates",
+                "candidate_count": len(stage.selection_digest.candidates) if stage.selection_digest is not None else 0,
+                "digest_id": stage.selection_digest.id if stage.selection_digest is not None else None,
+                "mode": "rank",
+                "routed_counts": {outcome.value: count for outcome, count in stage.routed_counts.items()},
+                "run_id": stage.run_id,
+                "status": "pending_selection" if stage.selection_digest is not None else "no_immediate_candidates",
             }
         )
     return 0
@@ -395,6 +397,7 @@ def rank(args: argparse.Namespace) -> int:
 def reconcile_fixture(args: argparse.Namespace) -> int:
     """Perform bounded fixture recovery without advancing the normal cursor."""
     from .automation import automation_lock
+
     range_ids = _reconcile_range(args, required=True)
     config = _config(args)
     channel = next((item for item in config.enabled_channels if item.id == args.channel), None)
@@ -433,14 +436,14 @@ def reconcile_fixture(args: argparse.Namespace) -> int:
         )
         _print(
             {
-            "channel": channel.id,
-            "candidate_count": len(stage.selection_digest.candidates) if stage.selection_digest is not None else 0,
-            "digest_id": stage.selection_digest.id if stage.selection_digest is not None else None,
-            "mode": "reconcile",
-            "persisted": persisted,
-            "routed_counts": {outcome.value: count for outcome, count in stage.routed_counts.items()},
-            "run_id": stage.run_id,
-            "status": "pending_selection" if stage.selection_digest is not None else "no_immediate_candidates",
+                "channel": channel.id,
+                "candidate_count": len(stage.selection_digest.candidates) if stage.selection_digest is not None else 0,
+                "digest_id": stage.selection_digest.id if stage.selection_digest is not None else None,
+                "mode": "reconcile",
+                "persisted": persisted,
+                "routed_counts": {outcome.value: count for outcome, count in stage.routed_counts.items()},
+                "run_id": stage.run_id,
+                "status": "pending_selection" if stage.selection_digest is not None else "no_immediate_candidates",
             }
         )
     return 0
@@ -613,9 +616,7 @@ def _collect_live(
                 }
             else:
                 configured_channel_ids = {
-                    str(channel.id)
-                    for channel in configured_channels
-                    if bool(getattr(channel, "enabled", True))
+                    str(channel.id) for channel in configured_channels if bool(getattr(channel, "enabled", True))
                 }
             observations = tuple(
                 observation
@@ -661,9 +662,10 @@ def _reject_legacy_when_automation_active(args: argparse.Namespace, *, database:
         exists = connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='automation_cutovers'"
         ).fetchone()
-        if exists is not None and connection.execute(
-            "SELECT 1 FROM automation_cutovers WHERE id=1"
-        ).fetchone() is not None:
+        if (
+            exists is not None
+            and connection.execute("SELECT 1 FROM automation_cutovers WHERE id=1").fetchone() is not None
+        ):
             raise RuntimeError("legacy command is disabled after automation cutover")
     finally:
         connection.close()
@@ -675,8 +677,6 @@ def _legacy_live_preflight(args: argparse.Namespace, *, reconcile: bool) -> AppC
     validate_capabilities(Capability.LIVE_RECONCILE if reconcile else Capability.LIVE_COLLECTION)
     SessionStore(os.environ["TELEGRAM_SESSION_PATH"]).validate()
     return config
-
-
 
 
 def collect_live(args: argparse.Namespace) -> int:
@@ -1950,6 +1950,7 @@ def automation_cutover_preview(args: argparse.Namespace) -> int:
                     authority = AutomationAuthority(storage)
                     if not authority.quiescent():
                         raise RuntimeError("automation is not quiescent")
+
                     def persist_preview() -> None:
                         service = _approval_service(storage)
                         adapter = TelegramApprovalAdapter(os.environ["TELEGRAM_BOT_TOKEN"], service)
@@ -2019,6 +2020,7 @@ def automation_cutover_preview(args: argparse.Namespace) -> int:
                             now=now,
                         )
                         _print({"proposal_sha256": receipt, "status": "previewed"})
+
                     persist_preview()
             finally:
                 close()
@@ -2035,6 +2037,7 @@ def automation_cutover_apply(args: argparse.Namespace) -> int:
     validate_capabilities((Capability.NOTIFY_CANDIDATES, Capability.LIVE_SHEETS))
     config = _config(args)
     validate_automation_bindings(config)
+
     def apply_locked(storage: Storage) -> None:
         authority = AutomationAuthority(storage)
         service = _approval_service(storage)
@@ -2163,19 +2166,34 @@ def _notification_payload(
     actor_id: int,
 ) -> tuple[str, dict[str, object] | None]:
     row = storage.fetch_one(
-        "SELECT notification_kind,candidate_id,generation_id,defer_authority_id,ambiguous_window_id "
+        "SELECT notification_kind,candidate_id,generation_id,defer_authority_id,ambiguous_window_id,subject_digest "
         "FROM telegram_notification_outbox WHERE id=?",
         (notification_id,),
     )
     if row is None:
         raise RuntimeError("notification disappeared")
     if row["notification_kind"] == "noon_digest":
-        items = storage.fetch_all(
-            "SELECT item.normalized_title FROM ambiguous_digest_items item "
-            "JOIN ambiguous_digest_windows window ON window.id=item.window_id "
+        window = storage.fetch_one(
+            "SELECT window.id,window.config_binding_id FROM ambiguous_digest_windows window "
             "JOIN telegram_notification_outbox outbox ON outbox.ambiguous_window_id=window.id "
-            "WHERE outbox.id=? AND window.state='queued' ORDER BY item.ordering_timestamp,item.id",
+            "WHERE outbox.id=? AND window.state='queued'",
             (notification_id,),
+        )
+        active_binding = storage.fetch_one(
+            "SELECT binding.id FROM automation_release_activations activation "
+            "JOIN automation_release_config_bindings binding ON binding.activation_id=activation.id "
+            "WHERE activation.cutover_id=1 ORDER BY activation.id DESC LIMIT 1"
+        )
+        if (
+            window is None
+            or active_binding is None
+            or int(window["config_binding_id"]) != int(active_binding["id"])
+            or str(row["subject_digest"]) != sha256(f"noon:{int(window['id'])}".encode()).hexdigest()
+        ):
+            raise RuntimeError("noon notification binding drift")
+        items = storage.fetch_all(
+            "SELECT normalized_title FROM ambiguous_digest_items WHERE window_id=? ORDER BY ordering_timestamp,id",
+            (int(window["id"]),),
         )
         if not items:
             raise RuntimeError("noon notification has no frozen titles")

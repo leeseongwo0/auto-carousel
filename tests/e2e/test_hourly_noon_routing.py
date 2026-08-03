@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -146,10 +146,17 @@ def test_active_release_routes_mixed_batch_and_seals_noon_without_callbacks(tmp_
         collector = StaticCollector(observations)
 
         stage = asyncio.run(pipeline.run_fixture(collector, approval_service=service, actor_id=7))
+        replayed = asyncio.run(pipeline.run_fixture(collector, approval_service=service, actor_id=7))
 
-        assert collector.calls == 1
+        assert collector.calls == 2
         assert stage.selection_digest is not None
         assert len(stage.selection_digest.candidates) == 3
+        assert replayed.selection_digest is not None
+        assert replayed.selection_digest.id == stage.selection_digest.id
+        assert replayed.selection_digest.candidates == stage.selection_digest.candidates
+        assert set(replayed.selection_digest.buttons) == {
+            int(candidate["candidate_id"]) for candidate in stage.selection_digest.candidates
+        }
         assert storage.fetch_one("SELECT COUNT(*) AS count FROM generations")["count"] == 0
         assert storage.fetch_one("SELECT COUNT(*) AS count FROM generation_jobs")["count"] == 0
         assert status(storage)["provider_calls"] == 0
@@ -271,3 +278,80 @@ def test_active_release_refuses_config_drift_before_pipeline_mutation(tmp_path: 
             )
         assert storage.fetch_one("SELECT COUNT(*) AS count FROM runs")["count"] == 0
         assert storage.fetch_one("SELECT COUNT(*) AS count FROM source_posts")["count"] == 0
+
+
+def test_terminal_prior_binding_noon_history_is_noop_after_release_activation(tmp_path: Path) -> None:
+    config = load_config(Path("config/channels.toml"), environ={})
+    with Storage.open(tmp_path / "terminal-history.sqlite") as storage:
+        authority = _activate_hourly(storage, config)
+        authority.seal_noon_window(config, now=datetime(2026, 8, 3, 12, 30, tzinfo=SEOUL))
+        original = storage.fetch_one(
+            "SELECT state,config_binding_id FROM ambiguous_digest_windows WHERE scheduled_local_date='2026-08-03'"
+        )
+        assert original is not None and original["state"] == "empty"
+
+        authority.activate_release(
+            _digest("second-hourly-release"),
+            config=config,
+            now=NOW + timedelta(seconds=1),
+            validate=lambda: True,
+        )
+        current = storage.fetch_one(
+            "SELECT binding.id FROM automation_release_activations activation "
+            "JOIN automation_release_config_bindings binding ON binding.activation_id=activation.id "
+            "ORDER BY activation.id DESC LIMIT 1"
+        )
+        assert current is not None
+        assert int(current["id"]) != int(original["config_binding_id"])
+
+        authority.seal_noon_window(config, now=datetime(2026, 8, 3, 14, 0, tzinfo=SEOUL))
+        assert (
+            storage.fetch_one("SELECT state FROM ambiguous_digest_windows WHERE scheduled_local_date='2026-08-03'")[
+                "state"
+            ]
+            == "empty"
+        )
+
+
+def test_noon_payload_rejects_forged_subject_before_chunking(tmp_path: Path) -> None:
+    config = load_config(Path("config/channels.toml"), environ={})
+    ambiguous = (
+        "Analysis of the AI platform. "
+        + "The community compares measured deployment outcomes, technical constraints, and customer impact in detail. "
+        * 2
+    )
+    with Storage.open(tmp_path / "forged-noon.sqlite") as storage:
+        _activate_hourly(storage, config)
+        clock = FixtureClock(datetime(2026, 8, 3, 2, 30, tzinfo=UTC))
+        service = CandidateApprovalService(storage, chat_id=7, authorized_user_ids={7}, now=clock.now)
+        asyncio.run(
+            NewsPipeline(storage, config, FakeGenerationProvider(), clock).run_fixture(
+                StaticCollector((_observation(14, "testingcatalog", ambiguous),)),
+                approval_service=service,
+                actor_id=7,
+            )
+        )
+        window = storage.fetch_one("SELECT id FROM ambiguous_digest_windows WHERE scheduled_local_date='2026-08-03'")
+        audience = storage.fetch_one("SELECT audience_binding_id FROM automation_cutovers WHERE id=1")
+        assert window is not None and audience is not None
+        with storage.transaction() as connection:
+            connection.execute(
+                "UPDATE ambiguous_digest_windows SET state='queued' WHERE id=?",
+                (int(window["id"]),),
+            )
+            connection.execute(
+                "INSERT INTO telegram_notification_outbox("
+                "audience_binding_id,cutover_id,notification_kind,ambiguous_window_id,"
+                "subject_digest,state,created_at"
+                ") VALUES(?,1,'noon_digest',?,?,'pending',?)",
+                (
+                    int(audience["audience_binding_id"]),
+                    int(window["id"]),
+                    _digest("forged-noon-subject"),
+                    clock.now().isoformat(),
+                ),
+            )
+            notification_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
+
+        with pytest.raises(RuntimeError, match="noon notification binding drift"):
+            _notification_payload(storage, service, notification_id, actor_id=7)

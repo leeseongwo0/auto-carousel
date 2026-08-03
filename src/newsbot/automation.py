@@ -177,6 +177,7 @@ class AutomationAuthority:
             (int(row["audience_binding_id"]), candidate_id, source_set_key, subject_digest),
         )
         return cursor.rowcount == 1
+
     @staticmethod
     def validate_active_config_binding(connection: sqlite3.Connection, config: object) -> int:
         """Require the latest immutable release/config pair before worker mutation."""
@@ -248,7 +249,7 @@ class AutomationAuthority:
                 "SELECT id,state,config_binding_id FROM ambiguous_digest_windows WHERE scheduled_local_date=?",
                 (today.isoformat(),),
             ).fetchone()
-            in_window = (local.hour == 12)
+            in_window = local.hour == 12
             if row is None:
                 state = "empty" if in_window else ("skipped" if local.hour >= 13 else None)
                 if state is not None:
@@ -256,16 +257,25 @@ class AutomationAuthority:
                     connection.execute(
                         "INSERT INTO ambiguous_digest_windows(scheduled_local_date,config_binding_id,opens_at,closes_at,state,created_at) "
                         "VALUES(?,?,?,?,?,?)",
-                        (today.isoformat(), binding_id, _timestamp(opens), _timestamp(opens + timedelta(hours=1)), state, _timestamp(sampled_now)),
+                        (
+                            today.isoformat(),
+                            binding_id,
+                            _timestamp(opens),
+                            _timestamp(opens + timedelta(hours=1)),
+                            state,
+                            _timestamp(sampled_now),
+                        ),
                     )
+                return
+            if str(row["state"]) != "collecting":
                 return
             if int(row["config_binding_id"]) != binding_id:
                 raise AutomationDriftError("noon window binding drifted")
-            if str(row["state"]) != "collecting":
-                return
             if not in_window:
                 if local.hour >= 13:
-                    connection.execute("UPDATE ambiguous_digest_windows SET state='skipped' WHERE id=?", (int(row["id"]),))
+                    connection.execute(
+                        "UPDATE ambiguous_digest_windows SET state='skipped' WHERE id=?", (int(row["id"]),)
+                    )
                 return
             items = connection.execute(
                 "SELECT id FROM ambiguous_digest_items WHERE window_id=? ORDER BY ordering_timestamp,id",
@@ -1035,8 +1045,10 @@ class AutomationAuthority:
                     "WHERE chunk.notification_id=? AND attempt.state='accepted' LIMIT 1",
                     (notification_id,),
                 ).fetchone()
-                if outcome == "trusted_rejected" and retryable and (
-                    accepted is None or str(notification["notification_kind"]) == "noon_digest"
+                if (
+                    outcome == "trusted_rejected"
+                    and retryable
+                    and (accepted is None or str(notification["notification_kind"]) == "noon_digest")
                 ):
                     state = "pending"
                 else:
