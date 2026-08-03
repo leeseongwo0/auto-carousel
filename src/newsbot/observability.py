@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from .storage import Storage
 
@@ -53,11 +55,66 @@ def inspect(storage: Storage, run_id: int) -> dict[str, Any]:
     }
 
 
-def automation_status(storage: Storage) -> dict[str, int | bool]:
-    """Return migration-007 aggregate health without exposing authority identity."""
+def automation_status(storage: Storage, *, now: datetime | None = None) -> dict[str, int | bool]:
+    """Return redacted automation and hourly-news aggregate health."""
+    sampled_now = now or datetime.now(ZoneInfo("Asia/Seoul"))
+    if sampled_now.tzinfo is None or sampled_now.utcoffset() is None:
+        raise ValueError("automation status time must be timezone-aware")
+    local = sampled_now.astimezone(ZoneInfo("Asia/Seoul"))
     active = _count(storage, "automation_cutovers") == 1
+    current_binding_count = _current_config_binding_count(storage)
+    collecting_windows = _count(storage, "ambiguous_digest_windows", "state = 'collecting'")
+    collecting_open, collecting_stale = _collecting_window_health(storage, local)
     return {
         "automation_active": active,
+        "news_policy_definite": _count(
+            storage, "news_policy_evaluations", "outcome = 'definite_news'"
+        ),
+        "news_policy_trusted_analysis": _count(
+            storage, "news_policy_evaluations", "outcome = 'trusted_analysis'"
+        ),
+        "news_policy_ambiguous": _count(
+            storage, "news_policy_evaluations", "outcome = 'ambiguous'"
+        ),
+        "news_policy_non_news": _count(
+            storage, "news_policy_evaluations", "outcome = 'non_news'"
+        ),
+        "news_policy_config_bindings": _count(storage, "automation_release_config_bindings"),
+        "news_policy_current_config_binding_present": current_binding_count == 1,
+        "news_policy_current_config_binding_count": current_binding_count,
+        "noon_windows_collecting": collecting_windows,
+        "noon_windows_collecting_open": collecting_open,
+        "noon_windows_collecting_stale": collecting_stale,
+        "noon_windows_queued": _count(
+            storage, "ambiguous_digest_windows", "state = 'queued'"
+        ),
+        "noon_windows_empty": _count(
+            storage, "ambiguous_digest_windows", "state = 'empty'"
+        ),
+        "noon_windows_skipped": _count(
+            storage, "ambiguous_digest_windows", "state = 'skipped'"
+        ),
+        "noon_on_time_intent_commits": _count_on_time_noon_intents(storage),
+        "noon_pending_notifications": _count(
+            storage,
+            "telegram_notification_outbox",
+            "notification_kind = 'noon_digest' AND state IN ('pending','claimed','sending')",
+        ),
+        "noon_ambiguous_notifications": _count(
+            storage,
+            "telegram_notification_outbox",
+            "notification_kind = 'noon_digest' AND state = 'ambiguous'",
+        ),
+        "noon_partial_manual_notifications": _count(
+            storage,
+            "telegram_notification_outbox",
+            "notification_kind = 'noon_digest' AND state = 'partial_manual_required'",
+        ),
+        "noon_manual_notifications": _count(
+            storage,
+            "telegram_notification_outbox",
+            "notification_kind = 'noon_digest' AND state IN ('ambiguous','partial_manual_required')",
+        ),
         "automation_open_leases": _count(storage, "automation_stream_leases"),
         "automation_open_runs": _count(storage, "automation_stream_runs", "finished_at IS NULL"),
         "automation_pending_notifications": _count(
@@ -76,6 +133,44 @@ def automation_status(storage: Storage) -> dict[str, int | bool]:
             "9223372036854775807) AND status IN ('pending','retryable','delivering','ambiguous')",
         ),
     }
+
+
+def _current_config_binding_count(storage: Storage) -> int:
+    row = storage.fetch_one(
+        "SELECT COUNT(*) AS count FROM automation_release_config_bindings binding "
+        "WHERE binding.activation_id = ("
+        "SELECT MAX(id) FROM automation_release_activations WHERE cutover_id=1"
+        ")"
+    )
+    assert row is not None
+    return int(row["count"])
+
+
+def _count_on_time_noon_intents(storage: Storage) -> int:
+    row = storage.fetch_one(
+        "SELECT COUNT(*) AS count FROM telegram_notification_outbox outbox "
+        "JOIN ambiguous_digest_windows window ON window.id=outbox.ambiguous_window_id "
+        "WHERE outbox.notification_kind='noon_digest' "
+        "AND aware_epoch_us(outbox.created_at) >= aware_epoch_us(window.opens_at) "
+        "AND aware_epoch_us(outbox.created_at) < aware_epoch_us(window.closes_at)"
+    )
+    assert row is not None
+    return int(row["count"])
+def _collecting_window_health(storage: Storage, local: datetime) -> tuple[int, int]:
+    today = local.date().isoformat()
+    open_condition = (
+        "state = 'collecting' AND (scheduled_local_date > ? "
+        "OR (scheduled_local_date = ? AND ? < 13))"
+    )
+    stale_condition = (
+        "state = 'collecting' AND (scheduled_local_date < ? "
+        "OR (scheduled_local_date = ? AND ? >= 13))"
+    )
+    return (
+        _count(storage, "ambiguous_digest_windows", open_condition, (today, today, local.hour)),
+        _count(storage, "ambiguous_digest_windows", stale_condition, (today, today, local.hour)),
+    )
+
 
 
 def _count(storage: Storage, table: str, condition: str = "", parameters: tuple[object, ...] = ()) -> int:

@@ -52,3 +52,34 @@ def test_capability_credentials_are_scoped_to_requested_adapter() -> None:
     assert str(error.value) == (
         "missing required environment variables: GOOGLE_SERVICE_ACCOUNT_FILE, GOOGLE_SHEETS_SPREADSHEET_ID"
     )
+def test_news_policy_is_required_strict_and_digest_sensitive(tmp_path: Path) -> None:
+    path = tmp_path / "channels.toml"
+    valid = _channels_toml()
+    path.write_text(valid, encoding="utf-8")
+    config = load_config(path, environ={})
+    assert config.news_policy.version == "news_policy_v1"
+    digest = config.digest
+
+    path.write_text(valid.replace("activation_minutes = 60", "activation_minutes = 5"), encoding="utf-8")
+    with pytest.raises(ConfigError, match="activation_minutes"):
+        load_config(path, environ={})
+    path.write_text(valid.replace("activation_minutes = 60\n", ""), encoding="utf-8")
+    with pytest.raises(ConfigError, match="missing keys"):
+        load_config(path, environ={})
+
+    path.write_text(valid.replace("[news_policy]\n", "[news_policy]\nunapproved = true\n"), encoding="utf-8")
+    with pytest.raises(ConfigError, match="unknown keys"):
+        load_config(path, environ={})
+
+    path.write_text(
+        valid.replace(
+            'event_markers_ko = ["출시",',
+            'event_markers_ko = ["출시", "출시",',
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="duplicate normalized"):
+        load_config(path, environ={})
+
+    path.write_text(valid.replace('"출시", "공개"', '"출시x", "공개"'), encoding="utf-8")
+    assert load_config(path, environ={}).digest != digest

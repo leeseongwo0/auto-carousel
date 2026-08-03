@@ -460,6 +460,7 @@ def test_auth_telethon_fails_closed_before_adapter_import(monkeypatch) -> None:
 
 def test_collect_live_uses_one_loop_and_creates_provider_free_candidate_digest(tmp_path, monkeypatch, capsys) -> None:
     from newsbot import cli
+    from newsbot.config import load_config
     from newsbot.storage import Storage
 
     now = datetime.now(UTC) - timedelta(minutes=1)
@@ -468,7 +469,7 @@ def test_collect_live_uses_one_loop_and_creates_provider_free_candidate_digest(t
     class Message:
         id = 10
         date = now
-        message = "AI technology update with enough material detail for deterministic local candidate ranking."
+        message = "Official team announced an AI technology release with independently useful product details, rollout scope, supported users, measured impact, and operational context for readers."
         edit_date = None
         action = None
         views = 100
@@ -495,6 +496,7 @@ def test_collect_live_uses_one_loop_and_creates_provider_free_candidate_digest(t
         digest="live-config",
         enabled_channels=(SimpleNamespace(id="official", handle="official"),),
         channels_by_id={"official": SimpleNamespace(source_quality=1, classification="official")},
+        news_policy=load_config(Path("config/channels.toml"), environ={}).news_policy,
         policy=SimpleNamespace(
             version="candidate_policy_v1",
             novelty_window_days=7,
@@ -645,7 +647,7 @@ def test_openai_capability_failure_is_recoverable_after_selection(tmp_path, monk
 
     fixture = tmp_path / "fixture.json"
     fixture.write_text(
-        """{"messages":[{"channel_id":"aipost","channel_handle":"aipost","id":"1","published_at":"2026-07-29T11:00:00Z","text":"AI technology update includes enough independently useful context for the editorial policy to evaluate this original publisher announcement.","urls":["https://aipost.kr/news"]}]}""",
+        """{"messages":[{"channel_id":"aipost","channel_handle":"aipost","id":"1","published_at":"2026-07-29T11:00:00Z","text":"AIPost announced an AI technology release with independently useful product details, rollout scope, supported users, measured impact, and operational context for readers.","urls":["https://aipost.kr/news"]}]}""",
         encoding="utf-8",
     )
     root = Path(__file__).parents[2]
@@ -660,8 +662,11 @@ def test_openai_capability_failure_is_recoverable_after_selection(tmp_path, monk
         pipeline = NewsPipeline(storage, config, FakeGenerationProvider(), clock)
         service = CandidateApprovalService(storage, chat_id=1, authorized_user_ids={1}, now=clock.now)
         stage = asyncio.run(pipeline.run_fixture(FixtureCollector(fixture), approval_service=service, actor_id=1))
-        candidate_id = int(stage.digest.candidates[0]["candidate_id"])
-        make = next(button for button in stage.digest.buttons[candidate_id] if button.label == "[제작]")
+        assert stage.selection_digest is not None
+        candidate_id = int(stage.selection_digest.candidates[0]["candidate_id"])
+        make = next(
+            button for button in stage.selection_digest.buttons[candidate_id] if button.label == "[제작]"
+        )
         assert ScriptedApprovalAdapter(service).apply(ScriptedAction(make.token, 1, 1)).status == "queued"
 
     monkeypatch.setattr(cli, "_config", lambda _: config)

@@ -28,10 +28,10 @@ def test_open_initializes_schema_and_applies_migration_once(tmp_path: Path) -> N
             "telegram_notification_outbox",
             "automation_stream_leases",
         } <= tables
-        assert storage.fetch_one("SELECT COUNT(*) AS count FROM schema_migrations")["count"] == 7
+        assert storage.fetch_one("SELECT COUNT(*) AS count FROM schema_migrations")["count"] == 8
 
     with Storage.open(database) as storage:
-        assert storage.fetch_one("SELECT COUNT(*) AS count FROM schema_migrations")["count"] == 7
+        assert storage.fetch_one("SELECT COUNT(*) AS count FROM schema_migrations")["count"] == 8
 
 
 def test_telegram_outbox_and_attempt_identity_are_immutable_to_direct_sql(tmp_path: Path) -> None:
@@ -161,3 +161,38 @@ def test_sheets_migration_preserves_populated_database(tmp_path: Path) -> None:
             storage.fetch_one("SELECT name FROM sqlite_master WHERE type='table' AND name='sheet_handoffs'") is not None
         )
         assert storage.fetch_all("PRAGMA foreign_key_check") == []
+def test_hourly_news_migration_rejects_unsupported_007_before_ddl(tmp_path: Path) -> None:
+    database = tmp_path / "unsupported-007.sqlite"
+    migrations = Path(__file__).parents[2] / "src" / "newsbot" / "migrations"
+    storage = Storage(database)
+    try:
+        for path in sorted(migrations.glob("00[1-7]_*.sql")):
+            script = path.read_text(encoding="utf-8")
+            if path.name == "002_canonical_authority.sql":
+                storage._prepare_canonical_authority_upgrade()
+                storage._connection.execute("PRAGMA foreign_keys=OFF")
+            if path.name == "004_sheets_authority_upgrade.sql":
+                script = script.replace("__HANDOFF_TARGET_EXPR__", "h.target_binding_id")
+            storage._connection.executescript(script)
+            storage._connection.execute("INSERT INTO schema_migrations(version) VALUES(?)", (path.name,))
+            storage._connection.commit()
+            if path.name == "002_canonical_authority.sql":
+                storage._connection.execute("PRAGMA foreign_keys=ON")
+        storage._connection.execute("DROP TRIGGER telegram_outbox_no_delete")
+        storage._connection.commit()
+    finally:
+        storage.close()
+
+    with pytest.raises(RuntimeError, match="Unsupported migration-007 outbox schema"):
+        Storage.open(database)
+
+    connection = sqlite3.connect(database)
+    try:
+        assert connection.execute(
+            "SELECT 1 FROM schema_migrations WHERE version='008_hourly_news_eligibility.sql'"
+        ).fetchone() is None
+        assert connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ambiguous_digest_windows'"
+        ).fetchone() is None
+    finally:
+        connection.close()

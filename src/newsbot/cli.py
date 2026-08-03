@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import os
+import sqlite3
 import stat
 import sys
 import time
@@ -43,7 +44,7 @@ def _config(args: argparse.Namespace) -> AppConfig:
     overrides: dict[str, Path] = {}
     if args.db is not None:
         overrides["database_path"] = args.db
-    return load_config(args.config, cli_overrides=overrides)
+    return load_config(getattr(args, "config", Path("config/channels.toml")), cli_overrides=overrides)
 
 
 def _fixture_provider_factory() -> GenerationProvider:
@@ -221,18 +222,20 @@ def run_fixture(args: argparse.Namespace) -> int:
             sheet_target_binding_id=fixture_target_id,
         )
         stage = asyncio.run(pipeline.run(observations, run_key=run_key, approval_service=service, actor_id=1))
+        digest = stage.selection_digest
         result: dict[str, Any] = {
-            "candidate_count": len(stage.digest.candidates),
-            "digest_id": stage.digest.id,
+            "candidate_count": len(digest.candidates) if digest is not None else 0,
+            "digest_id": digest.id if digest is not None else None,
+            "routed_counts": {outcome.value: count for outcome, count in stage.routed_counts.items()},
             "run_id": stage.run_id,
-            "status": "pending_selection",
+            "status": "pending_selection" if digest is not None else "no_immediate_candidates",
         }
         if args.scripted_approve:
-            if not stage.digest.candidates:
-                raise ValueError("fixture has no eligible candidate")
-            candidate_id = int(stage.digest.candidates[0]["candidate_id"])
+            if digest is None or not digest.candidates:
+                raise ValueError("fixture has no immediate candidate")
+            candidate_id = int(digest.candidates[0]["candidate_id"])
             adapter = ScriptedApprovalAdapter(service)
-            make = next(button for button in stage.digest.buttons[candidate_id] if button.label == "[제작]")
+            make = next(button for button in digest.buttons[candidate_id] if button.label == "[제작]")
             if adapter.apply(ScriptedAction(make.token, 1, 1)).status != "queued":
                 raise RuntimeError("scripted selection was not queued")
             generated = asyncio.run(
@@ -376,15 +379,16 @@ def rank(args: argparse.Namespace) -> int:
                 observations, run_key=_live_run_key(observations, config), approval_service=service, actor_id=1
             )
         )
-    _print(
-        {
-            "candidate_count": len(stage.digest.candidates),
-            "digest_id": stage.digest.id,
+        _print(
+            {
+            "candidate_count": len(stage.selection_digest.candidates) if stage.selection_digest is not None else 0,
+            "digest_id": stage.selection_digest.id if stage.selection_digest is not None else None,
             "mode": "rank",
+            "routed_counts": {outcome.value: count for outcome, count in stage.routed_counts.items()},
             "run_id": stage.run_id,
-            "status": "pending_selection",
-        }
-    )
+            "status": "pending_selection" if stage.selection_digest is not None else "no_immediate_candidates",
+            }
+        )
     return 0
 
 
@@ -427,17 +431,18 @@ def reconcile_fixture(args: argparse.Namespace) -> int:
                 actor_id=1,
             )
         )
-    _print(
-        {
+        _print(
+            {
             "channel": channel.id,
-            "candidate_count": len(stage.digest.candidates),
-            "digest_id": stage.digest.id,
+            "candidate_count": len(stage.selection_digest.candidates) if stage.selection_digest is not None else 0,
+            "digest_id": stage.selection_digest.id if stage.selection_digest is not None else None,
             "mode": "reconcile",
             "persisted": persisted,
+            "routed_counts": {outcome.value: count for outcome, count in stage.routed_counts.items()},
             "run_id": stage.run_id,
-            "status": "pending_selection",
-        }
-    )
+            "status": "pending_selection" if stage.selection_digest is not None else "no_immediate_candidates",
+            }
+        )
     return 0
 
 
@@ -533,7 +538,12 @@ class DurableLivePipeline(NewsPipeline):
         return source_ids
 
 
-def _collect_live(args: argparse.Namespace, *, reconcile: bool, config: AppConfig | None = None) -> int:
+def _collect_live(
+    args: argparse.Namespace,
+    *,
+    reconcile: bool,
+    config: AppConfig | None = None,
+) -> int:
     range_ids = _reconcile_range(args, required=True) if reconcile else None
     if args.page_size < 1 or args.max_pages < 1:
         raise ValueError("--page-size and --max-pages must be positive")
@@ -594,7 +604,24 @@ def _collect_live(args: argparse.Namespace, *, reconcile: bool, config: AppConfi
             if time.monotonic() >= deadline_at:
                 raise TimeoutError("collection application deadline exhausted")
             now = datetime.now(UTC)
-            observations = storage.latest_observations()
+            configured_channels = getattr(config, "channels", None)
+            if configured_channels is None:
+                configured_channel_ids = {
+                    str(channel_id)
+                    for channel_id, channel in getattr(config, "channels_by_id", {}).items()
+                    if bool(getattr(channel, "enabled", True))
+                }
+            else:
+                configured_channel_ids = {
+                    str(channel.id)
+                    for channel in configured_channels
+                    if bool(getattr(channel, "enabled", True))
+                }
+            observations = tuple(
+                observation
+                for observation in storage.latest_observations()
+                if observation.channel_id in configured_channel_ids
+            )
             service = CandidateApprovalService(storage, chat_id=1, authorized_user_ids={1}, now=lambda: now)
             pipeline = DurableLivePipeline(storage, config, _live_provider_forbidden, SystemClock())
             stage = loop.run_until_complete(
@@ -614,42 +641,65 @@ def _collect_live(args: argparse.Namespace, *, reconcile: bool, config: AppConfi
         {
             "channels": counts,
             "channel_errors": channel_errors,
-            "digest_id": stage.digest.id,
+            "candidate_count": len(stage.selection_digest.candidates) if stage.selection_digest is not None else 0,
+            "digest_id": stage.selection_digest.id if stage.selection_digest is not None else None,
             "mode": "reconcile" if reconcile else "collect",
+            "routed_counts": {outcome.value: count for outcome, count in stage.routed_counts.items()},
             "run_id": stage.run_id,
-            "status": "pending_selection",
+            "status": "pending_selection" if stage.selection_digest is not None else "no_immediate_candidates",
         }
     )
     return 0
 
 
-def _reject_legacy_when_automation_active(args: argparse.Namespace) -> None:
-    with Storage.open(_database(args)) as storage:
-        if storage.fetch_one("SELECT 1 AS active FROM automation_cutovers WHERE id=1") is not None:
+def _reject_legacy_when_automation_active(args: argparse.Namespace, *, database: Path | None = None) -> None:
+    path = database or _database(args)
+    if not path.exists():
+        return
+    connection = sqlite3.connect(f"file:{path.resolve()}?mode=ro", uri=True)
+    try:
+        exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='automation_cutovers'"
+        ).fetchone()
+        if exists is not None and connection.execute(
+            "SELECT 1 FROM automation_cutovers WHERE id=1"
+        ).fetchone() is not None:
             raise RuntimeError("legacy command is disabled after automation cutover")
+    finally:
+        connection.close()
+
+
+def _legacy_live_preflight(args: argparse.Namespace, *, reconcile: bool) -> AppConfig:
+    config = _config(args)
+    _reject_legacy_when_automation_active(args, database=config.database_path)
+    validate_capabilities(Capability.LIVE_RECONCILE if reconcile else Capability.LIVE_COLLECTION)
+    SessionStore(os.environ["TELEGRAM_SESSION_PATH"]).validate()
+    return config
+
+
 
 
 def collect_live(args: argparse.Namespace) -> int:
     from .automation import automation_lock
 
     with automation_lock("collect"):
-        _reject_legacy_when_automation_active(args)
-        return _collect_live(args, reconcile=False)
+        config = _legacy_live_preflight(args, reconcile=False)
+        return _collect_live(args, reconcile=False, config=config)
 
 
 def reconcile_live(args: argparse.Namespace) -> int:
     from .automation import automation_lock
 
     with automation_lock("collect"):
-        _reject_legacy_when_automation_active(args)
-        return _collect_live(args, reconcile=True)
+        config = _legacy_live_preflight(args, reconcile=True)
+        return _collect_live(args, reconcile=True, config=config)
 
 
 def generate_pending(args: argparse.Namespace) -> int:
-    _reject_legacy_when_automation_active(args)
+    config = _config(args)
+    _reject_legacy_when_automation_active(args, database=config.database_path)
     if args.provider == "fake" and not args.fixture_only:
         raise ValueError("the fake provider is fixture-only; pass --fixture-only explicitly")
-    config = _config(args)
     with Storage.open(config.database_path) as storage:
         clock = FixtureClock() if args.provider == "fake" else SystemClock()
         pipeline = NewsPipeline(storage, config, _provider_factory(args.provider), clock)
@@ -1148,6 +1198,10 @@ def _poll_approvals_unlocked(args: argparse.Namespace) -> int:
         config = _config(args)
         capabilities.append(Capability.GENERATE_FAKE if args.provider == "fake" else Capability.GENERATE_OPENAI)
     validate_capabilities(capabilities)
+    _reject_legacy_when_automation_active(
+        args,
+        database=config.database_path if config is not None else None,
+    )
     from .approval.telegram import TelegramApprovalAdapter
 
     with Storage.open(_database(args)) as storage:
@@ -1202,7 +1256,6 @@ def poll_approvals(args: argparse.Namespace) -> int:
     from .automation import automation_lock
 
     with automation_lock("telegram"):
-        _reject_legacy_when_automation_active(args)
         return _poll_approvals_unlocked(args)
 
 
@@ -2019,6 +2072,7 @@ def automation_cutover_apply(args: argparse.Namespace) -> int:
             args.proposal_sha256,
             audience_binding_id=audience_id,
             release_digest=args.release_digest,
+            config=config,
             now=datetime.now(UTC),
             validate=validate_snapshot,
         )
@@ -2036,8 +2090,10 @@ def automation_release_activate(args: argparse.Namespace) -> int:
 
     def activate_locked(storage: Storage) -> None:
         authority = AutomationAuthority(storage)
+        config = _config(args)
         result = authority.activate_release(
             args.release_digest,
+            config=config,
             now=datetime.now(UTC),
             validate=authority.quiescent,
         )
@@ -2078,6 +2134,9 @@ def automation_collect_once(args: argparse.Namespace) -> int:
             or str(active_cutover["config_digest"]) != config.digest
         ):
             raise RuntimeError("automated collection configuration drifted from the active cutover")
+        with storage.transaction() as connection:
+            if authority.validate_active_config_binding(connection, config) == 0:
+                raise RuntimeError("automated collection requires a release/config binding")
         lease = authority.acquire_lease(
             "collect",
             now=datetime.now(UTC),
@@ -2104,11 +2163,23 @@ def _notification_payload(
     actor_id: int,
 ) -> tuple[str, dict[str, object] | None]:
     row = storage.fetch_one(
-        "SELECT notification_kind,candidate_id,generation_id,defer_authority_id FROM telegram_notification_outbox WHERE id=?",
+        "SELECT notification_kind,candidate_id,generation_id,defer_authority_id,ambiguous_window_id "
+        "FROM telegram_notification_outbox WHERE id=?",
         (notification_id,),
     )
     if row is None:
         raise RuntimeError("notification disappeared")
+    if row["notification_kind"] == "noon_digest":
+        items = storage.fetch_all(
+            "SELECT item.normalized_title FROM ambiguous_digest_items item "
+            "JOIN ambiguous_digest_windows window ON window.id=item.window_id "
+            "JOIN telegram_notification_outbox outbox ON outbox.ambiguous_window_id=window.id "
+            "WHERE outbox.id=? AND window.state='queued' ORDER BY item.ordering_timestamp,item.id",
+            (notification_id,),
+        )
+        if not items:
+            raise RuntimeError("noon notification has no frozen titles")
+        return "\n".join(str(item["normalized_title"]) for item in items), None
     if row["notification_kind"] == "candidate":
         candidate = storage.fetch_one(
             "SELECT candidate.id,candidate_evaluations.run_id FROM candidates candidate "
@@ -2212,7 +2283,7 @@ def _notification_payload(
 
 
 def telegram_tick(args: argparse.Namespace) -> int:
-    from .approval.telegram import TelegramApprovalAdapter, TelegramDeadline, split_telegram_text
+    from .approval.telegram import TelegramApprovalAdapter, TelegramDeadline, split_telegram_text, split_telegram_titles
     from .automation import AutomationAuthority, automation_lock
 
     validate_capabilities(Capability.APPROVE_POLL)
@@ -2221,7 +2292,19 @@ def telegram_tick(args: argparse.Namespace) -> int:
         service = _approval_service(storage)
         adapter = TelegramApprovalAdapter(os.environ["TELEGRAM_BOT_TOKEN"], service)
         tick_deadline = TelegramDeadline.after(args.deadline)
+        config = _config(args)
+        with storage.transaction(immediate=False) as connection:
+            authority.validate_active_config_binding(connection, config)
         audience_binding_id = _runtime_audience(authority, adapter, deadline=tick_deadline)
+        admission = authority.acquire_lease(
+            "telegram_dispatch",
+            now=datetime.now(UTC),
+            lease_seconds=int(getattr(args, "lease_seconds", 90)),
+        )
+        try:
+            authority.seal_noon_window(config, now=lambda: datetime.now(UTC))
+        finally:
+            authority.release_lease(admission, now=datetime.now(UTC), outcome="done")
         poll = authority.acquire_lease(
             "approval_poll",
             now=datetime.now(UTC),
@@ -2290,7 +2373,17 @@ def telegram_tick(args: argparse.Namespace) -> int:
                 claim.notification_id,
                 actor_id=_callback_actor_id(service.authorized_user_ids),
             )
-            chunks = split_telegram_text(text)
+            notification = storage.fetch_one(
+                "SELECT notification_kind FROM telegram_notification_outbox WHERE id=?",
+                (claim.notification_id,),
+            )
+            if notification is None:
+                raise RuntimeError("notification disappeared")
+            chunks = (
+                split_telegram_titles(tuple(text.split("\n")))
+                if str(notification["notification_kind"]) == "noon_digest"
+                else split_telegram_text(text)
+            )
             markup_identity, _callback_token_hashes = _telegram_markup_identity(storage, markup)
             metadata = tuple(
                 (
@@ -2405,6 +2498,9 @@ def sheets_deliver_pending_once(args: argparse.Namespace) -> int:
     )
     with automation_lock("sheets"), Storage.open(_database(worker_args)) as storage:
         authority = AutomationAuthority(storage)
+        config = _config(worker_args)
+        with storage.transaction(immediate=False) as connection:
+            authority.validate_active_config_binding(connection, config)
         lease = authority.acquire_lease(
             "sheets_delivery",
             now=datetime.now(UTC),
@@ -2693,6 +2789,7 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--proposal-sha256", required=True)
             command.add_argument("--release-digest", required=True)
         elif name == "automation-release-activate":
+            command.add_argument("--config", type=Path, default=Path("config/channels.toml"))
             command.add_argument("--release-digest", required=True)
         elif name == "automation-collect-once":
             command.add_argument("--config", type=Path, default=Path("config/channels.toml"))

@@ -15,6 +15,7 @@ import pytest
 
 from newsbot.approval.base import ApprovalAction, hash_callback_token
 from newsbot.automation import AutomationAuthority, AutomationBusyError, AutomationDriftError, CutoverProposal, Frontier
+from newsbot.config import load_config
 from newsbot.storage import Storage
 
 
@@ -57,6 +58,13 @@ def _proposal(
     storage: Storage, proposal_id: str = "proposal-for-automation-tests"
 ) -> tuple[AutomationAuthority, int, str]:
     authority = AutomationAuthority(storage)
+    apply_proposal = authority.apply_proposal
+
+    def apply_with_config(*args: object, **kwargs: object) -> dict[str, object]:
+        kwargs.setdefault("config", load_config(Path("config/channels.toml"), environ={}))
+        return apply_proposal(*args, **kwargs)  # type: ignore[arg-type]
+
+    authority.apply_proposal = apply_with_config  # type: ignore[method-assign]
     target_id = _target(storage)
     audience_id = authority.record_audience_binding(
         bot_id_digest=_digest("bot"), token_hmac=_digest("token"), audience_hmac=_digest("audience"), version=1
@@ -297,6 +305,16 @@ def test_telegram_worker_rejects_audience_drift_before_cursor_and_advances_unlin
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("audience drift")),
     )
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
+    with Storage.open(database) as storage:
+        authority, audience_id, receipt = _proposal(storage)
+        authority.apply_proposal(
+            "proposal-for-automation-tests",
+            receipt,
+            audience_binding_id=audience_id,
+            release_digest=_digest("release"),
+            now=_now(),
+            validate=lambda: True,
+        )
 
     with pytest.raises(RuntimeError, match="audience drift"):
         cli.telegram_tick(SimpleNamespace(db=database, timeout=0, limit=10, deadline=1))
@@ -1002,11 +1020,15 @@ def test_worker_no_work_handlers_are_redacted_and_do_not_construct_a_provider(mo
     monkeypatch.setattr(telegram, "TelegramApprovalAdapter", FakeAdapter)
     monkeypatch.setattr(cli, "_print", lambda value: print(value))
     channels = tuple(SimpleNamespace(id=f"channel-{index}") for index in range(6))
-    monkeypatch.setattr(
-        cli,
-        "_config",
-        lambda _args: SimpleNamespace(digest=_digest("config"), enabled_channels=channels, database_path=database),
+    from newsbot.config import load_config
+
+    runtime_config = SimpleNamespace(
+        digest=_digest("config"),
+        enabled_channels=channels,
+        database_path=database,
+        news_policy=load_config(Path("config/channels.toml"), environ={}).news_policy,
     )
+    monkeypatch.setattr(cli, "_config", lambda _args: runtime_config)
     with Storage.open(database) as storage:
         authority, audience_id, receipt = _proposal(storage)
         authority.apply_proposal(
@@ -1015,6 +1037,12 @@ def test_worker_no_work_handlers_are_redacted_and_do_not_construct_a_provider(mo
             audience_binding_id=audience_id,
             release_digest=_digest("release"),
             now=_now(),
+            validate=lambda: True,
+        )
+        authority.activate_release(
+            _digest("release"),
+            config=runtime_config,
+            now=_now() + timedelta(seconds=1),
             validate=lambda: True,
         )
 

@@ -1,11 +1,13 @@
 import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 
 from newsbot.ai.fake import FakeGenerationProvider
 from newsbot.candidates import CandidateApprovalService
 from newsbot.collectors.base import Engagement, SourceObservation
+from newsbot.config import load_config
 from newsbot.pipeline import NewsPipeline
 from newsbot.ranking import evaluate_candidates
 from newsbot.runtime import FixtureClock
@@ -32,6 +34,7 @@ def _pipeline_config() -> SimpleNamespace:
     return SimpleNamespace(
         digest="identity-test",
         channels_by_id={"source": SimpleNamespace(source_quality=1, official_domains=(), original_domains=())},
+        news_policy=load_config(Path("config/channels.toml"), environ={}).news_policy,
         policy=SimpleNamespace(
             version="identity-test",
             novelty_window_days=7,

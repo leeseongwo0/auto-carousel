@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from hashlib import sha256
 from secrets import token_hex
 from typing import Any, Protocol
+from zoneinfo import ZoneInfo
 
 from .ai.base import FactClaim, GenerationProvider, GenerationRequest
 from .automation import AutomationAuthority
@@ -17,6 +18,7 @@ from .candidates import CandidateApprovalService, CandidateDigest
 from .collectors.base import SourceObservation
 from .copywriting import CopyDraft, adaptive_page_count, validate_copy
 from .exports import source_claim_identity, source_identity, source_material_identity, source_observation_identity
+from .news_policy import NewsOutcome, evaluate_news_policy, observation_facts
 from .ranking import Evaluation, evaluate_candidates
 from .runtime import Clock
 from .storage import Storage, has_newer_material_source, persist_observation
@@ -31,7 +33,8 @@ class FixtureObservationCollector(Protocol):
 @dataclass(frozen=True, slots=True)
 class CandidateStageResult:
     run_id: int
-    digest: CandidateDigest
+    selection_digest: CandidateDigest | None
+    routed_counts: Mapping[NewsOutcome, int]
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +83,9 @@ class NewsPipeline:
     ) -> CandidateStageResult:
         """Collect, rank, and expose candidates without selecting or generating."""
         now = _utc(self.clock.now())
+        if self.storage.fetch_one("SELECT 1 FROM automation_cutovers WHERE id=1") is not None:
+            with self.storage.transaction() as connection:
+                AutomationAuthority.validate_active_config_binding(connection, self.config)
         existing_run = self.storage.fetch_one("SELECT id, status FROM runs WHERE run_key=?", (run_key,))
         run_id = self._run_id(run_key, now)
         observation_ids = self._persist_sources(observations, now)
@@ -93,18 +99,19 @@ class NewsPipeline:
             canonical_observations, self.config, now, self._candidate_history(run_id, now)
         )
         self._persist_candidates(run_id, evaluations, canonical_observations, observation_ids, now)
-        if (
-            existing_run is not None
-            and self.storage.fetch_one(
-                "SELECT 1 FROM candidates c JOIN candidate_evaluations ce ON ce.id=c.evaluation_id "
-                "WHERE ce.run_id=? AND c.status='pending_selection'",
-                (run_id,),
+        if existing_run is not None:
+            return CandidateStageResult(
+                run_id,
+                self._existing_digest(run_id),
+                self._routed_counts(run_id),
             )
-            is None
-        ):
-            return CandidateStageResult(run_id, self._existing_digest(run_id))
-        digest = approval_service.create_digest(run_id, actor_id=actor_id)
-        return CandidateStageResult(run_id, digest)
+        pending = self.storage.fetch_one(
+            "SELECT 1 FROM candidates c JOIN candidate_evaluations ce ON ce.id=c.evaluation_id "
+            "WHERE ce.run_id=? AND c.status='pending_selection'",
+            (run_id,),
+        )
+        digest = approval_service.create_digest(run_id, actor_id=actor_id) if pending is not None else None
+        return CandidateStageResult(run_id, digest, self._routed_counts(run_id))
 
     def _run_id(self, run_key: str, now: datetime) -> int:
         config_hash = getattr(self.config, "digest", None)
@@ -117,15 +124,21 @@ class NewsPipeline:
             assert row is not None
             return int(row["id"])
 
-    def _existing_digest(self, run_id: int) -> CandidateDigest:
+    def _existing_digest(self, run_id: int) -> CandidateDigest | None:
         row = self.storage.fetch_one(
             "SELECT id FROM digests WHERE run_id=? ORDER BY id DESC LIMIT 1",
             (run_id,),
         )
-        if row is None:
-            raise RuntimeError("ready fixture run has no candidate digest")
-        return CandidateDigest(int(row["id"]), run_id, 1, (), {})
+        return None if row is None else CandidateDigest(int(row["id"]), run_id, 1, (), {})
 
+    def _routed_counts(self, run_id: int) -> Mapping[NewsOutcome, int]:
+        rows = self.storage.fetch_all(
+            "SELECT outcome,COUNT(*) AS count FROM news_policy_evaluations policy "
+            "JOIN candidate_evaluations evaluation ON evaluation.id=policy.candidate_evaluation_id "
+            "WHERE evaluation.run_id=? GROUP BY outcome",
+            (run_id,),
+        )
+        return {NewsOutcome(str(row["outcome"])): int(row["count"]) for row in rows}
     def _persist_sources(self, observations: Sequence[SourceObservation], now: datetime) -> dict[tuple[str, str], int]:
         result: dict[tuple[str, str], int] = {}
         with self.storage.transaction() as connection:
@@ -226,8 +239,8 @@ class NewsPipeline:
         source_ids: dict[tuple[str, str], int],
         now: datetime,
     ) -> None:
-        with self.storage.transaction() as connection:
-            for rank, evaluation in enumerate(evaluations, start=1):
+        for rank, evaluation in enumerate(evaluations, start=1):
+            with self.storage.transaction() as connection:
                 observation_ids = tuple(
                     sorted(source_ids[(item.channel_id, item.external_post_id)] for item in evaluation.observations)
                 )
@@ -311,14 +324,75 @@ class NewsPipeline:
                     (run_id, source_set_key, evaluator_version),
                 ).fetchone()
                 assert row is not None
+                policy = evaluate_news_policy(evaluation.observations, self.config, ranking_eligible=evaluation.eligible)
+                policy_facts = tuple(
+                    observation_facts(observation, self.config)
+                    for observation in sorted(
+                        evaluation.observations,
+                        key=lambda item: (item.channel_id, item.external_post_id),
+                    )
+                )
+                policy_rationale = {
+                    "schema_version": "news-policy-rationale-v1",
+                    "outcome": policy.outcome.value,
+                    "reason": policy.reason,
+                    "selected_source_id": policy.source_id,
+                    "observations": [
+                        {
+                            "channel_id": fact.observation.channel_id,
+                            "external_post_id": fact.observation.external_post_id,
+                            "classification": fact.classification,
+                            "marker_matches": [
+                                {
+                                    "category": match.category,
+                                    "marker": match.marker,
+                                    "start": match.start,
+                                    "end": match.end,
+                                }
+                                for match in fact.matches
+                            ],
+                            "semantic_chars": fact.semantic_chars,
+                            "material_sentences": fact.material_sentences,
+                            "material_context": fact.material_context,
+                            "meaningful_analysis": fact.meaningful_analysis,
+                            "eligible_external_url": fact.eligible_external_url,
+                        }
+                        for fact in policy_facts
+                    ],
+                }
+                cutover = connection.execute("SELECT 1 FROM automation_cutovers WHERE id=1").fetchone()
+                binding_id = (
+                    AutomationAuthority.validate_active_config_binding(connection, self.config)
+                    if cutover is not None
+                    else None
+                )
+                policy_id: int | None = None
+                if binding_id is not None:
+                    policy_row = connection.execute(
+                        "SELECT id FROM news_policy_evaluations WHERE candidate_evaluation_id=?",
+                        (int(row["id"]),),
+                    ).fetchone()
+                    policy_id = (
+                        int(policy_row["id"])
+                        if policy_row is not None
+                        else Storage._record_news_policy_evaluation(
+                            connection,
+                            int(row["id"]),
+                            binding_id,
+                            policy.outcome,
+                            policy.reason,
+                            json.dumps(policy_rationale, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                            created_at=now,
+                        )
+                    )
+                immediate = evaluation.eligible and policy.outcome in {
+                    NewsOutcome.DEFINITE_NEWS,
+                    NewsOutcome.TRUSTED_ANALYSIS,
+                }
                 inserted = (
                     connection.execute(
                         "INSERT OR IGNORE INTO candidates(evaluation_id, status, rank) VALUES (?, ?, ?)",
-                        (
-                            row["id"],
-                            "pending_selection" if evaluation.eligible else "rejected",
-                            rank if evaluation.eligible else None,
-                        ),
+                        (row["id"], "pending_selection" if immediate else "rejected", rank if immediate else None),
                     ).rowcount
                     == 1
                 )
@@ -330,12 +404,37 @@ class NewsPipeline:
                     "INSERT OR IGNORE INTO candidate_sources(candidate_id, source_post_version_id) VALUES (?, ?)",
                     ((int(candidate["id"]), version_id) for version_id in version_ids),
                 )
-                if inserted and evaluation.eligible and self._post_frontier_material(connection, version_ids):
+                if inserted and immediate and self._post_frontier_material(connection, version_ids):
                     AutomationAuthority.enqueue_candidate_notification(
                         connection,
                         candidate_id=int(candidate["id"]),
                         source_set_key=source_set_key,
                         subject_digest=sha256(f"candidate:{source_set_key}".encode()).hexdigest(),
+                    )
+                if inserted and binding_id is not None and policy.outcome is NewsOutcome.AMBIGUOUS:
+                    sampled = _utc(self.clock.now()).astimezone(ZoneInfo("Asia/Seoul"))
+                    assigned_date = sampled.date() if sampled.hour < 12 else sampled.date() + timedelta(days=1)
+                    opens = datetime.combine(assigned_date, datetime.min.time(), ZoneInfo("Asia/Seoul")).replace(hour=12)
+                    connection.execute(
+                        "INSERT OR IGNORE INTO ambiguous_digest_windows("
+                        "scheduled_local_date,config_binding_id,opens_at,closes_at,state,created_at"
+                        ") VALUES(?,?,?,?,?,?)",
+                        (assigned_date.isoformat(), binding_id, opens.astimezone(UTC).isoformat(),
+                         (opens + timedelta(hours=1)).astimezone(UTC).isoformat(), "collecting", now.isoformat()),
+                    )
+                    window = connection.execute(
+                        "SELECT id FROM ambiguous_digest_windows WHERE scheduled_local_date=?",
+                        (assigned_date.isoformat(),),
+                    ).fetchone()
+                    assert policy_id is not None
+                    assert window is not None
+                    title, _ = CandidateApprovalService._candidate_display(connection, version_id)
+                    connection.execute(
+                        "INSERT OR IGNORE INTO ambiguous_digest_items("
+                        "window_id,news_policy_evaluation_id,source_post_version_id,normalized_title,ordering_timestamp,"
+                        "story_key,content_key,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                        (int(window["id"]), policy_id, version_id, title, now.isoformat(),
+                         evaluation.story_key, evaluation.content_key, now.isoformat()),
                     )
 
     @staticmethod

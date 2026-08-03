@@ -120,3 +120,26 @@ unattributed = 0.20
 [policy.certainty_penalties]
 conflicts = 0.50
 missing_url = 0.20
+[news_policy]
+version = "news_policy_v1"
+timezone = "Asia/Seoul"
+noon_hour = 12
+noon_minute = 0
+activation_minutes = 60
+material_semantic_chars = 80
+material_sentence_chars = 40
+analysis_semantic_chars = 160
+analysis_sentence_chars = 40
+analysis_min_sentences = 2
+event_markers_ko = ["출시", "공개", "발표", "업데이트", "지원 시작", "파트너십", "인수", "합병", "투자 유치", "서비스 종료", "장애", "해킹", "승인", "규제", "정책 변경", "가격 인상", "가격 인하"]
+event_markers_en = ["launches", "launched", "released", "announced", "unveiled", "now available", "rolls out", "partnership", "acquires", "acquired", "merger", "raises funding", "shuts down", "outage", "breach", "hack", "approved", "regulation", "policy change", "price increase", "price cut"]
+analysis_markers_ko = ["분석", "해설", "전망", "리뷰", "비교", "평가", "보고서", "연구"]
+analysis_markers_en = ["analysis", "commentary", "outlook", "review", "comparison", "assessment", "report", "research"]
+evidence_markers_ko = ["에 따르면", "공식 문서", "원문", "데이터", "통계", "실험", "벤치마크", "조사"]
+evidence_markers_en = ["according to", "official documentation", "source document", "data", "statistics", "experiment", "benchmark", "survey"]
+promotion_markers_ko = ["광고", "협찬", "할인", "쿠폰", "이벤트 참여", "추천인", "레퍼럴"]
+promotion_markers_en = ["ad", "sponsored", "discount", "coupon", "giveaway", "referral", "affiliate", "promo code"]
+tutorial_markers_ko = ["튜토리얼", "사용법", "하는 법", "가이드", "초보자"]
+tutorial_markers_en = ["tutorial", "how to", "guide", "step by step", "beginner"]
+reaction_markers_ko = ["내 생각", "개인 의견", "소감", "반응", "밈"]
+reaction_markers_en = ["my take", "opinion", "thoughts", "reaction", "meme"]

@@ -4,11 +4,12 @@ Telegram의 고정된 여섯 소스 채널(`testingcatalog`, `ai_masters_communi
 
 ## 자동 사용자 흐름
 
-1. `newsbot-collect.timer`가 수집 worker를 실행합니다. 페이지/chunk가 성공적으로 commit된 뒤에만 durable cursor가 전진하므로 crash, cap, timeout 뒤에도 이어서 수집합니다.
-2. `newsbot-telegram.timer`가 후보 알림, callback polling, 선택된 작업의 생성 알림과 검토 알림을 처리합니다. 후보의 `[제작]`은 인간의 생성 허가일 뿐입니다.
-3. Codex는 별도의 기존 `newsbot-generate-codex.timer`가 한 activation에 frozen job 하나만 처리합니다. 이 타이머의 역할과 containment는 변경하지 않습니다.
-4. 검토자는 정확한 current draft에서 `[시트 전달]`을 승인합니다. 승인 transaction은 immutable Sheets handoff만 만들며 원격 호출은 하지 않습니다.
-5. `newsbot-sheets.timer`가 승인된 handoff 하나를 전달합니다. document metadata가 정확히 일치하면 zero-write 재사용하며, ambiguous Telegram/Sheets 효과는 자동 재전송하지 않습니다.
+1. `newsbot-collect.timer`는 service inactivity 뒤 매시간 수집 worker를 실행합니다. 페이지/chunk가 성공적으로 commit된 뒤에만 durable cursor가 전진하므로 crash, cap, timeout 뒤에도 이어서 수집합니다. 기존 고정 여섯 채널 토폴로지는 변하지 않습니다.
+2. 기존 ranking hard filter 뒤의 결정론적 offline `news_policy_v1`가 source-local 근거로 후보를 `definite_news`, `trusted_analysis`, `ambiguous`, `non_news`로 분류합니다. 앞의 둘만 즉시 Telegram 승인 digest/button을 만들고, `ambiguous`는 callback/button 없이 immutable first-wins 제목을 Seoul 정오 window에 보관하며, `non_news`는 조용히 종료합니다.
+3. `newsbot-telegram.timer`는 후보 알림, callback polling, 선택된 작업의 생성 알림과 검토 알림을 처리합니다. 정오 intent는 SQLite write lock을 얻은 뒤 표본화한 Asia/Seoul 시간이 `[12:00:00,13:00:00)`일 때만 commit됩니다. 정확히 13:00에는 미생성 window를 `skipped`로 끝내며 catch-up이나 roll-forward는 없습니다. 제때 commit된 intent는 13:00 뒤에도 durable outbox로 안전하게 dispatch/retry합니다.
+4. Codex는 별도의 기존 `newsbot-generate-codex.timer`가 한 activation에 frozen job 하나만 처리합니다. 이 타이머의 역할과 containment는 변경하지 않습니다.
+5. 검토자는 정확한 current draft에서 `[시트 전달]`을 승인합니다. 승인 transaction은 immutable Sheets handoff만 만들며 원격 호출은 하지 않습니다.
+6. `newsbot-sheets.timer`가 승인된 handoff 하나를 전달합니다. document metadata가 정확히 일치하면 zero-write 재사용하며, ambiguous Telegram/Sheets 효과는 자동 재전송하지 않습니다.
 
 생성 성공이나 후보 선택은 최종 전달 승인이 아닙니다. Figma/Instagram 자동화, 기존 행 변경, 다른 Sheets 탭 변경은 범위 밖입니다.
 
@@ -37,6 +38,7 @@ newsbot automation-cutover-apply --db /var/lib/newsbot/newsbot.db --proposal-id 
 - `newsbot-sheets.service` / `newsbot-sheets.timer`
 
 기존 `newsbot-generate-codex.service` / `newsbot-generate-codex.timer`는 별도 one-job Codex 경계이며 위 여섯 unit으로 대체하거나 합치지 않습니다.
+`news_policy_v1`의 신뢰/분석/근거는 같은 observation 안에서만 성립하고 AI, network, host clock에 의존하지 않습니다. noon digest는 frozen 제목과 줄바꿈만 사용하며 button, 본문, source, reason을 포함하지 않습니다. accepted Telegram chunk는 terminal evidence로 절대 blind resend하지 않으며, ambiguous 또는 accepted-prefix partial effect는 immutable operator resolution이 필요합니다.
 
 ## 안전한 운영
 
@@ -44,4 +46,4 @@ newsbot automation-cutover-apply --db /var/lib/newsbot/newsbot.db --proposal-id 
 
 non-Codex 세 worker는 모두 `newsbot` UID, `/etc/newsbot/newsbot.env`, Telethon session, SQLite 및 worker locks를 공유합니다. 이들은 cross-unit isolation이나 `PrivateMounts` 보안 경계를 제공하지 않습니다. Codex만 login-shell 없는 별도 `newsbot-codex` UID에서 owner-only `CODEX_HOME`으로 device auth/provider credential을 보유하고, root-owned no-argument containment runner가 immutable authority/receipt를 attest한 activation만 그 UID에 전달하는 두 단계 경계입니다. immutable resume operation에 FK로 연결된 release row `COUNT(*)`를 권위로 유지하며 Codex token/API key를 `newsbot` 환경 파일에 넣거나 출력하지 않습니다.
 
-상세 설치, monitoring, drain, recovery와 forward-only rollback은 [운영 가이드](docs/operations.md), 배포용 초보자 가이드는 `vps-deployment-guide.html`을 참조합니다. 최초 cutover는 switch 뒤 `init-db`로 schema를 만들고, 이후 post-007 release/rollback은 compatible forward switch만 사용하며 immutable history를 restore/delete/update하지 않습니다.
+상세 설치, monitoring, drain, recovery와 forward-only rollback은 [운영 가이드](docs/operations.md), 배포용 초보자 가이드는 `vps-deployment-guide.html`을 참조합니다. 최초 cutover는 switch 뒤 `init-db`로 schema를 만들고, 이후 migration-008 release/rollback은 008-compatible runtime으로의 forward switch 및 append-only release/config binding만 사용하며 immutable history를 restore/delete/update하지 않습니다.

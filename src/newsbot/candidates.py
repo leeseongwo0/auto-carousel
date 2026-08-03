@@ -785,9 +785,11 @@ class CandidateApprovalService:
         if isinstance(urls, list):
             title = next(
                 (
-                    str(item["title"]).strip()
+                    " ".join(str(item["title"]).split())
                     for item in urls
-                    if isinstance(item, dict) and isinstance(item.get("title"), str) and str(item["title"]).strip()
+                    if isinstance(item, dict)
+                    and isinstance(item.get("title"), str)
+                    and " ".join(str(item["title"]).split())
                 ),
                 "",
             )

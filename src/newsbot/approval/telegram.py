@@ -76,6 +76,24 @@ def split_telegram_text(text: str, *, limit: int = TELEGRAM_TEXT_LIMIT) -> tuple
         chunks.append(text[start:split_at])
         start = split_at
     return tuple(chunks)
+def split_telegram_titles(titles: tuple[str, ...], *, limit: int = TELEGRAM_TEXT_LIMIT) -> tuple[str, ...]:
+    """Pack immutable titles at title boundaries with newline separators."""
+    if not titles:
+        raise ValueError("noon digest requires titles")
+    chunks: list[str] = []
+    current = ""
+    for title in titles:
+        if not title or _utf16_units(title) > limit:
+            raise ValueError("noon title exceeds Telegram UTF-16 limit")
+        candidate = title if not current else current + "\n" + title
+        if _utf16_units(candidate) > limit:
+            chunks.append(current)
+            current = title
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    return tuple(chunks)
 
 
 @dataclass(frozen=True, slots=True)

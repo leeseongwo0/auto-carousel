@@ -7,13 +7,37 @@ import sqlite3
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 from threading import RLock
 from typing import Any, cast
+from zoneinfo import ZoneInfo
 
 from .collectors.base import Engagement, Media, MessageKind, SourceObservation, UrlCandidate
+
+_OUTBOX_V007_COLUMNS = ("id", "audience_binding_id", "cutover_id", "notification_kind", "candidate_id", "generation_id", "defer_authority_id", "source_set_key", "stage", "subject_digest", "state", "created_at", "claimed_at", "terminal_at")
+_OUTBOX_TRIGGER_NAMES = ("telegram_outbox_identity_immutable", "telegram_outbox_no_delete", "telegram_outbox_transitions", "telegram_outbox_terminal_immutable")
+_OUTBOX_INDEX_NAMES = ("telegram_notification_candidate_unique", "telegram_notification_review_unique", "telegram_notification_resume_unique")
+_OUTBOX_DEPENDENTS = (
+    ("callback_tokens", "notification_id"),
+    ("automation_defer_authority", "notification_id"),
+    ("telegram_notification_chunks", "notification_id"),
+    ("telegram_notification_events", "notification_id"),
+    ("telegram_notification_resolutions", "notification_id"),
+)
+_OUTBOX_V008_DDL = """CREATE TABLE telegram_notification_outbox_v008 (
+id INTEGER PRIMARY KEY, audience_binding_id INTEGER NOT NULL REFERENCES telegram_audience_bindings(id) ON DELETE RESTRICT, cutover_id INTEGER NOT NULL REFERENCES automation_cutovers(id) ON DELETE RESTRICT,
+notification_kind TEXT NOT NULL CHECK(notification_kind IN ('candidate','review','resume','noon_digest')), candidate_id INTEGER REFERENCES candidates(id) ON DELETE RESTRICT, generation_id INTEGER REFERENCES generations(id) ON DELETE RESTRICT, defer_authority_id INTEGER REFERENCES automation_defer_authority(id) ON DELETE RESTRICT, source_set_key TEXT, stage TEXT CHECK(stage IN ('selection','review')), ambiguous_window_id INTEGER REFERENCES ambiguous_digest_windows(id) ON DELETE RESTRICT, subject_digest TEXT NOT NULL CHECK(length(subject_digest)=64), state TEXT NOT NULL CHECK(state IN ('pending','claimed','sending','sent','canceled','ambiguous','partial_manual_required','resolved_delivered','resolved_abandoned')), created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, claimed_at TEXT, terminal_at TEXT,
+CHECK((notification_kind='candidate' AND candidate_id IS NOT NULL AND source_set_key IS NOT NULL AND generation_id IS NULL AND defer_authority_id IS NULL AND ambiguous_window_id IS NULL AND stage IS NULL) OR (notification_kind='review' AND generation_id IS NOT NULL AND candidate_id IS NULL AND defer_authority_id IS NULL AND ambiguous_window_id IS NULL AND source_set_key IS NULL AND stage IS NULL) OR (notification_kind='resume' AND defer_authority_id IS NOT NULL AND stage IS NOT NULL AND candidate_id IS NULL AND generation_id IS NULL AND ambiguous_window_id IS NULL AND source_set_key IS NULL) OR (notification_kind='noon_digest' AND ambiguous_window_id IS NOT NULL AND candidate_id IS NULL AND generation_id IS NULL AND defer_authority_id IS NULL AND source_set_key IS NULL AND stage IS NULL)))"""
+_OUTBOX_V008_OBJECTS = """CREATE UNIQUE INDEX telegram_notification_candidate_unique ON telegram_notification_outbox(audience_binding_id,source_set_key) WHERE notification_kind='candidate';
+CREATE UNIQUE INDEX telegram_notification_review_unique ON telegram_notification_outbox(audience_binding_id,generation_id) WHERE notification_kind='review';
+CREATE UNIQUE INDEX telegram_notification_resume_unique ON telegram_notification_outbox(audience_binding_id,defer_authority_id,stage) WHERE notification_kind='resume';
+CREATE UNIQUE INDEX telegram_notification_noon_unique ON telegram_notification_outbox(audience_binding_id,ambiguous_window_id) WHERE notification_kind='noon_digest';
+CREATE TRIGGER telegram_outbox_identity_immutable BEFORE UPDATE OF id,audience_binding_id,cutover_id,notification_kind,candidate_id,generation_id,defer_authority_id,source_set_key,stage,ambiguous_window_id,subject_digest,created_at ON telegram_notification_outbox WHEN NEW.id IS NOT OLD.id OR NEW.audience_binding_id IS NOT OLD.audience_binding_id OR NEW.cutover_id IS NOT OLD.cutover_id OR NEW.notification_kind IS NOT OLD.notification_kind OR NEW.candidate_id IS NOT OLD.candidate_id OR NEW.generation_id IS NOT OLD.generation_id OR NEW.defer_authority_id IS NOT OLD.defer_authority_id OR NEW.source_set_key IS NOT OLD.source_set_key OR NEW.stage IS NOT OLD.stage OR NEW.ambiguous_window_id IS NOT OLD.ambiguous_window_id OR NEW.subject_digest IS NOT OLD.subject_digest OR NEW.created_at IS NOT OLD.created_at BEGIN SELECT RAISE(ABORT,'notification identity is immutable'); END;
+CREATE TRIGGER telegram_outbox_no_delete BEFORE DELETE ON telegram_notification_outbox BEGIN SELECT RAISE(ABORT,'notifications cannot be deleted'); END;
+CREATE TRIGGER telegram_outbox_transitions BEFORE UPDATE OF state ON telegram_notification_outbox WHEN NOT ((OLD.state IN ('pending','claimed','sending') AND NEW.state IN ('pending','claimed','sending','sent','canceled','ambiguous','partial_manual_required')) OR (OLD.state IN ('sent','ambiguous','partial_manual_required') AND NEW.state IN ('resolved_delivered','resolved_abandoned'))) BEGIN SELECT RAISE(ABORT,'invalid notification transition'); END;
+CREATE TRIGGER telegram_outbox_terminal_immutable BEFORE UPDATE ON telegram_notification_outbox WHEN OLD.state IN ('sent','canceled','resolved_delivered','resolved_abandoned') BEGIN SELECT RAISE(ABORT,'terminal notification immutable'); END;"""
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
@@ -130,6 +154,9 @@ class Storage:
                         "h.target_binding_id" if "target_binding_id" in handoff_columns else "b.target_binding_id"
                     )
                     script = script.replace("__HANDOFF_TARGET_EXPR__", target_expression)
+                if migration.name == "008_hourly_news_eligibility.sql":
+                    self._migrate_hourly_news_eligibility(migration, script)
+                    continue
                 version = migration.name.replace("'", "''")
                 foreign_keys_disabled = migration.name in {
                     "002_canonical_authority.sql",
@@ -217,6 +244,236 @@ class Storage:
         if installed != expected:
             raise RuntimeError("unsupported applied 003 Sheets authority schema; automatic upgrade refused")
 
+    def _migrate_hourly_news_eligibility(self, migration: Path, script: str) -> None:
+        if self._connection.in_transaction or not int(self._connection.execute("PRAGMA foreign_keys").fetchone()[0]):
+            raise RuntimeError("Migration 008 requires an idle connection with foreign keys ON")
+        oracle = self._build_hourly_news_oracle(migration.parent, script)
+        if self._outbox_schema_attestation(self._connection) != oracle["v007"]:
+            raise RuntimeError("Unsupported migration-007 outbox schema; automatic upgrade refused")
+        foreign_keys = int(self._connection.execute("PRAGMA foreign_keys").fetchone()[0])
+        legacy = int(self._connection.execute("PRAGMA legacy_alter_table").fetchone()[0])
+        try:
+            self._connection.execute("PRAGMA foreign_keys=OFF")
+            if int(self._connection.execute("PRAGMA foreign_keys").fetchone()[0]) != 0:
+                raise RuntimeError("Migration 008 could not disable foreign keys")
+            self._connection.execute("PRAGMA legacy_alter_table=ON")
+            if int(self._connection.execute("PRAGMA legacy_alter_table").fetchone()[0]) != 1:
+                raise RuntimeError("Migration 008 could not enable legacy alter table")
+            self._connection.execute("BEGIN IMMEDIATE")
+            if self._outbox_schema_attestation(self._connection) != oracle["v007"]:
+                raise RuntimeError("Unsupported migration-007 outbox schema; automatic upgrade refused")
+            parity = self._outbox_history_parity(self._connection)
+            columns = ",".join(_OUTBOX_V007_COLUMNS)
+            self._execute_sql_script(script)
+            self._connection.execute(_OUTBOX_V008_DDL)
+            self._connection.execute(
+                f"INSERT INTO telegram_notification_outbox_v008({columns},ambiguous_window_id) "
+                f"SELECT {columns},NULL FROM telegram_notification_outbox"
+            )
+            if self._table_digest(self._connection, "telegram_notification_outbox_v008", _OUTBOX_V007_COLUMNS) != parity["telegram_notification_outbox"]:
+                raise RuntimeError("Migration 008 outbox copy parity failed")
+            for name in _OUTBOX_TRIGGER_NAMES + _OUTBOX_INDEX_NAMES:
+                kind = "TRIGGER" if name in _OUTBOX_TRIGGER_NAMES else "INDEX"
+                self._connection.execute(f"DROP {kind} {name}")
+            self._connection.execute("DROP TABLE telegram_notification_outbox")
+            self._connection.execute("ALTER TABLE telegram_notification_outbox_v008 RENAME TO telegram_notification_outbox")
+            self._execute_sql_script(_OUTBOX_V008_OBJECTS)
+            self._assert_outbox_history_parity(parity, "pre-commit")
+            self._assert_inbound_outbox_rows()
+            self._assert_hourly_news_v008_schema(oracle["v008"])
+            self._assert_no_foreign_key_violations()
+            self._connection.execute("INSERT INTO schema_migrations(version) VALUES(?)", (migration.name,))
+            self._assert_no_foreign_key_violations()
+            self._connection.commit()
+            self._assert_outbox_history_parity(parity, "post-commit")
+            self._assert_inbound_outbox_rows()
+            self._assert_hourly_news_v008_schema(oracle["v008"])
+            self._assert_no_foreign_key_violations()
+        except BaseException:
+            self._connection.rollback()
+            raise
+        finally:
+            self._connection.execute(f"PRAGMA legacy_alter_table={legacy}")
+            self._connection.execute(f"PRAGMA foreign_keys={foreign_keys}")
+            if int(self._connection.execute("PRAGMA foreign_keys").fetchone()[0]) != 1:
+                raise RuntimeError("Migration 008 did not restore foreign keys")
+
+    def _build_hourly_news_oracle(self, migration_dir: Path, script: str) -> dict[str, object]:
+        """Build supported 007 and exact 008 shapes from the bundled migrations."""
+        oracle = sqlite3.connect(":memory:")
+        oracle.row_factory = sqlite3.Row
+        oracle.create_function("automation_defer_authorized", 3, lambda *_: 0)
+        oracle.create_function("sha256_hex", 1, lambda value: sha256(bytes(value)).hexdigest(), deterministic=True)
+        oracle.create_function("lease_owner_hash", 0, lambda: None)
+        oracle.create_function("lease_fence", 0, lambda: None)
+        oracle.create_function("aware_epoch_us", 1, aware_epoch_us, deterministic=True)
+        try:
+            for path in sorted(migration_dir.glob("00[1-7]_*.sql")):
+                sql = path.read_text(encoding="utf-8")
+                if path.name in {"002_canonical_authority.sql", "004_sheets_authority_upgrade.sql"}:
+                    oracle.execute("PRAGMA foreign_keys=OFF")
+                if path.name == "004_sheets_authority_upgrade.sql":
+                    sql = sql.replace("__HANDOFF_TARGET_EXPR__", "b.target_binding_id")
+                oracle.executescript(sql)
+                oracle.execute("INSERT INTO schema_migrations(version) VALUES(?)", (path.name,))
+                oracle.commit()
+                if path.name in {"002_canonical_authority.sql", "004_sheets_authority_upgrade.sql"}:
+                    oracle.execute("PRAGMA foreign_keys=ON")
+            v007 = self._outbox_schema_attestation(oracle)
+            oracle.execute("PRAGMA foreign_keys=OFF")
+            oracle.execute("PRAGMA legacy_alter_table=ON")
+            oracle.execute("BEGIN IMMEDIATE")
+            self._execute_sql_script_on(oracle, script)
+            oracle.execute(_OUTBOX_V008_DDL)
+            for name in _OUTBOX_TRIGGER_NAMES + _OUTBOX_INDEX_NAMES:
+                oracle.execute(f"DROP {'TRIGGER' if name in _OUTBOX_TRIGGER_NAMES else 'INDEX'} {name}")
+            oracle.execute("DROP TABLE telegram_notification_outbox")
+            oracle.execute("ALTER TABLE telegram_notification_outbox_v008 RENAME TO telegram_notification_outbox")
+            self._execute_sql_script_on(oracle, _OUTBOX_V008_OBJECTS)
+            return {"v007": v007, "v008": self._schema_inventory(oracle)}
+        finally:
+            oracle.close()
+
+    def _outbox_schema_attestation(self, connection: sqlite3.Connection) -> tuple[object, ...]:
+        columns = tuple(tuple(row) for row in connection.execute("PRAGMA table_info(telegram_notification_outbox)"))
+        foreign_keys = tuple(tuple(row) for row in connection.execute("PRAGMA foreign_key_list(telegram_notification_outbox)"))
+        indexes = tuple(tuple(row) for row in connection.execute("PRAGMA index_list(telegram_notification_outbox)"))
+        objects = self._schema_inventory(connection)
+        inbound = tuple(
+            (table, column)
+            for table, column in _OUTBOX_DEPENDENTS
+            if any(str(row["table"]) == "telegram_notification_outbox" and str(row["from"]) == column
+                   for row in connection.execute(f"PRAGMA foreign_key_list({table})"))
+        )
+        return columns, foreign_keys, indexes, objects, inbound
+
+    def _schema_inventory(self, connection: sqlite3.Connection) -> tuple[tuple[object, ...], ...]:
+        hourly_tables = (
+            "telegram_notification_outbox",
+            "automation_release_config_bindings",
+            "news_policy_evaluations",
+            "ambiguous_digest_windows",
+            "ambiguous_digest_items",
+        )
+        marks = ",".join("?" for _ in hourly_tables)
+        return tuple(
+            tuple(row)
+            for row in connection.execute(
+                "SELECT type,name,tbl_name,sql FROM sqlite_master "
+                "WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' AND name != 'schema_migrations' "
+                f"AND (tbl_name IN ({marks}) OR instr(lower(sql),'telegram_notification_outbox')>0) "
+                "ORDER BY type,name",
+                hourly_tables,
+            )
+        )
+
+    def _outbox_history_parity(self, connection: sqlite3.Connection) -> dict[str, tuple[int, str]]:
+        return {
+            "telegram_notification_outbox": self._table_digest(connection, "telegram_notification_outbox", _OUTBOX_V007_COLUMNS),
+            **{table: self._table_digest(connection, table) for table, _ in _OUTBOX_DEPENDENTS},
+        }
+
+    def _table_digest(self, connection: sqlite3.Connection, table: str, columns: Sequence[str] | None = None) -> tuple[int, str]:
+        selected = tuple(columns or tuple(str(row["name"]) for row in connection.execute(f"PRAGMA table_info({table})")))
+        rows = connection.execute(f"SELECT {','.join(selected)} FROM {table} ORDER BY id").fetchall()
+        encoded = json.dumps([list(row) for row in rows], ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
+        return len(rows), sha256(encoded).hexdigest()
+
+    def _assert_outbox_history_parity(self, expected: dict[str, tuple[int, str]], stage: str) -> None:
+        actual = self._outbox_history_parity(self._connection)
+        if actual != expected:
+            raise RuntimeError(f"Migration 008 {stage} history parity failed")
+
+    def _assert_inbound_outbox_rows(self) -> None:
+        for table, column in _OUTBOX_DEPENDENTS:
+            unresolved = self._connection.execute(
+                f"SELECT COUNT(*) FROM {table} dependent LEFT JOIN telegram_notification_outbox outbox "
+                f"ON outbox.id=dependent.{column} WHERE dependent.{column} IS NOT NULL AND outbox.id IS NULL"
+            ).fetchone()[0]
+            if unresolved:
+                raise RuntimeError(f"Migration 008 orphaned {table}.{column}")
+
+    def _assert_hourly_news_v008_schema(self, expected: object) -> None:
+        if self._schema_inventory(self._connection) != expected:
+            raise RuntimeError("Migration 008 schema parity failed")
+
+    def _assert_no_foreign_key_violations(self) -> None:
+        if self._connection.execute("PRAGMA foreign_key_check").fetchall():
+            raise RuntimeError("Migration 008 introduced foreign key violations")
+
+    @staticmethod
+    def _execute_sql_script_on(connection: sqlite3.Connection, script: str) -> None:
+        statement = ""
+        for line in script.splitlines(keepends=True):
+            statement += line
+            if sqlite3.complete_statement(statement):
+                connection.execute(statement)
+                statement = ""
+
+    def _execute_sql_script(self, script: str) -> None:
+        statement = ""
+        for line in script.splitlines(keepends=True):
+            statement += line
+            if sqlite3.complete_statement(statement):
+                self._connection.execute(statement)
+                statement = ""
+
+    def create_release_config_binding(self, activation_id: int, config_digest: str, news_policy_version: str,
+                                      canonical_policy_json: str, *, created_at: datetime) -> int:
+        if len(config_digest) != 64:
+            raise ValueError("config_digest must be a SHA-256 digest")
+        with self.transaction() as connection:
+            return cast(int, connection.execute(
+                "INSERT INTO automation_release_config_bindings(activation_id,config_digest,news_policy_version,canonical_policy_json,created_at) VALUES(?,?,?,?,?)",
+                (activation_id, config_digest, news_policy_version, canonical_policy_json, _timestamp(created_at)),
+            ).lastrowid)
+
+    def record_news_policy_evaluation(self, candidate_evaluation_id: int, config_binding_id: int, outcome: str,
+                                      reason: str, rationale_json: str, *, created_at: datetime) -> int:
+        with self.transaction() as connection:
+            return self._record_news_policy_evaluation(
+                connection,
+                candidate_evaluation_id,
+                config_binding_id,
+                outcome,
+                reason,
+                rationale_json,
+                created_at=created_at,
+            )
+
+    @staticmethod
+    def _record_news_policy_evaluation(
+        connection: sqlite3.Connection,
+        candidate_evaluation_id: int,
+        config_binding_id: int,
+        outcome: str,
+        reason: str,
+        rationale_json: str,
+        *,
+        created_at: datetime,
+    ) -> int:
+        return cast(int, connection.execute(
+            "INSERT INTO news_policy_evaluations(candidate_evaluation_id,config_binding_id,outcome,reason,rationale_json,created_at) VALUES(?,?,?,?,?,?)",
+            (candidate_evaluation_id, config_binding_id, outcome, reason, rationale_json, _timestamp(created_at)),
+        ).lastrowid)
+
+    def create_ambiguous_digest_window(self, scheduled_local_date: date, config_binding_id: int, *,
+                                       created_at: datetime) -> int:
+        opens_at = datetime.combine(scheduled_local_date, datetime.min.time(), ZoneInfo("Asia/Seoul")).replace(hour=12)
+        with self.transaction() as connection:
+            return cast(int, connection.execute(
+                "INSERT INTO ambiguous_digest_windows(scheduled_local_date,config_binding_id,opens_at,closes_at,state,created_at) VALUES(?,?,?,?,?,?)",
+                (scheduled_local_date.isoformat(), config_binding_id, _timestamp(opens_at), _timestamp(opens_at + timedelta(hours=1)), "collecting", _timestamp(created_at)),
+            ).lastrowid)
+
+    def add_ambiguous_digest_item(self, window_id: int, news_policy_evaluation_id: int, source_post_version_id: int,
+                                  normalized_title: str, ordering_timestamp: datetime, story_key: str, content_key: str,
+                                  *, created_at: datetime) -> int:
+        with self.transaction() as connection:
+            return cast(int, connection.execute(
+                "INSERT INTO ambiguous_digest_items(window_id,news_policy_evaluation_id,source_post_version_id,normalized_title,ordering_timestamp,story_key,content_key,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                (window_id, news_policy_evaluation_id, source_post_version_id, normalized_title, _timestamp(ordering_timestamp), story_key, content_key, _timestamp(created_at)),
+            ).lastrowid)
     def _authorize_lease(self, owner_token: str, fence: int | None = None) -> None:
         """Authorize one transaction to write events for the named lease owner."""
         self._lease_authority_hash = sha256(owner_token.encode()).hexdigest()

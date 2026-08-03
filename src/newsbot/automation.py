@@ -7,6 +7,7 @@ these APIs and perform remote work only after the prepare transaction commits.
 from __future__ import annotations
 
 import fcntl
+import json
 import os
 import sqlite3
 import stat
@@ -20,6 +21,7 @@ from hmac import new as hmac_new
 from pathlib import Path
 from secrets import token_urlsafe
 from typing import Any, Literal, cast
+from zoneinfo import ZoneInfo
 
 from .storage import Storage
 
@@ -175,6 +177,111 @@ class AutomationAuthority:
             (int(row["audience_binding_id"]), candidate_id, source_set_key, subject_digest),
         )
         return cursor.rowcount == 1
+    @staticmethod
+    def validate_active_config_binding(connection: sqlite3.Connection, config: object) -> int:
+        """Require the latest immutable release/config pair before worker mutation."""
+        policy = getattr(config, "news_policy", None)
+        if policy is None:
+            raise AutomationDriftError("runtime news policy is unavailable")
+        fields = getattr(policy, "__dataclass_fields__", {})
+        payload = json.dumps(
+            {name: getattr(policy, name) for name in sorted(fields)},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        row = connection.execute(
+            "SELECT binding.id,binding.config_digest,binding.news_policy_version,binding.canonical_policy_json "
+            "FROM automation_release_activations activation "
+            "LEFT JOIN automation_release_config_bindings binding ON binding.activation_id=activation.id "
+            "WHERE activation.cutover_id=1 ORDER BY activation.id DESC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            raise AutomationDriftError("runtime release activation is unavailable")
+        if row["id"] is None:
+            raise AutomationDriftError("runtime release/config binding is missing")
+        if (
+            not compare_digest(str(row["config_digest"]), str(getattr(config, "digest", "")))
+            or not compare_digest(str(row["news_policy_version"]), str(getattr(policy, "version", "")))
+            or str(row["canonical_policy_json"]) != payload
+        ):
+            raise AutomationDriftError("runtime release/config binding drifted")
+        return int(row["id"])
+
+    @staticmethod
+    def enqueue_noon_digest_notification(
+        connection: sqlite3.Connection,
+        *,
+        window_id: int,
+        subject_digest: str,
+        committed_at: datetime,
+    ) -> bool:
+        """Persist a noon intent with its post-write-lock admission instant."""
+        row = connection.execute("SELECT audience_binding_id FROM automation_cutovers WHERE id=1").fetchone()
+        if row is None:
+            return False
+        cursor = connection.execute(
+            "INSERT OR IGNORE INTO telegram_notification_outbox("
+            "audience_binding_id,cutover_id,notification_kind,ambiguous_window_id,subject_digest,state,created_at"
+            ") VALUES(?,1,'noon_digest',?,?,'pending',?)",
+            (int(row["audience_binding_id"]), window_id, subject_digest, _timestamp(committed_at)),
+        )
+        return cursor.rowcount == 1
+
+    def seal_noon_window(self, config: object, *, now: datetime | Callable[[], datetime]) -> None:
+        """Linearize Seoul noon admission after acquiring SQLite's write lock."""
+        with self.storage.transaction() as connection:
+            sampled_now = now() if callable(now) else now
+            if connection.execute("SELECT 1 FROM automation_cutovers WHERE id=1").fetchone() is None:
+                return
+            binding_id = self.validate_active_config_binding(connection, config)
+            if binding_id == 0:
+                return
+            local = sampled_now.astimezone(ZoneInfo("Asia/Seoul"))
+            today = local.date()
+            connection.execute(
+                "UPDATE ambiguous_digest_windows SET state='skipped' "
+                "WHERE scheduled_local_date<? AND state='collecting'",
+                (today.isoformat(),),
+            )
+            row = connection.execute(
+                "SELECT id,state,config_binding_id FROM ambiguous_digest_windows WHERE scheduled_local_date=?",
+                (today.isoformat(),),
+            ).fetchone()
+            in_window = (local.hour == 12)
+            if row is None:
+                state = "empty" if in_window else ("skipped" if local.hour >= 13 else None)
+                if state is not None:
+                    opens = datetime.combine(today, datetime.min.time(), ZoneInfo("Asia/Seoul")).replace(hour=12)
+                    connection.execute(
+                        "INSERT INTO ambiguous_digest_windows(scheduled_local_date,config_binding_id,opens_at,closes_at,state,created_at) "
+                        "VALUES(?,?,?,?,?,?)",
+                        (today.isoformat(), binding_id, _timestamp(opens), _timestamp(opens + timedelta(hours=1)), state, _timestamp(sampled_now)),
+                    )
+                return
+            if int(row["config_binding_id"]) != binding_id:
+                raise AutomationDriftError("noon window binding drifted")
+            if str(row["state"]) != "collecting":
+                return
+            if not in_window:
+                if local.hour >= 13:
+                    connection.execute("UPDATE ambiguous_digest_windows SET state='skipped' WHERE id=?", (int(row["id"]),))
+                return
+            items = connection.execute(
+                "SELECT id FROM ambiguous_digest_items WHERE window_id=? ORDER BY ordering_timestamp,id",
+                (int(row["id"]),),
+            ).fetchall()
+            if not items:
+                connection.execute("UPDATE ambiguous_digest_windows SET state='empty' WHERE id=?", (int(row["id"]),))
+                return
+            subject = sha256(f"noon:{int(row['id'])}".encode()).hexdigest()
+            self.enqueue_noon_digest_notification(
+                connection,
+                window_id=int(row["id"]),
+                subject_digest=subject,
+                committed_at=sampled_now,
+            )
+            connection.execute("UPDATE ambiguous_digest_windows SET state='queued' WHERE id=?", (int(row["id"]),))
 
     @staticmethod
     def enqueue_review_notification(
@@ -512,6 +619,7 @@ class AutomationAuthority:
             "SELECT COUNT(*) FROM automation_stream_runs WHERE finished_at IS NULL",
             "SELECT COUNT(*) FROM telegram_notification_outbox "
             "WHERE state IN ('pending','claimed','sending','ambiguous','partial_manual_required')",
+            "SELECT COUNT(*) FROM ambiguous_digest_windows WHERE state='collecting'",
         )
         return all(int(connection.execute(query).fetchone()[0]) == 0 for query in checks)
 
@@ -656,6 +764,7 @@ class AutomationAuthority:
         *,
         audience_binding_id: int,
         release_digest: str,
+        config: object | None = None,
         now: datetime,
         validate: Callable[[], bool],
     ) -> dict[str, object]:
@@ -713,33 +822,69 @@ class AutomationAuthority:
                     proposal["callback_offset"],
                 ),
             )
-            connection.execute(
+            activation = connection.execute(
                 "INSERT INTO automation_release_activations(cutover_id,prior_activation_id,release_digest,activated_at) "
                 "VALUES(1,NULL,?,?)",
                 (release_digest, _timestamp(now)),
             )
+            if config is not None:
+                if activation.lastrowid is None:
+                    raise AutomationDriftError("initial runtime activation failed")
+                config_any: Any = config
+                policy: Any = getattr(config_any, "news_policy", None)
+                fields = getattr(policy, "__dataclass_fields__", {}) if policy is not None else {}
+                canonical = json.dumps(
+                    {name: getattr(policy, name) for name in sorted(fields)},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                connection.execute(
+                    "INSERT INTO automation_release_config_bindings("
+                    "activation_id,config_digest,news_policy_version,canonical_policy_json,created_at"
+                    ") VALUES(?,?,?,?,?)",
+                    (
+                        int(activation.lastrowid),
+                        str(config_any.digest),
+                        str(policy.version),
+                        canonical,
+                        _timestamp(now),
+                    ),
+                )
         return {"changed": True, "status": "active"}
 
     def activate_release(
         self,
         release_digest: str,
         *,
+        config: object,
         now: datetime,
         validate: Callable[[], bool],
     ) -> dict[str, object]:
-        """Append a quiescent compatible runtime activation without rewriting cutover baselines."""
+        """Append the latest immutable release/config pair under quiescence."""
         _digest(release_digest)
+        config_any: Any = config
+        policy: Any = getattr(config_any, "news_policy", None)
+        fields = getattr(policy, "__dataclass_fields__", {}) if policy is not None else {}
+        canonical = json.dumps(
+            {name: getattr(policy, name) for name in sorted(fields)},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
         with self.storage.transaction() as connection:
-            cutover = connection.execute("SELECT 1 FROM automation_cutovers WHERE id=1").fetchone()
-            if cutover is None:
-                raise AutomationDriftError("automation cutover is not active")
             latest = connection.execute(
-                "SELECT id,release_digest FROM automation_release_activations "
-                "WHERE cutover_id=1 ORDER BY id DESC LIMIT 1"
+                "SELECT activation.id,activation.release_digest,binding.config_digest FROM automation_release_activations activation "
+                "LEFT JOIN automation_release_config_bindings binding ON binding.activation_id=activation.id "
+                "WHERE activation.cutover_id=1 ORDER BY activation.id DESC LIMIT 1"
             ).fetchone()
             if latest is None:
                 raise AutomationDriftError("initial runtime activation is missing")
-            if compare_digest(str(latest["release_digest"]), release_digest):
+            if (
+                compare_digest(str(latest["release_digest"]), release_digest)
+                and latest["config_digest"] is not None
+                and compare_digest(str(latest["config_digest"]), str(getattr(config_any, "digest", "")))
+            ):
                 return {"activation_id": int(latest["id"]), "changed": False, "status": "active"}
             if not self._is_runtime_quiescent(connection) or not validate():
                 raise AutomationDriftError("runtime activation state drifted")
@@ -750,7 +895,14 @@ class AutomationAuthority:
             )
             if cursor.lastrowid is None:
                 raise AutomationDriftError("runtime activation failed")
-            return {"activation_id": int(cursor.lastrowid), "changed": True, "status": "active"}
+            activation_id = int(cursor.lastrowid)
+            connection.execute(
+                "INSERT INTO automation_release_config_bindings("
+                "activation_id,config_digest,news_policy_version,canonical_policy_json,created_at"
+                ") VALUES(?,?,?,?,?)",
+                (activation_id, str(config_any.digest), str(policy.version), canonical, _timestamp(now)),
+            )
+            return {"activation_id": activation_id, "changed": True, "status": "active"}
 
     def discover_notification(
         self, notification_id: int, lease: StreamLease, *, now: datetime
@@ -831,8 +983,9 @@ class AutomationAuthority:
             if cursor.rowcount != 1:
                 raise AutomationDriftError("attempt cannot be settled")
             notification = connection.execute(
-                "SELECT chunk.notification_id FROM telegram_chunk_attempts attempt "
-                "JOIN telegram_notification_chunks chunk ON chunk.id=attempt.chunk_id WHERE attempt.id=?",
+                "SELECT chunk.notification_id,outbox.notification_kind FROM telegram_chunk_attempts attempt "
+                "JOIN telegram_notification_chunks chunk ON chunk.id=attempt.chunk_id "
+                "JOIN telegram_notification_outbox outbox ON outbox.id=chunk.notification_id WHERE attempt.id=?",
                 (attempt_id,),
             ).fetchone()
             assert notification is not None
@@ -882,7 +1035,9 @@ class AutomationAuthority:
                     "WHERE chunk.notification_id=? AND attempt.state='accepted' LIMIT 1",
                     (notification_id,),
                 ).fetchone()
-                if accepted is None and outcome == "trusted_rejected" and retryable:
+                if outcome == "trusted_rejected" and retryable and (
+                    accepted is None or str(notification["notification_kind"]) == "noon_digest"
+                ):
                     state = "pending"
                 else:
                     state = (
@@ -891,12 +1046,8 @@ class AutomationAuthority:
                         else ("ambiguous" if outcome == "ambiguous" else "canceled")
                     )
                 connection.execute(
-                    "UPDATE telegram_notification_outbox SET state=?,terminal_at=? WHERE id=? AND state='sending'",
-                    (
-                        state,
-                        None if state == "pending" else _timestamp(now),
-                        notification_id,
-                    ),
+                    "UPDATE telegram_notification_outbox SET state=?,claimed_at=NULL,terminal_at=? WHERE id=? AND state='sending'",
+                    (state, None if state == "pending" else _timestamp(now), notification_id),
                 )
                 if outcome == "trusted_rejected":
                     connection.execute(

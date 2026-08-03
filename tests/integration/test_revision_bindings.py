@@ -1,6 +1,8 @@
 import sqlite3
 from datetime import UTC, datetime
 
+import pytest
+
 from newsbot.approval.scripted import ScriptedAction, ScriptedApprovalAdapter
 from newsbot.candidates import CandidateApprovalService
 from newsbot.pipeline import NewsPipeline
@@ -197,7 +199,7 @@ def test_a_to_b_to_a_uses_latest_observation_for_callback_currentness() -> None:
         assert not has_newer_material_source(connection, (versions[0],))
 
 
-def test_legacy_score_schema_upgrades_without_losing_evaluation(tmp_path) -> None:
+def test_unsupported_legacy_schema_is_rejected_before_hourly_migration(tmp_path) -> None:
     database = tmp_path / "legacy.sqlite"
     connection = sqlite3.connect(database)
     connection.executescript(
@@ -230,7 +232,16 @@ def test_legacy_score_schema_upgrades_without_losing_evaluation(tmp_path) -> Non
     connection.commit()
     connection.close()
 
-    storage = Storage.open(database)
-    row = storage.fetch_one("SELECT score, typeof(score), source_post_observation_id FROM candidate_evaluations")
-    assert tuple(row) == ("1.500000", "text", None)
-    assert storage.fetch_one("SELECT 1 FROM pragma_table_info('callback_tokens') WHERE name='revoked_at'") is not None
+    with pytest.raises(RuntimeError, match="Unsupported migration-007 outbox schema"):
+        Storage.open(database)
+
+    connection = sqlite3.connect(database)
+    try:
+        assert connection.execute(
+            "SELECT 1 FROM schema_migrations WHERE version='008_hourly_news_eligibility.sql'"
+        ).fetchone() is None
+        assert connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ambiguous_digest_windows'"
+        ).fetchone() is None
+    finally:
+        connection.close()

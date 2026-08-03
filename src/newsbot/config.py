@@ -70,6 +70,42 @@ _POLICY_KEYS = frozenset(
         "certainty_penalties",
     }
 )
+_NEWS_POLICY_KEYS = frozenset(
+    {
+        "version",
+        "timezone",
+        "noon_hour",
+        "noon_minute",
+        "activation_minutes",
+        "material_semantic_chars",
+        "material_sentence_chars",
+        "analysis_semantic_chars",
+        "analysis_sentence_chars",
+        "analysis_min_sentences",
+        "event_markers_ko",
+        "event_markers_en",
+        "analysis_markers_ko",
+        "analysis_markers_en",
+        "evidence_markers_ko",
+        "evidence_markers_en",
+        "promotion_markers_ko",
+        "promotion_markers_en",
+        "tutorial_markers_ko",
+        "tutorial_markers_en",
+        "reaction_markers_ko",
+        "reaction_markers_en",
+    }
+)
+_NEWS_POLICY_APPROVED_INTS = {
+    "noon_hour": 12,
+    "noon_minute": 0,
+    "activation_minutes": 60,
+    "material_semantic_chars": 80,
+    "material_sentence_chars": 40,
+    "analysis_semantic_chars": 160,
+    "analysis_sentence_chars": 40,
+    "analysis_min_sentences": 2,
+}
 _REQUIRED_CHANNEL_HANDLES = frozenset(
     {"testingcatalog", "ai_masters_community", "aipost", "coinnesskr", "exilist_official", "dolbikong"}
 )
@@ -180,6 +216,32 @@ class PolicyConfig:
     def weight_map(self) -> dict[str, Decimal]:
         return dict(self.weights)
 
+@dataclass(frozen=True, slots=True)
+class NewsPolicyConfig:
+    version: str
+    timezone: str
+    noon_hour: int
+    noon_minute: int
+    activation_minutes: int
+    material_semantic_chars: int
+    material_sentence_chars: int
+    analysis_semantic_chars: int
+    analysis_sentence_chars: int
+    analysis_min_sentences: int
+    event_markers_ko: tuple[str, ...]
+    event_markers_en: tuple[str, ...]
+    analysis_markers_ko: tuple[str, ...]
+    analysis_markers_en: tuple[str, ...]
+    evidence_markers_ko: tuple[str, ...]
+    evidence_markers_en: tuple[str, ...]
+    promotion_markers_ko: tuple[str, ...]
+    promotion_markers_en: tuple[str, ...]
+    tutorial_markers_ko: tuple[str, ...]
+    tutorial_markers_en: tuple[str, ...]
+    reaction_markers_ko: tuple[str, ...]
+    reaction_markers_en: tuple[str, ...]
+
+
 
 @dataclass(frozen=True, slots=True)
 class AppConfig:
@@ -189,6 +251,7 @@ class AppConfig:
     google_service_account_file: Path | None
     google_sheets_spreadsheet_id: str | None
     config_path: Path
+    news_policy: NewsPolicyConfig
 
     @property
     def enabled_channels(self) -> tuple[ChannelConfig, ...]:
@@ -241,6 +304,10 @@ class AppConfig:
                     (category, str(penalty), markers) for category, penalty, markers in self.policy.certainty_categories
                 ],
             },
+                "news_policy": {
+                    name: getattr(self.news_policy, name)
+                    for name in sorted(_NEWS_POLICY_KEYS)
+                },
         }
         return sha256(
             json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":")).encode()
@@ -449,6 +516,61 @@ def _parse_policy(raw: Any) -> PolicyConfig:
     return policy
 
 
+def _parse_news_policy(raw: Any) -> NewsPolicyConfig:
+    if not isinstance(raw, dict):
+        raise ConfigError("news_policy must be a table")
+    unknown = set(raw) - _NEWS_POLICY_KEYS
+    missing = _NEWS_POLICY_KEYS - set(raw)
+    if unknown or missing:
+        parts = []
+        if unknown:
+            parts.append("unknown keys: " + ", ".join(sorted(unknown)))
+        if missing:
+            parts.append("missing keys: " + ", ".join(sorted(missing)))
+        raise ConfigError("news_policy has " + "; ".join(parts))
+    if raw["version"] != "news_policy_v1":
+        raise ConfigError("news_policy.version must be news_policy_v1")
+    if raw["timezone"] != "Asia/Seoul":
+        raise ConfigError("news_policy.timezone must be Asia/Seoul")
+    values = {
+        name: _bounded_int(raw[name], f"news_policy.{name}", 0, 100_000)
+        for name in _NEWS_POLICY_APPROVED_INTS
+    }
+    for name, approved in _NEWS_POLICY_APPROVED_INTS.items():
+        if values[name] != approved:
+            raise ConfigError(f"news_policy.{name} must equal approved news_policy_v1 value {approved}")
+    if values["material_sentence_chars"] > values["material_semantic_chars"]:
+        raise ConfigError("news_policy.material_sentence_chars cannot exceed material_semantic_chars")
+    if values["analysis_sentence_chars"] > values["analysis_semantic_chars"]:
+        raise ConfigError("news_policy.analysis_sentence_chars cannot exceed analysis_semantic_chars")
+    marker_names = tuple(name for name in _NEWS_POLICY_KEYS if name.endswith("_ko") or name.endswith("_en"))
+    markers = {name: _string_list(raw[name], f"news_policy.{name}", required=True) for name in marker_names}
+    return NewsPolicyConfig(
+        version=raw["version"],
+        timezone=raw["timezone"],
+        noon_hour=values["noon_hour"],
+        noon_minute=values["noon_minute"],
+        activation_minutes=values["activation_minutes"],
+        material_semantic_chars=values["material_semantic_chars"],
+        material_sentence_chars=values["material_sentence_chars"],
+        analysis_semantic_chars=values["analysis_semantic_chars"],
+        analysis_sentence_chars=values["analysis_sentence_chars"],
+        analysis_min_sentences=values["analysis_min_sentences"],
+        event_markers_ko=markers["event_markers_ko"],
+        event_markers_en=markers["event_markers_en"],
+        analysis_markers_ko=markers["analysis_markers_ko"],
+        analysis_markers_en=markers["analysis_markers_en"],
+        evidence_markers_ko=markers["evidence_markers_ko"],
+        evidence_markers_en=markers["evidence_markers_en"],
+        promotion_markers_ko=markers["promotion_markers_ko"],
+        promotion_markers_en=markers["promotion_markers_en"],
+        tutorial_markers_ko=markers["tutorial_markers_ko"],
+        tutorial_markers_en=markers["tutorial_markers_en"],
+        reaction_markers_ko=markers["reaction_markers_ko"],
+        reaction_markers_en=markers["reaction_markers_en"],
+    )
+
+
 def load_config(
     path: str | Path = "config/channels.toml",
     *,
@@ -463,7 +585,7 @@ def load_config(
         raise ConfigError(f"cannot read configuration: {config_path}") from error
     except tomllib.TOMLDecodeError as error:
         raise ConfigError(f"invalid TOML in {config_path}: {error}") from error
-    unknown = set(raw) - {"channels", "policy"}
+    unknown = set(raw) - {"channels", "policy", "news_policy"}
     if unknown:
         raise ConfigError(f"configuration has unknown keys: {', '.join(sorted(unknown))}")
     channels_raw = raw.get("channels")
@@ -494,6 +616,7 @@ def load_config(
     return AppConfig(
         channels=channels,
         policy=_parse_policy(raw.get("policy")),
+        news_policy=_parse_news_policy(raw.get("news_policy")),
         database_path=Path(database),
         google_service_account_file=Path(service_account_file) if service_account_file else None,
         google_sheets_spreadsheet_id=spreadsheet_id,

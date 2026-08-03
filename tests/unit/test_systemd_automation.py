@@ -59,7 +59,7 @@ TIMERS = {
     "newsbot-collect.timer": {
         "Description": "Schedule Newsbot collection",
         "OnBootSec": "2min",
-        "OnUnitInactiveSec": "15min",
+        "OnUnitInactiveSec": "1h",
         "RandomizedDelaySec": "30s",
         "AccuracySec": "5s",
         "Unit": "newsbot-collect.service",

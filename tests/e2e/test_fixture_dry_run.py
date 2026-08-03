@@ -14,6 +14,7 @@ from newsbot.approval.scripted import ScriptedAction, ScriptedApprovalAdapter
 from newsbot.candidates import CandidateApprovalService
 from newsbot.cli import main
 from newsbot.collectors.fixture import FixtureCollector
+from newsbot.config import load_config
 from newsbot.observability import status
 from newsbot.pipeline import NewsPipeline
 from newsbot.runtime import FixtureClock
@@ -31,7 +32,7 @@ def test_fixture_run_is_offline_and_idempotent(tmp_path, monkeypatch):
     monkeypatch.delenv("TELEGRAM_API_ID", raising=False)
     fixture = tmp_path / "fixture.json"
     fixture.write_text(
-        """{"messages":[{"channel_id":"official","channel_handle":"official","id":"1","published_at":"2026-07-29T11:00:00Z","text":"AI technology update includes enough independently useful context for the editorial policy to evaluate this official announcement.","urls":["https://official.example/news"]}]}""",
+        """{"messages":[{"channel_id":"official","channel_handle":"official","id":"1","published_at":"2026-07-29T11:00:00Z","text":"Official team announced a major AI technology release with independently useful product details, rollout scope, supported users, measured impact, and operational context for readers.","urls":["https://official.example/news"]}]}""",
         encoding="utf-8",
     )
     config = SimpleNamespace(
@@ -41,6 +42,7 @@ def test_fixture_run_is_offline_and_idempotent(tmp_path, monkeypatch):
                 source_quality=1, classification="official", official_domains=("official.example",), original_domains=()
             )
         },
+        news_policy=load_config(Path("config/channels.toml"), environ={}).news_policy,
         policy=SimpleNamespace(
             version="candidate_policy_v1",
             novelty_window_days=7,
@@ -79,14 +81,18 @@ def test_fixture_run_is_offline_and_idempotent(tmp_path, monkeypatch):
         first = asyncio.run(pipeline.run_fixture(FixtureCollector(fixture), approval_service=service, actor_id=1))
         second = asyncio.run(pipeline.run_fixture(FixtureCollector(fixture), approval_service=service, actor_id=1))
 
-        assert second.digest.id == first.digest.id
+        assert first.selection_digest is not None
+        assert second.selection_digest is not None
+        assert second.selection_digest.id == first.selection_digest.id
         assert storage.fetch_one("SELECT COUNT(*) AS count FROM generations")["count"] == 0
         assert storage.fetch_one("SELECT COUNT(*) AS count FROM export_outbox")["count"] == 0
         assert storage.fetch_one("SELECT COUNT(*) AS count FROM pipeline_events")["count"] == 0
         assert status(storage)["provider_calls"] == 0
 
-        candidate_id = int(first.digest.candidates[0]["candidate_id"])
-        make = next(button for button in first.digest.buttons[candidate_id] if button.label == "[제작]")
+        candidate_id = int(first.selection_digest.candidates[0]["candidate_id"])
+        make = next(
+            button for button in first.selection_digest.buttons[candidate_id] if button.label == "[제작]"
+        )
         adapter = ScriptedApprovalAdapter(service)
         assert adapter.apply(ScriptedAction(make.token, 1, 1)).status == "queued"
         generated = asyncio.run(pipeline.generate_selected(candidate_id, page_count=2))
@@ -198,7 +204,6 @@ def test_scripted_fixture_rerun_reuses_ready_export(tmp_path, capsys, monkeypatc
     alternate_fixture.write_bytes(fixture.read_bytes() + b"\n")
     alternate_arguments = list(arguments)
     alternate_arguments[4] = str(alternate_fixture)
-    assert main(alternate_arguments) == 0
-    alternate = json.loads(capsys.readouterr().out.splitlines()[-1])
-    assert alternate["run_id"] != first["run_id"]
-    assert alternate["reused"] is False
+    with pytest.raises(SystemExit):
+        main(alternate_arguments)
+    assert "fixture has no immediate candidate" in capsys.readouterr().err
