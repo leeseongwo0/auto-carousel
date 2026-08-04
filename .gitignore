@@ -17,4 +17,5 @@ __pycache__/
 *.sqlite-wal
 var/
 dist/
+build/
 *.egg-info/

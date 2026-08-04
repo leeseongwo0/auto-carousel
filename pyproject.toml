@@ -14,6 +14,7 @@ telegram = [
     "telethon>=1.36,<2",
 ]
 sheets = [
+    "cryptography>=50,<51",
     "google-api-python-client>=2.176,<3",
     "google-auth>=2.40,<3",
     "google-auth-httplib2>=0.2,<1",
