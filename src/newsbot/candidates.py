@@ -160,9 +160,6 @@ class CandidateApprovalService:
                 )
                 for action in (
                     ApprovalAction.MAKE,
-                    ApprovalAction.DEFER_6H,
-                    ApprovalAction.DEFER_24H,
-                    ApprovalAction.DEFER_72H,
                     ApprovalAction.REJECT,
                     ApprovalAction.REFRESH,
                 )

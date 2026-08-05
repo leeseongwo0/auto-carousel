@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from newsbot.approval.base import ApprovalAction, hash_callback_token
+from newsbot.approval.base import ApprovalAction, ApprovalStage, hash_callback_token
 from newsbot.automation import AutomationAuthority, AutomationBusyError, AutomationDriftError, CutoverProposal, Frontier
 from newsbot.config import load_config
 from newsbot.storage import Storage
@@ -410,9 +410,24 @@ def test_post_cutover_defer_uses_poll_lease_and_resumes_under_dispatch_lease(tmp
         candidate_id = _candidate(storage)
         service = CandidateApprovalService(storage, chat_id=10, authorized_user_ids={20}, now=_now)
         digest = service.create_digest(1, actor_id=20)
-        defer_token = next(
-            button.token for button in digest.buttons[candidate_id] if button.action is ApprovalAction.DEFER_6H
+        assert tuple(button.action for button in digest.buttons[candidate_id]) == (
+            ApprovalAction.MAKE,
+            ApprovalAction.REJECT,
+            ApprovalAction.REFRESH,
         )
+        candidate = next(value for value in digest.candidates if value["candidate_id"] == candidate_id)
+        defer_token = service._button(
+            digest.id,
+            candidate_id,
+            int(candidate["revision"]),
+            tuple(candidate["source_version_ids"]),
+            20,
+            ApprovalStage.SELECTION,
+            ApprovalAction.DEFER_6H,
+            _now(),
+            timedelta(hours=24),
+            digest_revision=digest.revision,
+        ).token
         make_token = next(
             button.token for button in digest.buttons[candidate_id] if button.action is ApprovalAction.MAKE
         )
@@ -493,12 +508,15 @@ def test_linked_post_cutover_callback_validity_tracks_notification_lifecycle(tmp
         late = _now() + timedelta(hours=25)
         late_service = CandidateApprovalService(storage, chat_id=10, authorized_user_ids={20}, now=lambda: late)
         poll = authority.acquire_lease("approval_poll", now=late, lease_seconds=60)
-        assert late_service.apply(
-            make_token,
-            chat_id=10,
-            user_id=20,
-            automation_lease=poll,
-        ).status == "queued"
+        assert (
+            late_service.apply(
+                make_token,
+                chat_id=10,
+                user_id=20,
+                automation_lease=poll,
+            ).status
+            == "queued"
+        )
 
 
 def test_telegram_tick_abandons_before_send_when_callback_linking_is_incomplete(
@@ -575,6 +593,7 @@ def test_telegram_tick_abandons_before_send_when_callback_linking_is_incomplete(
             (int(attempt["id"]),),
         )
         assert linked is not None and linked["revoked_at"] is not None
+
 
 def test_active_cutover_rejects_runtime_sheets_target_drift(monkeypatch) -> None:
     from newsbot import cli

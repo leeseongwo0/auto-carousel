@@ -8,6 +8,7 @@ Telegram의 고정된 여섯 소스 채널(`testingcatalog`, `ai_masters_communi
 1. `newsbot-collect.timer`는 service inactivity 뒤 매시간 수집 worker를 실행합니다. 페이지/chunk가 성공적으로 commit된 뒤에만 durable cursor가 전진하므로 crash, cap, timeout 뒤에도 이어서 수집합니다. 기존 고정 여섯 채널 토폴로지는 변하지 않습니다.
 2. 기존 ranking hard filter 뒤의 결정론적 offline `news_policy_v1`가 source-local 근거로 후보를 `definite_news`, `trusted_analysis`, `ambiguous`, `non_news`로 분류합니다. 앞의 둘만 즉시 Telegram 승인 digest/button을 만들고, `ambiguous`는 callback/button 없이 immutable first-wins 제목을 Seoul 정오 window에 보관하며, `non_news`는 조용히 종료합니다.
 3. `newsbot-telegram.timer`는 후보 알림, callback polling, 선택된 작업의 생성 알림과 검토 알림을 처리합니다. 정오 intent는 SQLite write lock을 얻은 뒤 표본화한 Asia/Seoul 시간이 `[12:00:00,13:00:00)`일 때만 commit됩니다. 정확히 13:00에는 미생성 window를 `skipped`로 끝내며 catch-up이나 roll-forward는 없습니다. 제때 commit된 intent는 13:00 뒤에도 durable outbox로 안전하게 dispatch/retry합니다.
+후보 선택 메시지는 `[제작]`, `거절`, `새로고침` 버튼만 제공하며 시간 단위 미루기 버튼은 표시하지 않습니다.
 4. Codex는 별도의 기존 `newsbot-generate-codex.timer`가 한 activation에 frozen job 하나만 처리합니다. 이 타이머의 역할과 containment는 변경하지 않습니다.
 5. 검토자는 정확한 current draft에서 `[시트 전달]`을 승인합니다. 승인 transaction은 immutable Sheets handoff만 만들며 원격 호출은 하지 않습니다.
 6. `newsbot-sheets.timer`가 승인된 handoff 하나를 전달합니다. document metadata가 정확히 일치하면 zero-write 재사용하며, ambiguous Telegram/Sheets 효과는 자동 재전송하지 않습니다.

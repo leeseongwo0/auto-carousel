@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from newsbot.approval.base import ApprovalAction, hash_callback_token
+from newsbot.approval.base import ApprovalAction, ApprovalStage, hash_callback_token
 from newsbot.approval.scripted import ScriptedAction, ScriptedApprovalAdapter
 from newsbot.approval.telegram import TelegramApprovalAdapter
 from newsbot.candidates import CandidateApprovalService
@@ -198,11 +198,22 @@ def test_deferral_resumes_exact_selection_stage(action: ApprovalAction, delay: i
     service = _service(storage, clock)
     with storage.transaction() as connection:
         connection.execute("UPDATE candidates SET status='pending_selection' WHERE id=?", (candidate_id,))
-    selection_token = next(
-        button.token
-        for button in service.create_digest(1, actor_id=20).buttons[candidate_id]
-        if button.action is action
-    )
+    digest = service.create_digest(1, actor_id=20)
+    actions = tuple(button.action for button in digest.buttons[candidate_id])
+    assert actions == (ApprovalAction.MAKE, ApprovalAction.REJECT, ApprovalAction.REFRESH)
+    candidate = next(value for value in digest.candidates if value["candidate_id"] == candidate_id)
+    selection_token = service._button(
+        digest.id,
+        candidate_id,
+        int(candidate["revision"]),
+        tuple(candidate["source_version_ids"]),
+        20,
+        ApprovalStage.SELECTION,
+        action,
+        clock.now(),
+        timedelta(hours=24),
+        digest_revision=digest.revision,
+    ).token
     assert ScriptedApprovalAdapter(service).apply(ScriptedAction(selection_token, 10, 20)).status == "deferred"
     assert service.resume_due(clock.now()) == ()
     clock.advance(timedelta(hours=delay))
