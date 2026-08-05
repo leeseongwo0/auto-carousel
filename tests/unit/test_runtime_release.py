@@ -6,6 +6,7 @@ import os
 import stat
 import subprocess
 import sys
+import tomllib
 from contextlib import contextmanager
 from hashlib import sha256
 from pathlib import Path
@@ -20,6 +21,14 @@ assert SPEC and SPEC.loader
 runtime_release = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = runtime_release
 SPEC.loader.exec_module(runtime_release)
+def test_expected_closure_versions_match_uv_lock() -> None:
+    lock = tomllib.loads((Path(__file__).parents[2] / "uv.lock").read_text(encoding="utf-8"))
+    locked_versions = {package["name"]: package["version"] for package in lock["package"]}
+
+    for requirement in runtime_release.EXPECTED_CLOSURE:
+        name, version = requirement.rsplit("==", 1)
+        assert locked_versions[name] == version
+
 
 
 def test_cli_runtime_release_digest_is_bound_to_stable_manifest(

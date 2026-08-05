@@ -58,7 +58,7 @@ EXPECTED_CLOSURE = frozenset(
         "certifi==2026.7.22",
         "cffi==2.1.0",
         "charset-normalizer==3.4.9",
-        "cryptography==49.0.0",
+        "cryptography==50.0.0",
         "google-api-core==2.33.0",
         "google-api-python-client==2.198.0",
         "google-auth==2.56.2",
