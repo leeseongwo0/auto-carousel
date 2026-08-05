@@ -70,6 +70,7 @@ RESPONSE_SCHEMA: dict[str, object] = {
                 "hashtags": {
                     "type": "array",
                     "minItems": 1,
+                    "maxItems": 5,
                     "items": {"type": "string", "minLength": 2, "pattern": "^#"},
                 },
             },
@@ -117,8 +118,9 @@ SYSTEM_INSTRUCTION = (
     "and never pad the draft. When page_count_mode is exact, produce exactly page_count total pages. Every cover and "
     "body must have at least one factual unit, and every factual unit must have nonempty references. Copy each reference "
     "claim_id and source_version_id as an exact pair from the same supplied evidence item; never invent or mismatch "
-    "references. Keep subtitles at most 35 Unicode characters and each body page at most 240 Unicode characters. Keep "
-    "all caption fields nonempty and start every hashtag with #. Trim all text. "
+    "references. Keep subtitles at most 35 Unicode characters and each body page at most 240 Unicode characters. Write "
+    "all Korean prose sentences in consistent formal polite 합니다체; titles and subtitles may remain concise noun phrases. "
+    "Keep all caption fields nonempty, return one through five hashtags, and start every hashtag with #. Trim all text. "
     + _CATEGORY_POLICY
 )
 
@@ -189,6 +191,8 @@ def _positive_int(value: object, name: str) -> int:
 def _hashtags(value: object) -> tuple[str, ...]:
     if not isinstance(value, list) or not value:
         raise ValueError("caption.hashtags must be a non-empty list")
+    if len(value) > 5:
+        raise ValueError("caption.hashtags must contain at most 5 items")
     return tuple(_string(item, "caption.hashtag") for item in value)
 
 

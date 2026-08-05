@@ -176,6 +176,8 @@ def validate_copy(
             raise CopyValidationError(f"{name} must not be empty")
     if not draft.caption.hashtags:
         raise CopyValidationError("caption.hashtags must not be empty")
+    if len(draft.caption.hashtags) > 5:
+        raise CopyValidationError("caption.hashtags must contain at most 5 items")
     for index, hashtag in enumerate(draft.caption.hashtags):
         _validate_text(hashtag, f"caption.hashtags[{index}]")
         if not hashtag or not hashtag.startswith("#"):

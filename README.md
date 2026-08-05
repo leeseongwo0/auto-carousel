@@ -1,6 +1,7 @@
 # 뉴스 캐러셀 워크플로
 
 Telegram의 고정된 여섯 소스 채널(`testingcatalog`, `ai_masters_community`, `aipost`, `coinnesskr`, `exilist_official`, `dolbikong`)을 자동 수집·평가하고, 사람이 승인한 후보만 `gpt-5.6-terra`로 유연하게 1–8페이지 카드뉴스 초안으로 만듭니다. 사람이 정확한 초안을 다시 승인하면 Google Sheets의 고정 `workplace` 탭에 idempotent하게 한 행을 추가합니다. SQLite가 cursor, outbox, 승인, 원고, handoff와 원격 작업의 유일한 durable authority입니다.
+생성 원고의 본문과 캡션 문장은 일관된 `합니다체` 경어체를 사용하고, 캡션 해시태그는 1–5개로 제한합니다.
 
 ## 자동 사용자 흐름
 
