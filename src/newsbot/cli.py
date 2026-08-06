@@ -2184,6 +2184,7 @@ def _notification_payload(
     *,
     actor_id: int,
 ) -> tuple[str, dict[str, object] | None]:
+    from .approval.telegram import format_review_draft
     row = storage.fetch_one(
         "SELECT notification_kind,candidate_id,generation_id,defer_authority_id,ambiguous_window_id,subject_digest "
         "FROM telegram_notification_outbox WHERE id=?",
@@ -2260,7 +2261,7 @@ def _notification_payload(
             source_version_ids=source_version_ids,
         )
         return (
-            json.dumps(json.loads(str(generation["content_json"])), ensure_ascii=False, sort_keys=True),
+            format_review_draft(str(generation["content_json"])),
             {"inline_keyboard": [[{"text": button.label, "callback_data": button.token}] for button in buttons]},
         )
     authority = storage.fetch_one(
@@ -2314,7 +2315,7 @@ def _notification_payload(
         source_version_ids=source_version_ids,
     )
     return (
-        json.dumps(json.loads(str(generation["content_json"])), ensure_ascii=False, sort_keys=True),
+        format_review_draft(str(generation["content_json"])),
         {"inline_keyboard": [[{"text": button.label, "callback_data": button.token}] for button in buttons]},
     )
 

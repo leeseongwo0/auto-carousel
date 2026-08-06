@@ -97,6 +97,81 @@ def split_telegram_titles(titles: tuple[str, ...], *, limit: int = TELEGRAM_TEXT
         chunks.append(current)
     return tuple(chunks)
 
+def format_review_draft(draft_text: str) -> str:
+    """Render structured generation JSON as a concise Telegram review."""
+    try:
+        draft = json.loads(draft_text)
+    except json.JSONDecodeError:
+        return draft_text
+    if not isinstance(draft, Mapping):
+        return draft_text
+
+    lines = ["제작 초안"]
+
+    cover = draft.get("cover")
+    if isinstance(cover, Mapping):
+        lines.append("\n[표지]")
+        _append_review_field(lines, "제목", cover.get("title"))
+        _append_review_field(lines, "부제", cover.get("subtitle"))
+
+    bodies = draft.get("bodies")
+    if isinstance(bodies, list):
+        for index, body in enumerate(bodies, 1):
+            if not isinstance(body, Mapping):
+                continue
+            lines.append(f"\n[본문 {index}]")
+            _append_review_field(lines, "소제목", body.get("subtitle"))
+            _append_review_field(lines, "내용", body.get("body"))
+
+    caption = draft.get("caption")
+    if isinstance(caption, Mapping):
+        lines.append("\n[캡션]")
+        for label, key in (
+            ("훅", "hook"),
+            ("맥락", "context"),
+            ("상세", "details"),
+            ("의미", "implications"),
+            ("질문", "questions"),
+        ):
+            _append_review_field(lines, label, caption.get(key))
+        hashtags = caption.get("hashtags")
+        if isinstance(hashtags, list):
+            rendered = " ".join(value for value in hashtags if isinstance(value, str) and value.strip())
+            _append_review_field(lines, "해시태그", rendered)
+
+    _append_review_field(lines, "\n카테고리", draft.get("category"))
+    sources = _review_source_urls(draft.get("claim_manifest"))
+    if sources:
+        lines.append("\n[출처]")
+        lines.extend(f"- {url}" for url in sources)
+
+    trust = []
+    if draft.get("draft") is True:
+        trust.append("초안")
+    if draft.get("source_reported") is True:
+        trust.append("출처 기반")
+    if trust:
+        lines.append(f"\n검토 상태: {' / '.join(trust)}")
+    return "\n".join(lines)
+
+
+def _append_review_field(lines: list[str], label: str, value: object) -> None:
+    if isinstance(value, str) and value.strip():
+        lines.append(f"{label}: {value.strip()}")
+
+
+def _review_source_urls(manifest: object) -> tuple[str, ...]:
+    if not isinstance(manifest, list):
+        return ()
+    urls: list[str] = []
+    for claim in manifest:
+        if not isinstance(claim, Mapping):
+            continue
+        url = claim.get("source_url")
+        if isinstance(url, str) and url.strip() and url not in urls:
+            urls.append(url)
+    return tuple(urls)
+
 
 @dataclass(frozen=True, slots=True)
 class TelegramRequestResult:
@@ -255,7 +330,10 @@ class TelegramApprovalAdapter:
             f"소스 리비전: {', '.join(map(str, source_version_ids))}\n"
             "신뢰 표시: draft=true, source_reported=true\n\n"
         )
-        self._send_text(binding + (f"{warnings}\n\n" if warnings else "") + draft_text, markup=markup)
+        self._send_text(
+            binding + (f"{warnings}\n\n" if warnings else "") + format_review_draft(draft_text),
+            markup=markup,
+        )
 
     def send_caption(self, caption_text: str) -> None:
         self._send_text(caption_text)
