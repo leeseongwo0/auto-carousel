@@ -2185,6 +2185,7 @@ def _notification_payload(
     actor_id: int,
 ) -> tuple[str, dict[str, object] | None]:
     from .approval.telegram import format_review_draft
+
     row = storage.fetch_one(
         "SELECT notification_kind,candidate_id,generation_id,defer_authority_id,ambiguous_window_id,subject_digest "
         "FROM telegram_notification_outbox WHERE id=?",

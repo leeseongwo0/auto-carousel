@@ -97,6 +97,7 @@ def split_telegram_titles(titles: tuple[str, ...], *, limit: int = TELEGRAM_TEXT
         chunks.append(current)
     return tuple(chunks)
 
+
 def format_review_draft(draft_text: str) -> str:
     """Render structured generation JSON as a concise Telegram review."""
     try:
