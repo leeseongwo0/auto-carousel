@@ -52,7 +52,7 @@ class TelethonCollector:
     async def _client_instance(self) -> Any:
         if self._client is None:
             try:
-                from telethon import TelegramClient  # type: ignore[import-not-found]
+                from telethon import TelegramClient
             except ImportError as exc:
                 raise RuntimeError("Telethon collection requires the telegram extra") from exc
             self._client = TelegramClient(self._session, self._api_id, self._api_hash)
