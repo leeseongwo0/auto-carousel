@@ -83,6 +83,52 @@ def test_candidate_notification_contains_only_title_source_and_buttons() -> None
     assert "internal metadata" not in payload["text"]
 
 
+def test_review_draft_formats_structured_copy_for_humans() -> None:
+    draft = {
+        "cover": {"title": "AI 증시 랠리", "subtitle": "BTC는 제한적 상승"},
+        "bodies": [
+            {
+                "subtitle": "자금은 반도체로 향했습니다",
+                "body": "비트코인으로 자금이 확산되지 않았다는 분석입니다.",
+            }
+        ],
+        "caption": {
+            "hook": "증시는 올랐지만 BTC 반등은 제한됐습니다.",
+            "context": "특정 업종 중심의 랠리였습니다.",
+            "details": "ETF 유입도 둔화됐습니다.",
+            "implications": "새 촉매가 필요합니다.",
+            "questions": "다음 촉매는 무엇일까요?",
+            "hashtags": ["#비트코인", "#ETF"],
+        },
+        "category": "Blockchain",
+        "claim_manifest": [
+            {
+                "claim_id": "internal-claim-id",
+                "evidence": "long internal evidence",
+                "source_url": "https://t.me/news_publisher/123",
+            }
+        ],
+        "draft": True,
+        "source_reported": True,
+    }
+
+    rendered = telegram.format_review_draft(json.dumps(draft, ensure_ascii=False))
+
+    assert "[표지]\n제목: AI 증시 랠리\n부제: BTC는 제한적 상승" in rendered
+    assert "[본문 1]\n소제목: 자금은 반도체로 향했습니다" in rendered
+    assert "[캡션]\n훅: 증시는 올랐지만 BTC 반등은 제한됐습니다." in rendered
+    assert "해시태그: #비트코인 #ETF" in rendered
+    assert "[출처]\n- https://t.me/news_publisher/123" in rendered
+    assert "검토 상태: 초안 / 출처 기반" in rendered
+    assert "internal-claim-id" not in rendered
+    assert "long internal evidence" not in rendered
+    assert '"cover"' not in rendered
+
+
+def test_review_draft_preserves_unstructured_legacy_text() -> None:
+    assert telegram.format_review_draft("legacy draft") == "legacy draft"
+
+
 def test_prepared_payload_is_the_exact_object_sent_once() -> None:
     seen: list[object] = []
 
