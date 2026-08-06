@@ -129,12 +129,12 @@ def test_active_release_routes_mixed_batch_and_seals_noon_without_callbacks(tmp_
     non_news = "AI tutorial. " + "This instructional material explains routine usage without a current event. " * 2
     ranking_rejected = "AI launch"
     observations = (
-        _observation(11, "exilist_official", event),
-        _observation(12, "exilist_official", trusted),
-        _observation(13, "testingcatalog", evidenced, url="https://evidence.example/report"),
-        _observation(14, "testingcatalog", ambiguous),
-        _observation(15, "testingcatalog", non_news),
-        _observation(16, "testingcatalog", ranking_rejected),
+        _observation(11, "official_updates", event),
+        _observation(12, "official_updates", trusted),
+        _observation(13, "community_feed", evidenced, url="https://evidence.example/report"),
+        _observation(14, "community_feed", ambiguous),
+        _observation(15, "community_feed", non_news),
+        _observation(16, "community_feed", ranking_rejected),
     )
 
     with Storage.open(tmp_path / "hourly.sqlite") as storage:
@@ -216,7 +216,7 @@ def test_active_release_routes_mixed_batch_and_seals_noon_without_callbacks(tmp_
         assert ambiguous_evidence is not None
         rationale = json.loads(str(ambiguous_evidence["rationale_json"]))
         assert rationale["schema_version"] == "news-policy-rationale-v1"
-        assert rationale["selected_source_id"] == "testingcatalog"
+        assert rationale["selected_source_id"] == "community_feed"
         selected = next(item for item in rationale["observations"] if item["external_post_id"] == "14")
         assert selected["classification"] == "community"
         assert selected["meaningful_analysis"] is True
@@ -271,7 +271,7 @@ def test_active_release_refuses_config_drift_before_pipeline_mutation(tmp_path: 
         with pytest.raises(AutomationDriftError, match="binding drifted"):
             asyncio.run(
                 pipeline.run_fixture(
-                    StaticCollector((_observation(99, "testingcatalog", "AI launch announced."),)),
+                    StaticCollector((_observation(99, "community_feed", "AI launch announced."),)),
                     approval_service=service,
                     actor_id=7,
                 )
@@ -326,7 +326,7 @@ def test_noon_payload_rejects_forged_subject_before_chunking(tmp_path: Path) -> 
         service = CandidateApprovalService(storage, chat_id=7, authorized_user_ids={7}, now=clock.now)
         asyncio.run(
             NewsPipeline(storage, config, FakeGenerationProvider(), clock).run_fixture(
-                StaticCollector((_observation(14, "testingcatalog", ambiguous),)),
+                StaticCollector((_observation(14, "community_feed", ambiguous),)),
                 approval_service=service,
                 actor_id=7,
             )

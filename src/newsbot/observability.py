@@ -67,33 +67,19 @@ def automation_status(storage: Storage, *, now: datetime | None = None) -> dict[
     collecting_open, collecting_stale = _collecting_window_health(storage, local)
     return {
         "automation_active": active,
-        "news_policy_definite": _count(
-            storage, "news_policy_evaluations", "outcome = 'definite_news'"
-        ),
-        "news_policy_trusted_analysis": _count(
-            storage, "news_policy_evaluations", "outcome = 'trusted_analysis'"
-        ),
-        "news_policy_ambiguous": _count(
-            storage, "news_policy_evaluations", "outcome = 'ambiguous'"
-        ),
-        "news_policy_non_news": _count(
-            storage, "news_policy_evaluations", "outcome = 'non_news'"
-        ),
+        "news_policy_definite": _count(storage, "news_policy_evaluations", "outcome = 'definite_news'"),
+        "news_policy_trusted_analysis": _count(storage, "news_policy_evaluations", "outcome = 'trusted_analysis'"),
+        "news_policy_ambiguous": _count(storage, "news_policy_evaluations", "outcome = 'ambiguous'"),
+        "news_policy_non_news": _count(storage, "news_policy_evaluations", "outcome = 'non_news'"),
         "news_policy_config_bindings": _count(storage, "automation_release_config_bindings"),
         "news_policy_current_config_binding_present": current_binding_count == 1,
         "news_policy_current_config_binding_count": current_binding_count,
         "noon_windows_collecting": collecting_windows,
         "noon_windows_collecting_open": collecting_open,
         "noon_windows_collecting_stale": collecting_stale,
-        "noon_windows_queued": _count(
-            storage, "ambiguous_digest_windows", "state = 'queued'"
-        ),
-        "noon_windows_empty": _count(
-            storage, "ambiguous_digest_windows", "state = 'empty'"
-        ),
-        "noon_windows_skipped": _count(
-            storage, "ambiguous_digest_windows", "state = 'skipped'"
-        ),
+        "noon_windows_queued": _count(storage, "ambiguous_digest_windows", "state = 'queued'"),
+        "noon_windows_empty": _count(storage, "ambiguous_digest_windows", "state = 'empty'"),
+        "noon_windows_skipped": _count(storage, "ambiguous_digest_windows", "state = 'skipped'"),
         "noon_on_time_intent_commits": _count_on_time_noon_intents(storage),
         "noon_pending_notifications": _count(
             storage,
@@ -156,21 +142,16 @@ def _count_on_time_noon_intents(storage: Storage) -> int:
     )
     assert row is not None
     return int(row["count"])
+
+
 def _collecting_window_health(storage: Storage, local: datetime) -> tuple[int, int]:
     today = local.date().isoformat()
-    open_condition = (
-        "state = 'collecting' AND (scheduled_local_date > ? "
-        "OR (scheduled_local_date = ? AND ? < 13))"
-    )
-    stale_condition = (
-        "state = 'collecting' AND (scheduled_local_date < ? "
-        "OR (scheduled_local_date = ? AND ? >= 13))"
-    )
+    open_condition = "state = 'collecting' AND (scheduled_local_date > ? OR (scheduled_local_date = ? AND ? < 13))"
+    stale_condition = "state = 'collecting' AND (scheduled_local_date < ? OR (scheduled_local_date = ? AND ? >= 13))"
     return (
         _count(storage, "ambiguous_digest_windows", open_condition, (today, today, local.hour)),
         _count(storage, "ambiguous_digest_windows", stale_condition, (today, today, local.hour)),
     )
-
 
 
 def _count(storage: Storage, table: str, condition: str = "", parameters: tuple[object, ...] = ()) -> int:

@@ -27,13 +27,10 @@ def test_noon_title_packing_preserves_newline_boundaries() -> None:
 
 def test_noon_title_snapshot_collapses_embedded_line_separators(tmp_path) -> None:
     with Storage.open(tmp_path / "title.sqlite") as storage, storage.transaction() as connection:
-        connection.execute(
-            "INSERT INTO source_posts(channel_id,external_post_id) VALUES('testingcatalog','1')"
-        )
+        connection.execute("INSERT INTO source_posts(channel_id,external_post_id) VALUES('community_feed','1')")
         post_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
         connection.execute(
-            "INSERT INTO source_post_versions(source_post_id,version_key,body,urls_json) "
-            "VALUES(?,'v1','fallback',?)",
+            "INSERT INTO source_post_versions(source_post_id,version_key,body,urls_json) VALUES(?,'v1','fallback',?)",
             (
                 post_id,
                 json.dumps(

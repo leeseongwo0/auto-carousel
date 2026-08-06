@@ -90,9 +90,7 @@ def test_fixture_run_is_offline_and_idempotent(tmp_path, monkeypatch):
         assert status(storage)["provider_calls"] == 0
 
         candidate_id = int(first.selection_digest.candidates[0]["candidate_id"])
-        make = next(
-            button for button in first.selection_digest.buttons[candidate_id] if button.label == "[제작]"
-        )
+        make = next(button for button in first.selection_digest.buttons[candidate_id] if button.label == "[제작]")
         adapter = ScriptedApprovalAdapter(service)
         assert adapter.apply(ScriptedAction(make.token, 1, 1)).status == "queued"
         generated = asyncio.run(pipeline.generate_selected(candidate_id, page_count=2))
@@ -146,6 +144,7 @@ def test_scripted_fixture_rerun_reuses_ready_export(tmp_path, capsys, monkeypatc
         return original_socket(family, *args, **kwargs)
 
     monkeypatch.setattr(socket, "socket", deny_network_socket)
+
     @contextmanager
     def no_lock(*_args, **_kwargs):
         yield

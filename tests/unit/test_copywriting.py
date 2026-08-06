@@ -54,6 +54,8 @@ def test_cover_only_draft_and_standalone_caption_are_valid() -> None:
         validated.caption.text
         == "핵심 소식\n\n공식 발표 내용입니다.\n\n지원 기준을 확인하세요.\n\n산업 현장 적용이 확대됩니다.\n\n어떤 변화가 예상되나요?\n\n#AI #뉴스"
     )
+
+
 def test_caption_hashtag_limit_accepts_five_and_rejects_six() -> None:
     draft = _draft()
     five = replace(draft, caption=replace(draft.caption, hashtags=("#하나", "#둘", "#셋", "#넷", "#다섯")))
@@ -70,7 +72,6 @@ def test_provider_rejects_more_than_five_hashtags() -> None:
 
     with pytest.raises(ValueError, match="at most 5"):
         _draft_from_mapping(payload)
-
 
 
 def test_category_is_required_and_immutable() -> None:

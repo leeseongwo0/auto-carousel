@@ -237,11 +237,17 @@ def test_unsupported_legacy_schema_is_rejected_before_hourly_migration(tmp_path)
 
     connection = sqlite3.connect(database)
     try:
-        assert connection.execute(
-            "SELECT 1 FROM schema_migrations WHERE version='008_hourly_news_eligibility.sql'"
-        ).fetchone() is None
-        assert connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ambiguous_digest_windows'"
-        ).fetchone() is None
+        assert (
+            connection.execute(
+                "SELECT 1 FROM schema_migrations WHERE version='008_hourly_news_eligibility.sql'"
+            ).fetchone()
+            is None
+        )
+        assert (
+            connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ambiguous_digest_windows'"
+            ).fetchone()
+            is None
+        )
     finally:
         connection.close()

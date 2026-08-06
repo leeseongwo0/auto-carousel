@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
+import re
 import tomllib
 import unicodedata
 from collections.abc import Iterable, Mapping
@@ -106,9 +108,6 @@ _NEWS_POLICY_APPROVED_INTS = {
     "analysis_sentence_chars": 40,
     "analysis_min_sentences": 2,
 }
-_REQUIRED_CHANNEL_HANDLES = frozenset(
-    {"testingcatalog", "ai_masters_community", "aipost", "coinnesskr", "exilist_official", "dolbikong"}
-)
 _REQUIRED_WEIGHTS = frozenset(
     {"source_quality", "freshness", "engagement", "topic_relevance", "novelty", "official_evidence", "certainty"}
 )
@@ -130,6 +129,24 @@ _CERTAINTY_CATEGORIES: tuple[tuple[str, Decimal, tuple[str, ...]], ...] = (
     ("rumor", Decimal("0.30"), ("rumor", "alleged", "루머", "설")),
     ("anonymous", Decimal("0.20"), ("anonymous", "unattributed", "익명")),
 )
+_MANUAL_PROFILE_SCHEMA = "newsbot.behavior.v1"
+_MANUAL_PROFILE_OPERATION = "manual_local"
+_MANUAL_PROFILE_KEYS = frozenset({"schema", "operation", "sources", "policy", "news_policy"})
+_MANUAL_SOURCE_KEYS = frozenset(
+    {
+        "id",
+        "name",
+        "enabled",
+        "priority",
+        "source_quality",
+        "classification",
+        "official_domains",
+        "original_domains",
+        "telegram_handle",
+    }
+)
+_MANUAL_SOURCE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+_TELEGRAM_HANDLE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{4,31}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,6 +160,85 @@ class ChannelConfig:
     classification: str = "official"
     official_domains: tuple[str, ...] = ()
     original_domains: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ManualSourceConfig:
+    id: str
+    name: str
+    enabled: bool
+    priority: int
+    source_quality: Decimal
+    classification: str
+    official_domains: tuple[str, ...]
+    original_domains: tuple[str, ...]
+    telegram_handle: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BehaviorProfile:
+    schema: str
+    operation: str
+    sources: tuple[ManualSourceConfig, ...]
+    policy: PolicyConfig
+    news_policy: NewsPolicyConfig | None = None
+
+    @property
+    def digest(self) -> str:
+        payload = {
+            "schema": self.schema,
+            "operation": self.operation,
+            "sources": [
+                {
+                    "id": source.id,
+                    "name": source.name,
+                    "enabled": source.enabled,
+                    "priority": source.priority,
+                    "source_quality": str(source.source_quality),
+                    "classification": source.classification,
+                    "official_domains": tuple(sorted(source.official_domains)),
+                    "original_domains": tuple(sorted(source.original_domains)),
+                    "telegram_handle": source.telegram_handle,
+                }
+                for source in sorted(self.sources, key=lambda source: source.id)
+            ],
+            "policy": {
+                "version": self.policy.version,
+                "locale": self.policy.locale,
+                "initial_lookback_hours": self.policy.initial_lookback_hours,
+                "max_candidate_age_hours": self.policy.max_candidate_age_hours,
+                "future_tolerance_hours": self.policy.future_tolerance_hours,
+                "min_semantic_chars": self.policy.min_semantic_chars,
+                "min_material_sentence_chars": self.policy.min_material_sentence_chars,
+                "freshness_horizon_hours": self.policy.freshness_horizon_hours,
+                "novelty_window_days": self.policy.novelty_window_days,
+                "min_topic_relevance": str(self.policy.min_topic_relevance),
+                "min_total_score": str(self.policy.min_total_score),
+                "disclosure_markers": tuple(sorted(self.policy.disclosure_markers, key=str.casefold)),
+                "referral_markers": tuple(sorted(self.policy.referral_markers, key=str.casefold)),
+                "weights": [(key, str(value)) for key, value in sorted(self.policy.weights)],
+                "topic_positive_phrases": [
+                    (key, str(value)) for key, value in sorted(self.policy.topic_positive_phrases)
+                ],
+                "topic_exclusion_phrases": [
+                    (key, str(value)) for key, value in sorted(self.policy.topic_exclusion_phrases)
+                ],
+                "engagement_weights": [(key, str(value)) for key, value in sorted(self.policy.engagement_weights)],
+                "engagement_saturation": [
+                    (key, str(value)) for key, value in sorted(self.policy.engagement_saturation)
+                ],
+                "certainty_markers": [(key, str(value)) for key, value in sorted(self.policy.certainty_markers)],
+                "certainty_penalties": [(key, str(value)) for key, value in sorted(self.policy.certainty_penalties)],
+                "certainty_categories": [
+                    (category, str(penalty), tuple(sorted(markers, key=str.casefold)))
+                    for category, penalty, markers in self.policy.certainty_categories
+                ],
+            },
+            "news_policy": _news_policy_digest_payload(self.news_policy),
+        }
+        return sha256(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,6 +312,7 @@ class PolicyConfig:
     def weight_map(self) -> dict[str, Decimal]:
         return dict(self.weights)
 
+
 @dataclass(frozen=True, slots=True)
 class NewsPolicyConfig:
     version: str
@@ -241,6 +338,34 @@ class NewsPolicyConfig:
     reaction_markers_ko: tuple[str, ...]
     reaction_markers_en: tuple[str, ...]
 
+
+def _news_policy_digest_payload(policy: NewsPolicyConfig | None) -> dict[str, object] | None:
+    if policy is None:
+        return None
+    return {
+        "version": policy.version,
+        "timezone": policy.timezone,
+        "noon_hour": policy.noon_hour,
+        "noon_minute": policy.noon_minute,
+        "activation_minutes": policy.activation_minutes,
+        "material_semantic_chars": policy.material_semantic_chars,
+        "material_sentence_chars": policy.material_sentence_chars,
+        "analysis_semantic_chars": policy.analysis_semantic_chars,
+        "analysis_sentence_chars": policy.analysis_sentence_chars,
+        "analysis_min_sentences": policy.analysis_min_sentences,
+        "event_markers_ko": policy.event_markers_ko,
+        "event_markers_en": policy.event_markers_en,
+        "analysis_markers_ko": policy.analysis_markers_ko,
+        "analysis_markers_en": policy.analysis_markers_en,
+        "evidence_markers_ko": policy.evidence_markers_ko,
+        "evidence_markers_en": policy.evidence_markers_en,
+        "promotion_markers_ko": policy.promotion_markers_ko,
+        "promotion_markers_en": policy.promotion_markers_en,
+        "tutorial_markers_ko": policy.tutorial_markers_ko,
+        "tutorial_markers_en": policy.tutorial_markers_en,
+        "reaction_markers_ko": policy.reaction_markers_ko,
+        "reaction_markers_en": policy.reaction_markers_en,
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -304,10 +429,7 @@ class AppConfig:
                     (category, str(penalty), markers) for category, penalty, markers in self.policy.certainty_categories
                 ],
             },
-                "news_policy": {
-                    name: getattr(self.news_policy, name)
-                    for name in sorted(_NEWS_POLICY_KEYS)
-                },
+            "news_policy": {name: getattr(self.news_policy, name) for name in sorted(_NEWS_POLICY_KEYS)},
         }
         return sha256(
             json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":")).encode()
@@ -315,11 +437,11 @@ class AppConfig:
 
 
 def validate_automation_bindings(config: AppConfig) -> None:
-    """Reassert the immutable six-channel worker contract at each entrypoint."""
+    """Reassert the immutable six-channel worker shape at each entrypoint."""
     channels = config.enabled_channels
     handles = frozenset(channel.handle.casefold() for channel in channels)
-    if len(channels) != 6 or handles != _REQUIRED_CHANNEL_HANDLES:
-        raise ConfigError("automation requires exactly the six audited enabled channels")
+    if len(channels) != 6 or len(handles) != 6:
+        raise ConfigError("automation requires exactly six unique enabled channels")
 
 
 def _decimal(value: Any, name: str) -> Decimal:
@@ -388,6 +510,133 @@ def _parse_channel(raw: Any, index: int) -> ChannelConfig:
         classification=classification,
         official_domains=_string_list(raw["official_domains"], f"channels[{index}].official_domains"),
         original_domains=_string_list(raw["original_domains"], f"channels[{index}].original_domains"),
+    )
+
+
+def _manual_hostname_list(value: Any, name: str) -> tuple[str, ...]:
+    values = _string_list(value, name)
+    if len(values) > 32:
+        raise ConfigError(f"{name} must contain at most 32 hostnames")
+    normalized: list[str] = []
+    for hostname in values:
+        if len(hostname) > 253 or any(ord(char) < 32 or ord(char) == 127 for char in hostname):
+            raise ConfigError(f"{name} contains an unsafe hostname")
+        candidate = hostname.rstrip(".").casefold()
+        if not candidate or "://" in candidate or any(char in candidate for char in "/@:*?#[\\]"):
+            raise ConfigError(f"{name} contains an unsafe hostname")
+        try:
+            ipaddress.ip_address(candidate)
+        except ValueError:
+            labels = candidate.split(".")
+            if any(
+                not label
+                or len(label) > 63
+                or label[0] == "-"
+                or label[-1] == "-"
+                or not all("a" <= char <= "z" or "0" <= char <= "9" or char == "-" for char in label)
+                for label in labels
+            ):
+                raise ConfigError(f"{name} contains an unsafe hostname") from None
+        else:
+            raise ConfigError(f"{name} contains an unsafe hostname")
+        normalized.append(candidate)
+    if len(set(normalized)) != len(normalized):
+        raise ConfigError(f"{name} contains duplicate normalized values")
+    return tuple(normalized)
+
+
+def _parse_manual_source(raw: Any, index: int) -> ManualSourceConfig:
+    if not isinstance(raw, dict):
+        raise ConfigError(f"sources[{index}] must be a table")
+    unknown = set(raw) - _MANUAL_SOURCE_KEYS
+    if unknown:
+        raise ConfigError(f"sources[{index}] has unknown keys: {', '.join(sorted(unknown))}")
+    required = (
+        "id",
+        "name",
+        "enabled",
+        "priority",
+        "source_quality",
+        "classification",
+        "official_domains",
+        "original_domains",
+    )
+    if any(key not in raw for key in required):
+        raise ConfigError(f"sources[{index}] is missing required fields")
+    source_id = raw["id"]
+    name = raw["name"]
+    if not isinstance(source_id, str) or not _MANUAL_SOURCE_ID_RE.fullmatch(source_id):
+        raise ConfigError(f"sources[{index}].id must be an ASCII slug from 1 to 64 characters")
+    if (
+        not isinstance(name, str)
+        or not name
+        or len(name) > 120
+        or any(unicodedata.category(char).startswith("C") for char in name)
+    ):
+        raise ConfigError(f"sources[{index}].name must be 1 to 120 Unicode scalars without controls")
+    if not isinstance(raw["enabled"], bool) or not raw["enabled"]:
+        raise ConfigError(f"sources[{index}].enabled must be true")
+    classification = raw["classification"]
+    if classification not in {"official", "original_publisher", "aggregator", "community"}:
+        raise ConfigError(f"sources[{index}].classification is invalid")
+    quality = _decimal(raw["source_quality"], f"sources[{index}].source_quality")
+    if not Decimal("0") <= quality <= Decimal("1"):
+        raise ConfigError(f"sources[{index}].source_quality must be from 0 to 1")
+    handle = raw.get("telegram_handle")
+    if handle is not None:
+        candidate_handle = handle[1:] if isinstance(handle, str) and handle.startswith("@") else handle
+        if (
+            not isinstance(candidate_handle, str)
+            or handle.startswith("@@")
+            or not _TELEGRAM_HANDLE_RE.fullmatch(candidate_handle)
+        ):
+            raise ConfigError(f"sources[{index}].telegram_handle is invalid")
+        handle = candidate_handle
+    return ManualSourceConfig(
+        id=source_id,
+        name=unicodedata.normalize("NFC", name),
+        enabled=True,
+        priority=_bounded_int(raw["priority"], f"sources[{index}].priority", 0, 1_000_000),
+        source_quality=quality,
+        classification=classification,
+        official_domains=_manual_hostname_list(raw["official_domains"], f"sources[{index}].official_domains"),
+        original_domains=_manual_hostname_list(raw["original_domains"], f"sources[{index}].original_domains"),
+        telegram_handle=handle,
+    )
+
+
+def load_behavior_profile(path: str | Path) -> BehaviorProfile:
+    """Load the bounded, local-only behavior profile without legacy bindings."""
+    try:
+        raw = tomllib.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise ConfigError("cannot read behavior profile") from error
+    if not isinstance(raw, dict):
+        raise ConfigError("behavior profile must be a TOML table")
+    unknown = set(raw) - _MANUAL_PROFILE_KEYS
+    if unknown:
+        raise ConfigError(f"behavior profile has unknown keys: {', '.join(sorted(unknown))}")
+    if raw.get("schema") != _MANUAL_PROFILE_SCHEMA:
+        raise ConfigError("behavior profile schema is invalid")
+    if raw.get("operation") != _MANUAL_PROFILE_OPERATION:
+        raise ConfigError("behavior profile operation is invalid")
+    sources_raw = raw.get("sources")
+    if not isinstance(sources_raw, list) or not 1 <= len(sources_raw) <= 32:
+        raise ConfigError("behavior profile must define from 1 to 32 sources")
+    sources = tuple(_parse_manual_source(source, index) for index, source in enumerate(sources_raw))
+    if len({source.id.casefold() for source in sources}) != len(sources):
+        raise ConfigError("behavior profile contains duplicate source ids")
+    handles = [source.telegram_handle.casefold() for source in sources if source.telegram_handle]
+    if len(set(handles)) != len(handles):
+        raise ConfigError("behavior profile contains duplicate Telegram handles")
+    if "policy" not in raw or "news_policy" not in raw:
+        raise ConfigError("behavior profile requires policy and news_policy")
+    return BehaviorProfile(
+        schema=_MANUAL_PROFILE_SCHEMA,
+        operation=_MANUAL_PROFILE_OPERATION,
+        sources=tuple(sorted(sources, key=lambda source: source.id)),
+        policy=_parse_policy(raw["policy"]),
+        news_policy=_parse_news_policy(raw["news_policy"]),
     )
 
 
@@ -532,10 +781,7 @@ def _parse_news_policy(raw: Any) -> NewsPolicyConfig:
         raise ConfigError("news_policy.version must be news_policy_v1")
     if raw["timezone"] != "Asia/Seoul":
         raise ConfigError("news_policy.timezone must be Asia/Seoul")
-    values = {
-        name: _bounded_int(raw[name], f"news_policy.{name}", 0, 100_000)
-        for name in _NEWS_POLICY_APPROVED_INTS
-    }
+    values = {name: _bounded_int(raw[name], f"news_policy.{name}", 0, 100_000) for name in _NEWS_POLICY_APPROVED_INTS}
     for name, approved in _NEWS_POLICY_APPROVED_INTS.items():
         if values[name] != approved:
             raise ConfigError(f"news_policy.{name} must equal approved news_policy_v1 value {approved}")
@@ -597,8 +843,6 @@ def load_config(
     handles = {channel.handle.casefold() for channel in channels}
     if len({channel.id.casefold() for channel in channels}) != 6 or len(handles) != 6:
         raise ConfigError("configuration channel ids and handles must be unique")
-    if handles != _REQUIRED_CHANNEL_HANDLES:
-        raise ConfigError("configuration must define the six audited channel handles")
     if len(tuple(channel for channel in channels if channel.enabled)) != 6:
         raise ConfigError("all six configured channels must be enabled")
     env = os.environ if environ is None else environ

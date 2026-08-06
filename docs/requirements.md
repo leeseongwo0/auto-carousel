@@ -1,10 +1,10 @@
 # 제품 및 운영 요구사항
 
-## 범위와 자동 흐름
+## 범위와 실행 흐름
 
-로컬 우선 Python 3.12 모듈형 모놀리스은 SQLite를 유일한 내구성 권위로 사용한다. 고정 소스는 `testingcatalog`, `ai_masters_community`, `aipost`, `coinnesskr`, `exilist_official`, `dolbikong` 여섯 개이며 설정은 `config/channels.toml`이 권위다.
+Newsbot은 Python 3.12 모듈형 모놀리스와 SQLite 내구성 권위를 사용합니다. 공개 기본 경로는 사용자가 작성한 `newsbot.behavior.v1` 프로필, 제한된 로컬 입력, 명시적인 후보 선택·검토, 로컬 JSON/Markdown 내보내기로 구성되며 Telegram·Google Sheets·고정 시간대 권한을 만들지 않습니다. 저장 경로와 프로필은 실행마다 명시하고 공개 예시는 합성 소스만 사용합니다.
 
-자동 운전은 `newsbot-collect`, `newsbot-telegram`, `newsbot-sheets` service/timer 쌍으로 한다. collect는 6개 채널을 매시간 수집하고 기존 ranking 뒤의 provider-free `news_policy_v1`으로 뉴스 적격성을 판정한다. Telegram은 실제 뉴스(`definite_news|trusted_analysis`)의 candidate/review outbox와 approval callback polling, 그리고 애매한 글의 제목 전용 정오 digest를 담당한다. Sheets는 최종 승인 handoff delivery를 수행한다. 기존 `newsbot-generate-codex.timer`는 변경되지 않은 별도 one-job Codex scheduler다.
+기존 자동 운전은 선택적 호환 계층입니다. `newsbot-collect`, `newsbot-telegram`, `newsbot-sheets` service/timer 쌍과 별도 `newsbot-generate-codex.timer`가 비공개 운영 프로필의 정확한 여섯 채널, Telegram 승인, Asia/Seoul 정오 분류, Google Sheets 전달을 유지합니다. 운영자는 공개 합성 설정을 그대로 배포하지 않고 자신의 비공개 프로필과 자격 증명 경계를 별도로 관리해야 합니다.
 
 수집 cursor는 각 page/chunk transaction이 성공한 뒤에만 전진해야 한다. crash, cap, timeout과 FloodWait 뒤에는 durable frontier에서 계속해야 한다. Telegram notification outbox, Sheets remote operation, per-chunk records와 terminal history는 retention 대상이며 삭제하거나 추측으로 재작성하지 않는다.
 `ambiguous` 글은 버튼·본문·URL·판정 이유 없이 제목만 내구성 있게 보관한다. Asia/Seoul 기준 `[12:00:00,13:00:00)`에 같은 Telegram worker가 하루 한 번의 intent를 commit하며, 정확히 13:00까지 intent가 없으면 그 날짜를 `skipped`로 종결하고 catch-up이나 rollover를 하지 않는다. 시간 안에 commit한 intent는 13:00 이후에도 기존 no-blind-resend 규칙으로 전송·안전 재시도할 수 있다.

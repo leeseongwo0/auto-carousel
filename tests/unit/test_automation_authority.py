@@ -112,6 +112,26 @@ def activate(storage: Storage) -> tuple[AutomationAuthority, str, int]:
         validate=lambda: True,
     ) == {"changed": True, "status": "active"}
     return authority, receipt, binding_id
+
+
+def test_manual_profile_blocks_direct_stream_authority_after_reopen(tmp_path: Path) -> None:
+    database = tmp_path / "manual-stream.sqlite"
+    with Storage.open(database) as storage:
+        storage.bind_manual_profile("newsbot.behavior.v1", digest("manual-profile"))
+
+    with Storage.open(database) as storage:
+        with (
+            storage.transaction() as connection,
+            pytest.raises(sqlite3.IntegrityError, match="automation authority conflicts"),
+        ):
+            connection.execute(
+                "INSERT INTO automation_stream_leases(stream,owner_hash,fence,expires_at,acquired_at) "
+                "VALUES('collect','manual-bypass',1,?,?)",
+                (NOW.isoformat(), NOW.isoformat()),
+            )
+        assert storage.fetch_one("SELECT 1 FROM automation_stream_leases") is None
+
+
 def activate_hourly(storage: Storage) -> tuple[AutomationAuthority, object, int]:
     authority, _, _ = activate(storage)
     config = load_config(Path("config/channels.toml"), environ={})
@@ -121,16 +141,12 @@ def activate_hourly(storage: Storage) -> tuple[AutomationAuthority, object, int]
         now=NOW + timedelta(minutes=1),
         validate=lambda: True,
     )
-    row = storage.fetch_one(
-        "SELECT id FROM automation_release_config_bindings ORDER BY id DESC LIMIT 1"
-    )
+    row = storage.fetch_one("SELECT id FROM automation_release_config_bindings ORDER BY id DESC LIMIT 1")
     assert row is not None
     return authority, config, int(row["id"])
 
 
-def insert_noon_window(
-    storage: Storage, *, binding_id: int, local_date: str, state: str = "collecting"
-) -> int:
+def insert_noon_window(storage: Storage, *, binding_id: int, local_date: str, state: str = "collecting") -> int:
     zone = ZoneInfo("Asia/Seoul")
     opens = datetime.fromisoformat(f"{local_date}T12:00:00").replace(tzinfo=zone)
     with storage.transaction() as connection:
@@ -191,6 +207,7 @@ def test_migration_007_fresh_and_006_upgrade_create_no_work_and_enforce_authorit
                 (6, "telegram_update_cursor"),
                 (7, "systemd_automation"),
                 (8, "hourly_news_eligibility"),
+                (9, "manual_local_workflow"),
             )
         }
         assert storage.fetch_one("PRAGMA journal_mode")[0].lower() == "wal"
@@ -241,6 +258,7 @@ def test_migration_007_fresh_and_006_upgrade_create_no_work_and_enforce_authorit
         assert storage.fetch_all("PRAGMA foreign_key_check") == []
     finally:
         storage.close()
+
 
 def test_populated_migration_007_history_survives_hourly_upgrade_and_two_reopens(tmp_path: Path) -> None:
     database = tmp_path / "populated-007.sqlite"
@@ -319,10 +337,13 @@ def test_populated_migration_007_history_survives_hourly_upgrade_and_two_reopens
                     "FROM telegram_notification_outbox ORDER BY id"
                 )
                 assert tuple(tuple(row) for row in current) == rows
-                assert storage.fetch_one(
-                    "SELECT COUNT(*) AS count FROM telegram_notification_outbox "
-                    "WHERE ambiguous_window_id IS NOT NULL"
-                )["count"] == 0
+                assert (
+                    storage.fetch_one(
+                        "SELECT COUNT(*) AS count FROM telegram_notification_outbox "
+                        "WHERE ambiguous_window_id IS NOT NULL"
+                    )["count"]
+                    == 0
+                )
             else:
                 current = storage.fetch_all(f"SELECT * FROM {table} ORDER BY id")
                 assert tuple(tuple(row) for row in current) == rows
@@ -331,16 +352,21 @@ def test_populated_migration_007_history_survives_hourly_upgrade_and_two_reopens
 
     for _ in range(2):
         with Storage.open(database) as reopened:
-            assert reopened.fetch_one(
-                "SELECT COUNT(*) AS count FROM schema_migrations "
-                "WHERE version='008_hourly_news_eligibility.sql'"
-            )["count"] == 1
+            assert (
+                reopened.fetch_one(
+                    "SELECT COUNT(*) AS count FROM schema_migrations WHERE version='008_hourly_news_eligibility.sql'"
+                )["count"]
+                == 1
+            )
             assert reopened.fetch_all("PRAGMA foreign_key_check") == []
             assert reopened.fetch_one("PRAGMA foreign_keys")[0] == 1
-            assert reopened.fetch_one(
-                "SELECT accepted_message_id FROM telegram_chunk_attempts WHERE id=?",
-                (attempt_id,),
-            )["accepted_message_id"] == 42
+            assert (
+                reopened.fetch_one(
+                    "SELECT accepted_message_id FROM telegram_chunk_attempts WHERE id=?",
+                    (attempt_id,),
+                )["accepted_message_id"]
+                == 42
+            )
 
 
 def test_proposal_cutover_replay_drift_expiry_and_immutable_records(tmp_path: Path) -> None:
@@ -428,12 +454,15 @@ def test_audience_bindings_are_append_only_versions_and_exact_replays(tmp_path: 
             audience_hmac=digest("audience-1"),
             version=authority.next_audience_version(bot),
         )
-        assert authority.record_audience_binding(
-            bot_id_digest=bot,
-            token_hmac=digest("token-1"),
-            audience_hmac=digest("audience-1"),
-            version=99,
-        ) == first
+        assert (
+            authority.record_audience_binding(
+                bot_id_digest=bot,
+                token_hmac=digest("token-1"),
+                audience_hmac=digest("audience-1"),
+                version=99,
+            )
+            == first
+        )
         second = authority.record_audience_binding(
             bot_id_digest=bot,
             token_hmac=digest("token-2"),
@@ -795,6 +824,8 @@ def test_deferred_transition_is_legacy_only_before_cutover(tmp_path: Path) -> No
                 (post_cutover_candidate,),
             )
         assert authority.safe_status()["cutover_active"] is True
+
+
 def test_noon_admission_uses_post_lock_clock_and_exact_boundaries(tmp_path: Path) -> None:
     zone = ZoneInfo("Asia/Seoul")
     with Storage.open(tmp_path / "noon-boundaries.sqlite") as storage:
@@ -808,53 +839,54 @@ def test_noon_admission_uses_post_lock_clock_and_exact_boundaries(tmp_path: Path
 
         authority.seal_noon_window(config, now=at_noon)
         assert sampled_in_transaction == [True]
-        assert storage.fetch_one(
-            "SELECT state FROM ambiguous_digest_windows WHERE scheduled_local_date='2026-08-03'"
-        )["state"] == "empty"
+        assert (
+            storage.fetch_one("SELECT state FROM ambiguous_digest_windows WHERE scheduled_local_date='2026-08-03'")[
+                "state"
+            ]
+            == "empty"
+        )
 
-        nonempty_window = insert_noon_window(
-            storage, binding_id=binding_id, local_date="2026-08-04"
-        )
+        nonempty_window = insert_noon_window(storage, binding_id=binding_id, local_date="2026-08-04")
         insert_noon_item(storage, binding_id=binding_id, window_id=nonempty_window)
-        authority.seal_noon_window(
-            config, now=datetime(2026, 8, 4, 12, 59, 59, 999999, tzinfo=zone)
+        authority.seal_noon_window(config, now=datetime(2026, 8, 4, 12, 59, 59, 999999, tzinfo=zone))
+        assert (
+            storage.fetch_one("SELECT state FROM ambiguous_digest_windows WHERE id=?", (nonempty_window,))["state"]
+            == "queued"
         )
-        assert storage.fetch_one(
-            "SELECT state FROM ambiguous_digest_windows WHERE id=?", (nonempty_window,)
-        )["state"] == "queued"
-        assert storage.fetch_one(
-            "SELECT COUNT(*) AS count FROM telegram_notification_outbox "
-            "WHERE notification_kind='noon_digest' AND ambiguous_window_id=?",
-            (nonempty_window,),
-        )["count"] == 1
-        assert storage.fetch_one(
-            "SELECT created_at FROM telegram_notification_outbox "
-            "WHERE notification_kind='noon_digest' AND ambiguous_window_id=?",
-            (nonempty_window,),
-        )["created_at"] == "2026-08-04T03:59:59.999999+00:00"
+        assert (
+            storage.fetch_one(
+                "SELECT COUNT(*) AS count FROM telegram_notification_outbox "
+                "WHERE notification_kind='noon_digest' AND ambiguous_window_id=?",
+                (nonempty_window,),
+            )["count"]
+            == 1
+        )
+        assert (
+            storage.fetch_one(
+                "SELECT created_at FROM telegram_notification_outbox "
+                "WHERE notification_kind='noon_digest' AND ambiguous_window_id=?",
+                (nonempty_window,),
+            )["created_at"]
+            == "2026-08-04T03:59:59.999999+00:00"
+        )
 
         authority.seal_noon_window(config, now=datetime(2026, 8, 5, 13, 0, tzinfo=zone))
-        assert storage.fetch_one(
-            "SELECT state FROM ambiguous_digest_windows WHERE scheduled_local_date='2026-08-05'"
-        )["state"] == "skipped"
+        assert (
+            storage.fetch_one("SELECT state FROM ambiguous_digest_windows WHERE scheduled_local_date='2026-08-05'")[
+                "state"
+            ]
+            == "skipped"
+        )
 
 
 def test_hourly_observability_is_aggregate_and_redacted(tmp_path: Path) -> None:
     zone = ZoneInfo("Asia/Seoul")
     with Storage.open(tmp_path / "hourly-status.sqlite") as storage:
         _, _, binding_id = activate_hourly(storage)
-        collecting = insert_noon_window(
-            storage, binding_id=binding_id, local_date="2026-08-03"
-        )
-        queued = insert_noon_window(
-            storage, binding_id=binding_id, local_date="2026-08-04", state="queued"
-        )
-        insert_noon_window(
-            storage, binding_id=binding_id, local_date="2026-08-05", state="empty"
-        )
-        insert_noon_window(
-            storage, binding_id=binding_id, local_date="2026-08-06", state="skipped"
-        )
+        collecting = insert_noon_window(storage, binding_id=binding_id, local_date="2026-08-03")
+        queued = insert_noon_window(storage, binding_id=binding_id, local_date="2026-08-04", state="queued")
+        insert_noon_window(storage, binding_id=binding_id, local_date="2026-08-05", state="empty")
+        insert_noon_window(storage, binding_id=binding_id, local_date="2026-08-06", state="skipped")
         with storage.transaction() as connection:
             for window_id, state in ((queued, "pending"), (collecting, "ambiguous")):
                 connection.execute(
@@ -870,9 +902,7 @@ def test_hourly_observability_is_aggregate_and_redacted(tmp_path: Path) -> None:
                     ),
                 )
 
-        before_close = automation_status(
-            storage, now=datetime(2026, 8, 3, 12, 59, 59, 999999, tzinfo=zone)
-        )
+        before_close = automation_status(storage, now=datetime(2026, 8, 3, 12, 59, 59, 999999, tzinfo=zone))
         at_close = automation_status(storage, now=datetime(2026, 8, 3, 13, 0, tzinfo=zone))
         assert before_close["news_policy_current_config_binding_present"] is True
         assert before_close["news_policy_current_config_binding_count"] == 1
@@ -922,7 +952,9 @@ def test_noon_window_sql_rejects_wrong_local_date_or_hour(tmp_path: Path) -> Non
                     "2026-08-03T03:00:00+00:00",
                 ),
             )
-        assert storage.fetch_one(
-            "SELECT COUNT(*) AS count FROM ambiguous_digest_windows "
-            "WHERE scheduled_local_date='2026-08-03'"
-        )["count"] == 1
+        assert (
+            storage.fetch_one(
+                "SELECT COUNT(*) AS count FROM ambiguous_digest_windows WHERE scheduled_local_date='2026-08-03'"
+            )["count"]
+            == 1
+        )

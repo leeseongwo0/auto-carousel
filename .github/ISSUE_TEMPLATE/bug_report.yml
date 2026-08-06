@@ -1,0 +1,43 @@
+name: Bug report
+description: Report a reproducible Newsbot defect using sanitized evidence.
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include credentials, sessions, databases, private profiles, personal data, or production identifiers. Use synthetic reproductions.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: Commit SHA or 0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: workflow
+    attributes:
+      label: Workflow
+      options:
+        - Manual/local
+        - Legacy compatibility
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Sanitized reproduction
+      description: Include minimal steps, expected behavior, and actual behavior without private data.
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification evidence
+      description: Include sanitized command results or test names.
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy confirmation
+      options:
+        - label: I removed credentials, personal data, private content, and production identifiers.
+          required: true

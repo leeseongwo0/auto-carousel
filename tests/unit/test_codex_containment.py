@@ -45,6 +45,7 @@ def test_bundled_codex_policy_is_minimal_read_only_and_denies_device_auth() -> N
     assert policy["permissions"]["newsbot_generate"]["extends"] == ":read-only"
     assert policy["permissions"]["newsbot_generate"]["filesystem"] == {"~/.codex": "deny"}
 
+
 def test_parent_check_validates_directories_not_regular_target(
     containment: object, monkeypatch: pytest.MonkeyPatch
 ) -> None:

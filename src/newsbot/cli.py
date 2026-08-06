@@ -19,6 +19,7 @@ from secrets import token_hex
 from typing import Any, Literal, cast
 from zoneinfo import ZoneInfo
 
+from . import manual
 from .ai.base import GenerationProvider
 from .approval.base import hash_callback_token
 from .approval.scripted import ScriptedAction, ScriptedApprovalAdapter
@@ -90,6 +91,24 @@ def _provider_factory(provider_name: str) -> Callable[[], GenerationProvider]:
 
 def _database(args: argparse.Namespace) -> Path:
     return args.db if args.db is not None else _path_from_environment("NEWSBOT_DATABASE", "data/newsbot.sqlite")
+
+
+def _assert_legacy_database_authority(path: Path) -> None:
+    """Read existing authority without creating or migrating the database."""
+    if not path.exists():
+        return
+    connection = sqlite3.connect(path.resolve(strict=True).as_uri() + "?mode=ro", uri=True)
+    try:
+        table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='manual_profile_bindings'"
+        ).fetchone()
+        if (
+            table is not None
+            and connection.execute("SELECT 1 FROM manual_profile_bindings WHERE id=1").fetchone() is not None
+        ):
+            raise RuntimeError("manual profile authority conflicts with automation")
+    finally:
+        connection.close()
 
 
 def _attested_runtime_release_digest(
@@ -2830,6 +2849,56 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--lease-seconds", dest="lease_seconds", type=int, default=135)
             command.add_argument("--sheet-lease-seconds", type=int, choices=(300,), default=300)
         command.set_defaults(handler=handler)
+
+    def manual_command(name: str, handler: CommandHandler, help_text: str) -> argparse.ArgumentParser:
+        command = commands.add_parser(name, help=help_text)
+        command.add_argument("--profile", type=Path, required=True)
+        command.add_argument("--state")
+        command.add_argument("--database", default="newsbot.sqlite3")
+        command.set_defaults(handler=handler)
+        return command
+
+    manual_command("manual-init", manual.manual_init, "initialize private local manual state")
+    imported = manual_command("manual-import", manual.manual_import, "import bounded local source observations")
+    imported.add_argument("--input", type=Path, required=True)
+    collected = manual_command(
+        "manual-collect-telethon", manual.manual_collect_telethon, "collect a bounded public Telethon page"
+    )
+    collected.add_argument("--lookback-hours", type=int, required=True)
+    collected.add_argument("--page-limit", type=int, required=True)
+    collected.add_argument("--max-pages", type=int, default=1)
+    collected.add_argument("--deadline-seconds", type=int, default=180)
+    manual_command("manual-rank", manual.manual_rank, "rank existing manual observations")
+    candidates = manual_command("manual-candidates", manual.manual_candidates, "list deterministic manual candidates")
+    candidates.add_argument("--run-id", type=int, required=True)
+    candidates.add_argument("--output-dir")
+    decision = manual_command(
+        "manual-candidate-decision", manual.manual_candidate_decision, "apply a local candidate selection decision"
+    )
+    decision.add_argument("--run-id", type=int, required=True)
+    decision.add_argument("--candidate-id", type=int, required=True)
+    decision.add_argument("--decision", choices=("select", "reject"), required=True)
+    decision.add_argument("--expected-receipt", required=True)
+    generated = manual_command("manual-generate", manual.manual_generate, "generate one selected local candidate")
+    generated.add_argument("--candidate-id", type=int, required=True)
+    generated.add_argument("--provider", choices=("fake", "openai_compatible"), required=True)
+    generated.add_argument("--page-count", type=int, default=1)
+    generated.add_argument("--output-dir")
+    draft = manual_command("manual-draft", manual.manual_draft, "materialize an exact local draft")
+    draft.add_argument("--generation-id", type=int, required=True)
+    draft.add_argument("--output-dir")
+    review = manual_command("manual-review", manual.manual_review, "record a local review decision")
+    review.add_argument("--candidate-id", type=int, required=True)
+    review.add_argument("--generation-id", type=int, required=True)
+    review.add_argument("--decision", choices=("approve-local", "regenerate", "reject"), required=True)
+    review.add_argument("--expected-draft-digest", required=True)
+    exported = manual_command("manual-export", manual.manual_export, "materialize approved local exports")
+    exported.add_argument("--output-dir")
+    manual_command("manual-status", manual.manual_status, "show aggregate manual state")
+    inspected = manual_command("manual-inspect", manual.manual_inspect, "show bounded redacted manual detail")
+    inspected.add_argument("--run-id", type=int)
+    inspected.add_argument("--candidate-id", type=int)
+    inspected.add_argument("--generation-id", type=int)
     return parser
 
 
@@ -2837,6 +2906,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        # Legacy entry points must refuse a manually bound database before any
+        # automation lock, provider, Telegram, or Sheets authority is acquired.
+        if not args.command.startswith("manual-") and args.command != "init-db" and hasattr(args, "db"):
+            _assert_legacy_database_authority(_database(args))
         handler = cast(CommandHandler, args.handler)
         return handler(args)
     except (ConfigError, LookupError, OSError, RuntimeError, ValueError) as error:

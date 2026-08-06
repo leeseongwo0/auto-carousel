@@ -1,8 +1,8 @@
 # Audited source and candidate policy configuration.
 [[channels]]
-id = "testingcatalog"
-name = "Testing Catalog"
-handle = "testingcatalog"
+id = "community_feed"
+name = "Synthetic Community Feed"
+handle = "community_feed"
 enabled = true
 priority = 60
 source_quality = 0.65
@@ -11,9 +11,9 @@ official_domains = []
 original_domains = []
 
 [[channels]]
-id = "ai_masters_community"
-name = "AI Masters Community"
-handle = "ai_masters_community"
+id = "research_forum"
+name = "Synthetic Research Forum"
+handle = "research_forum"
 enabled = true
 priority = 55
 source_quality = 0.60
@@ -22,20 +22,20 @@ official_domains = []
 original_domains = []
 
 [[channels]]
-id = "aipost"
-name = "AI Post"
-handle = "aipost"
+id = "news_publisher"
+name = "Synthetic News Publisher"
+handle = "news_publisher"
 enabled = true
 priority = 80
 source_quality = 0.85
 classification = "original_publisher"
 official_domains = []
-original_domains = ["aipost.kr"]
+original_domains = ["publisher.example"]
 
 [[channels]]
-id = "coinnesskr"
-name = "Coinness Korea"
-handle = "coinnesskr"
+id = "news_aggregator"
+name = "Synthetic News Aggregator"
+handle = "news_aggregator"
 enabled = true
 priority = 65
 source_quality = 0.70
@@ -44,20 +44,20 @@ official_domains = []
 original_domains = []
 
 [[channels]]
-id = "exilist_official"
-name = "Exilist Official"
-handle = "exilist_official"
+id = "official_updates"
+name = "Synthetic Official Updates"
+handle = "official_updates"
 enabled = true
 priority = 90
 source_quality = 1.00
 classification = "official"
-official_domains = ["exilist.ai"]
+official_domains = ["official.example"]
 original_domains = []
 
 [[channels]]
-id = "dolbikong"
-name = "Dolbikong"
-handle = "dolbikong"
+id = "general_chat"
+name = "Synthetic General Chat"
+handle = "general_chat"
 enabled = true
 priority = 50
 source_quality = 0.55
