@@ -360,6 +360,34 @@ def test_authority_upgrade_rolls_back_schema_and_ledger_on_fk_violation(
         Storage.open(database)
 
 
+def test_authority_upgrade_ignores_later_manual_authority_triggers(tmp_path: Path) -> None:
+    database = tmp_path / "supported-003-with-manual-triggers.sqlite"
+    migrations = Path(__file__).parents[2] / "src" / "newsbot" / "migrations"
+    storage = Storage(database)
+    try:
+        storage._connection.executescript((migrations / "001_initial.sql").read_text(encoding="utf-8"))
+        storage._prepare_canonical_authority_upgrade()
+        storage._connection.execute("PRAGMA foreign_keys=OFF")
+        storage._connection.executescript((migrations / "002_canonical_authority.sql").read_text(encoding="utf-8"))
+        storage._connection.execute("PRAGMA foreign_keys=ON")
+        storage._connection.executescript((migrations / "003_sheets_handoff.sql").read_text(encoding="utf-8"))
+        storage._connection.executescript(
+            "CREATE TABLE manual_profile_bindings(id INTEGER PRIMARY KEY);"
+            "CREATE TRIGGER automation_handoff_refuses_manual_profile "
+            "BEFORE INSERT ON sheet_handoffs WHEN EXISTS(SELECT 1 FROM manual_profile_bindings) "
+            "BEGIN SELECT RAISE(ABORT, 'automation authority conflicts with manual profile'); END;"
+            "CREATE TRIGGER automation_handoff_operation_refuses_manual_profile "
+            "BEFORE INSERT ON sheet_remote_operations WHEN EXISTS(SELECT 1 FROM manual_profile_bindings) "
+            "BEGIN SELECT RAISE(ABORT, 'automation authority conflicts with manual profile'); END;"
+            "CREATE TRIGGER automation_handoff_lease_refuses_manual_profile "
+            "BEFORE INSERT ON sheet_operation_leases WHEN EXISTS(SELECT 1 FROM manual_profile_bindings) "
+            "BEGIN SELECT RAISE(ABORT, 'automation authority conflicts with manual profile'); END;"
+        )
+        storage._assert_sheets_authority_upgrade_supported(migrations / "003_sheets_handoff.sql")
+    finally:
+        storage.close()
+
+
 @pytest.mark.parametrize(
     ("schema_mutation", "object_type", "object_name"),
     (

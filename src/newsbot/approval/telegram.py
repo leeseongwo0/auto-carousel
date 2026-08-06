@@ -76,6 +76,8 @@ def split_telegram_text(text: str, *, limit: int = TELEGRAM_TEXT_LIMIT) -> tuple
         chunks.append(text[start:split_at])
         start = split_at
     return tuple(chunks)
+
+
 def split_telegram_titles(titles: tuple[str, ...], *, limit: int = TELEGRAM_TEXT_LIMIT) -> tuple[str, ...]:
     """Pack immutable titles at title boundaries with newline separators."""
     if not titles:

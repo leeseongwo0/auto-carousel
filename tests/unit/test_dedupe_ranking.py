@@ -191,7 +191,7 @@ def test_rationale_has_exact_decimal_inputs_topic_spans_and_stable_winners() -> 
     )
     rationale = launch.rationale
     assert rationale["components"]["quality"]["winner_material_identity"] == {
-        "channel_id": "exilist_official",
+        "channel_id": "official_updates",
         "external_post_id": "101",
     }
     topic = rationale["sources"][0]["topic"]

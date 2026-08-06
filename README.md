@@ -1,51 +1,93 @@
-# 뉴스 캐러셀 워크플로
+# Newsbot
 
-Telegram의 고정된 여섯 소스 채널(`testingcatalog`, `ai_masters_community`, `aipost`, `coinnesskr`, `exilist_official`, `dolbikong`)을 자동 수집·평가하고, 사람이 승인한 후보만 `gpt-5.6-terra`로 유연하게 1–8페이지 카드뉴스 초안으로 만듭니다. 사람이 정확한 초안을 다시 승인하면 Google Sheets의 고정 `workplace` 탭에 idempotent하게 한 행을 추가합니다. SQLite가 cursor, outbox, 승인, 원고, handoff와 원격 작업의 유일한 durable authority입니다.
-생성 원고의 본문과 캡션 문장은 일관된 `합니다체` 경어체를 사용하고, 캡션 해시태그는 1–5개로 제한합니다.
+Newsbot is a local-first workflow for turning news observations into reviewed, exportable drafts. The public v1 workflow is manual and local: you define the sources, import synthetic or user-collected observations, choose candidates, review drafts, and write approved exports to directories you control.
 
-## 자동 사용자 흐름
+The Python distribution remains `telegram-news-bot` version `0.1.0`; its installed command is `newsbot`.
 
-1. `newsbot-collect.timer`는 service inactivity 뒤 매시간 수집 worker를 실행합니다. 페이지/chunk가 성공적으로 commit된 뒤에만 durable cursor가 전진하므로 crash, cap, timeout 뒤에도 이어서 수집합니다. 기존 고정 여섯 채널 토폴로지는 변하지 않습니다.
-2. 기존 ranking hard filter 뒤의 결정론적 offline `news_policy_v1`가 source-local 근거로 후보를 `definite_news`, `trusted_analysis`, `ambiguous`, `non_news`로 분류합니다. 앞의 둘만 즉시 Telegram 승인 digest/button을 만들고, `ambiguous`는 callback/button 없이 immutable first-wins 제목을 Seoul 정오 window에 보관하며, `non_news`는 조용히 종료합니다.
-3. `newsbot-telegram.timer`는 후보 알림, callback polling, 선택된 작업의 생성 알림과 검토 알림을 처리합니다. 정오 intent는 SQLite write lock을 얻은 뒤 표본화한 Asia/Seoul 시간이 `[12:00:00,13:00:00)`일 때만 commit됩니다. 정확히 13:00에는 미생성 window를 `skipped`로 끝내며 catch-up이나 roll-forward는 없습니다. 제때 commit된 intent는 13:00 뒤에도 durable outbox로 안전하게 dispatch/retry합니다.
-후보 선택 메시지는 `[제작]`, `거절`, `새로고침` 버튼만 제공하며 시간 단위 미루기 버튼은 표시하지 않습니다.
-4. Codex는 별도의 기존 `newsbot-generate-codex.timer`가 한 activation에 frozen job 하나만 처리합니다. 이 타이머의 역할과 containment는 변경하지 않습니다.
-5. 검토자는 정확한 current draft에서 `[시트 전달]`을 승인합니다. 승인 transaction은 immutable Sheets handoff만 만들며 원격 호출은 하지 않습니다.
-6. `newsbot-sheets.timer`가 승인된 handoff 하나를 전달합니다. document metadata가 정확히 일치하면 zero-write 재사용하며, ambiguous Telegram/Sheets 효과는 자동 재전송하지 않습니다.
+## Install
 
-생성 성공이나 후보 선택은 최종 전달 승인이 아닙니다. Figma/Instagram 자동화, 기존 행 변경, 다른 Sheets 탭 변경은 범위 밖입니다.
-
-## 설치와 핵심 명령
+Clone this repository, then install it into an environment you control. There is no package-registry release.
 
 ```bash
-uv sync --group dev
-uv sync --group dev --extra sheets
-uv run newsbot init-db --db var/e2e/newsbot.db
-uv run newsbot status --db var/e2e/newsbot.db
+python -m venv .venv
+. .venv/bin/activate
+python -m pip install .
+newsbot --help
 ```
 
-운영 cutover는 immutable proposal receipt를 반드시 왕복합니다.
+For development tools, use `uv sync --group dev` from the checkout.
+
+## Manual/local v1
+
+### Keep state private
+
+Create a private state directory before initialization. Newsbot creates its SQLite database there and keeps the database owner-readable and owner-writable (`0600`). Keep the state directory at `0700`; do not place it in a shared directory or commit it.
+For the supported trust boundary, every existing ancestor of the state and output paths must be owned by either the current user or `root`, must not be a symbolic link, and must not be writable by group or other users. Shared or sticky locations such as `/tmp` are unsupported, even when the final directory itself is private.
 
 ```bash
-newsbot automation-cutover-preview --config /etc/newsbot/config.toml --db /var/lib/newsbot/newsbot.db --proposal-id <PROPOSAL_ID> --release-digest <RELEASE_DIGEST>
-newsbot automation-cutover-apply --db /var/lib/newsbot/newsbot.db --proposal-id <PROPOSAL_ID> --proposal-sha256 <PREVIEW_PROPOSAL_SHA256> --release-digest <RELEASE_DIGEST>
+export NEWSBOT_STATE="$HOME/.local/state/newsbot"
+export NEWSBOT_PROFILE="$NEWSBOT_STATE/profile.toml"
+export NEWSBOT_INPUT="$NEWSBOT_STATE/observations.json"
+export NEWSBOT_OUTPUT="$HOME/.local/share/newsbot/output"
+install -d -m 700 "$NEWSBOT_STATE"
+install -d -m 700 "$NEWSBOT_OUTPUT/candidates" "$NEWSBOT_OUTPUT/drafts" "$NEWSBOT_OUTPUT/exports"
 ```
 
-`<…>`는 command 이름이 아니라 운영자가 receipt 또는 release manifest에서 대입하는 **명시적 placeholder**다. preview stdout의 proposal receipt와 SHA-256이 apply 입력과 정확히 같지 않으면 apply하지 않습니다.
+Use an explicit output directory for every command that materializes data. Outputs are separate from private state, so they can be inspected, backed up, or selectively shared without sharing the database.
+Newsbot supports Python 3.12 or newer on POSIX/Linux systems.
 
-운영 systemd unit은 다음 여섯 개입니다.
+### Define sources and import observations
 
-- `newsbot-collect.service` / `newsbot-collect.timer`
-- `newsbot-telegram.service` / `newsbot-telegram.timer`
-- `newsbot-sheets.service` / `newsbot-sheets.timer`
+Create a local behavior profile at `$NEWSBOT_PROFILE`. It must use `schema = "newsbot.behavior.v1"` and `operation = "manual_local"`, contain 1–32 enabled `[[sources]]`, and include the required `[policy]` and `[news_policy]` tables. Each source has a user-defined ID, name, classification, priority, quality, and domain lists; a public Telegram handle is optional. Use synthetic sources for demonstrations and tests, or sources you are authorized to collect.
+Start from the tracked synthetic template and keep your real profile in the private state directory:
 
-기존 `newsbot-generate-codex.service` / `newsbot-generate-codex.timer`는 별도 one-job Codex 경계이며 위 여섯 unit으로 대체하거나 합치지 않습니다.
-`news_policy_v1`의 신뢰/분석/근거는 같은 observation 안에서만 성립하고 AI, network, host clock에 의존하지 않습니다. noon digest는 frozen 제목과 줄바꿈만 사용하며 button, 본문, source, reason을 포함하지 않습니다. accepted Telegram chunk는 terminal evidence로 절대 blind resend하지 않으며, ambiguous 또는 accepted-prefix partial effect는 immutable operator resolution이 필요합니다.
+```bash
+cp config/manual-profile.example.toml "$NEWSBOT_PROFILE"
+```
 
-## 안전한 운영
+Import data is a bounded JSON document stored at `$NEWSBOT_INPUT`, outside the checkout and with mode `0600`. Set `schema` to `newsbot.manual.import.v1` and provide a `records` array. Every record identifies a source from the profile and includes a post ID and timezone-aware `published_at`; text, URLs, and engagement values are optional. The document may contain at most 10,000 records and be at most 16 MiB.
 
-`automation-status`로 aggregate health를, `automation-quiescence-check`로 cutover 전 bounded quiescence assertion을 확인합니다. 특정 ambiguous notification은 payload를 보지 않는 `automation-notification-inspect`로 상태를 확인하고, 허용된 `manual_required` 상태만 `automation-notification-resolve`로 immutable resolution 합니다. Telegram 또는 Sheets 요청이 timeout, process death, 5xx, malformed response, unavailable probe 뒤 ambiguous가 되면 자동으로 다시 보내지 않습니다.
+```bash
+newsbot manual-init --profile "$NEWSBOT_PROFILE" --state "$NEWSBOT_STATE" --database newsbot.sqlite3
+newsbot manual-import --profile "$NEWSBOT_PROFILE" --state "$NEWSBOT_STATE" --database newsbot.sqlite3 --input "$NEWSBOT_INPUT"
+```
+As an optional alternative to a local import, install the `telegram` extra, add explicit public `telegram_handle` values to the private profile, and provide `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, and an owner-only `TELEGRAM_SESSION_PATH` outside the checkout. The following one-shot command processes sources sequentially, performs at most the stated pages per source, stops at the deadline, and leaves a durable cursor for a later manual continuation. It does not rank, generate, approve, or export anything.
 
-non-Codex 세 worker는 모두 `newsbot` UID, `/etc/newsbot/newsbot.env`, Telethon session, SQLite 및 worker locks를 공유합니다. 이들은 cross-unit isolation이나 `PrivateMounts` 보안 경계를 제공하지 않습니다. Codex만 login-shell 없는 별도 `newsbot-codex` UID에서 owner-only `CODEX_HOME`으로 device auth/provider credential을 보유하고, root-owned no-argument containment runner가 immutable authority/receipt를 attest한 activation만 그 UID에 전달하는 두 단계 경계입니다. immutable resume operation에 FK로 연결된 release row `COUNT(*)`를 권위로 유지하며 Codex token/API key를 `newsbot` 환경 파일에 넣거나 출력하지 않습니다.
+```bash
+newsbot manual-collect-telethon --profile "$NEWSBOT_PROFILE" --state "$NEWSBOT_STATE" --database newsbot.sqlite3 --lookback-hours 24 --page-limit 100 --max-pages 10 --deadline-seconds 900
+```
 
-상세 설치, monitoring, drain, recovery와 forward-only rollback은 [운영 가이드](docs/operations.md), 배포용 초보자 가이드는 `vps-deployment-guide.html`을 참조합니다. 최초 cutover는 switch 뒤 `init-db`로 schema를 만들고, 이후 migration-008 release/rollback은 008-compatible runtime으로의 forward switch 및 append-only release/config binding만 사용하며 immutable history를 restore/delete/update하지 않습니다.
+### Rank, select, generate, review, and export
+
+The commands print IDs in their JSON results. Substitute those returned IDs in the later commands; the angle-bracket values below are placeholders, not literal arguments.
+
+```bash
+# Read RUN_ID from the manual-rank result.
+newsbot manual-rank --profile "$NEWSBOT_PROFILE" --state "$NEWSBOT_STATE" --database newsbot.sqlite3
+CANDIDATES_JSON="$(newsbot manual-candidates --profile "$NEWSBOT_PROFILE" --state "$NEWSBOT_STATE" --database newsbot.sqlite3 --run-id <RUN_ID> --output-dir "$NEWSBOT_OUTPUT/candidates")"
+CANDIDATE_ARTIFACT="$(python -c 'import json,sys; from pathlib import Path; result = json.loads(sys.argv[1]); receipt = result["receipt"]; filename = result["artifact_filename"]; expected = f"candidates-{sys.argv[3]}-{receipt}.json"; assert len(receipt) == 64 and all(char in "0123456789abcdef" for char in receipt) and filename == expected, "command artifact identity is invalid"; path = Path(sys.argv[2]) / filename; preview = json.loads(path.read_text(encoding="utf-8")); assert preview["receipt"] == receipt, "artifact receipt does not match command receipt"; print(path)' "$CANDIDATES_JSON" "$NEWSBOT_OUTPUT/candidates" "<RUN_ID>")"
+CANDIDATE_RECEIPT="$(python -c 'import json,sys; print(json.loads(sys.argv[1])["receipt"])' "$CANDIDATES_JSON")"
+python -m json.tool "$CANDIDATE_ARTIFACT"
+newsbot manual-candidate-decision --profile "$NEWSBOT_PROFILE" --state "$NEWSBOT_STATE" --database newsbot.sqlite3 --run-id <RUN_ID> --candidate-id <CANDIDATE_ID> --decision select --expected-receipt "$CANDIDATE_RECEIPT"
+# Each decision changes the candidate set. Before every later decision, rerun manual-candidates and repeat the command-result receipt and artifact validation above; use only that new receipt with the next decision.
+newsbot manual-generate --profile "$NEWSBOT_PROFILE" --state "$NEWSBOT_STATE" --database newsbot.sqlite3 --candidate-id <CANDIDATE_ID> --provider fake --page-count 1 --output-dir "$NEWSBOT_OUTPUT/drafts"
+
+# Read GENERATION_ID from manual-generate and bind review to the exact draft bytes.
+DRAFT_DIGEST="$(sha256sum "$NEWSBOT_OUTPUT/drafts/draft-<GENERATION_ID>.json" | cut -d' ' -f1)"
+newsbot manual-review --profile "$NEWSBOT_PROFILE" --state "$NEWSBOT_STATE" --database newsbot.sqlite3 --candidate-id <CANDIDATE_ID> --generation-id <GENERATION_ID> --decision approve-local --expected-draft-digest "$DRAFT_DIGEST"
+newsbot manual-export --profile "$NEWSBOT_PROFILE" --state "$NEWSBOT_STATE" --database newsbot.sqlite3 --output-dir "$NEWSBOT_OUTPUT/exports"
+newsbot manual-status --profile "$NEWSBOT_PROFILE" --state "$NEWSBOT_STATE" --database newsbot.sqlite3
+```
+
+`--provider fake` is suitable for local demonstrations. `--provider openai_compatible` requires its documented environment configuration and sends generation requests to the configured compatible provider; do not put credentials in the profile, input, output, or repository.
+`manual-generate` already writes the current draft to its `--output-dir`. `manual-draft` is an optional rematerialization command; when needed, point it at a different empty directory rather than the generation destination.
+
+## Legacy compatibility
+
+Telegram collection and approvals, Google Sheets delivery, Asia/Seoul scheduled routing, systemd workers, and Codex generation remain compatibility adapters for existing deployments. They are not the public default and are not required for the manual/local workflow. Their commands and service definitions remain available for migration and maintenance, but do not enable an adapter unless its dependencies, credentials, and operational boundaries are intentionally configured.
+
+Useful compatibility entry points: [`deploy/systemd/`](deploy/systemd/), [`newsbot --help`](#install), and the repository's [Issues](../../issues).
+
+## Project information
+
+Newsbot is MIT licensed. Contributions require DCO sign-off; see [CONTRIBUTING.md](CONTRIBUTING.md). Read [PRIVACY.md](PRIVACY.md) before importing real observations. Release policy and user-visible changes are documented in [RELEASES.md](RELEASES.md) and [CHANGELOG.md](CHANGELOG.md). Security reports belong in [GitHub Private Vulnerability Reporting or Security Advisories](../../security/advisories/new), not public issues; see [SECURITY.md](SECURITY.md). For public usage questions, use [GitHub Issues or Discussions](../../discussions); see [SUPPORT.md](SUPPORT.md).

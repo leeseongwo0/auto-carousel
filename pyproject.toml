@@ -1,12 +1,26 @@
 [build-system]
-requires = ["setuptools>=69"]
+requires = ["setuptools==83.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "telegram-news-bot"
 version = "0.1.0"
-description = "Local-first Telegram news digest bot"
+description = "Newsbot is a local-first news workflow tool."
+readme = "README.md"
 requires-python = ">=3.12"
+license = {file = "LICENSE"}
+authors = [{name = "leeseongwo0"}]
+maintainers = [{name = "leeseongwo0"}]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Natural Language :: English",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Utilities",
+]
 dependencies = []
 
 [project.optional-dependencies]
@@ -19,14 +33,23 @@ sheets = [
     "google-auth>=2.40,<3",
     "google-auth-httplib2>=0.2,<1",
 ]
+[project.urls]
+Repository = "https://github.com/leeseongwo0/auto-carousel"
+Issues = "https://github.com/leeseongwo0/auto-carousel/issues"
 [project.scripts]
 newsbot = "newsbot.cli:main"
 
 [dependency-groups]
 dev = [
+    "bandit==1.8.6",
+    "cyclonedx-bom==7.3.1",
+    "detect-secrets==1.5.0",
     "mypy>=1.11",
+    "pip-audit==2.10.1",
     "pytest>=8.3",
     "ruff>=0.6",
+    "setuptools==83.0.0",
+    "twine==6.1.0",
 ]
 
 [tool.pytest.ini_options]

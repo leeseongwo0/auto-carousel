@@ -63,7 +63,7 @@ def test_candidate_notification_contains_only_title_source_and_buttons() -> None
             {
                 "candidate_id": 5,
                 "title": "Anthropic 보안 평가 사고",
-                "source_url": "https://t.me/aipost/7687",
+                "source_url": "https://t.me/news_publisher/7687",
                 "score": "0.754928",
                 "rationale": {"large": "internal metadata"},
             },
@@ -76,7 +76,7 @@ def test_candidate_notification_contains_only_title_source_and_buttons() -> None
     assert len(sent) == 1
     method, payload = sent[0]
     assert method == "sendMessage"
-    assert payload["text"] == "제목: Anthropic 보안 평가 사고\n출처: https://t.me/aipost/7687"
+    assert payload["text"] == "제목: Anthropic 보안 평가 사고\n출처: https://t.me/news_publisher/7687"
     assert "reply_markup" in payload
     assert "점수" not in payload["text"]
     assert "근거" not in payload["text"]

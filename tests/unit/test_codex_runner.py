@@ -82,6 +82,7 @@ def test_runner_constants_pin_environment_and_codex_argv(runner: object) -> None
     )
     assert runner.RUNNER_CWD == "/var/empty/newsbot-codex"
 
+
 def test_bundled_output_schema_matches_runtime_contract() -> None:
     schema = json.loads(
         (Path(__file__).parents[2] / "src/newsbot/ai/resources/copy_draft.schema.json").read_text(encoding="utf-8")
@@ -96,7 +97,6 @@ def test_bundled_output_schema_matches_runtime_contract() -> None:
     assert "exact pair from the same supplied evidence" in SYSTEM_INSTRUCTION
     assert "formal polite 합니다체" in SYSTEM_INSTRUCTION
     assert "one through five hashtags" in SYSTEM_INSTRUCTION
-
 
 
 def test_attest_dir_accepts_fixed_runner_group_only(runner: object, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -115,6 +115,7 @@ def test_attest_dir_accepts_fixed_runner_group_only(runner: object, monkeypatch:
     with pytest.raises(runner.RunnerError) as raised:
         runner.attest_dir(runner.LOCK_DIR, 0o750)
     assert raised.value.code == 21
+
 
 def test_execute_maps_auth_and_generation_failure_codes_without_running_codex(
     runner: object, monkeypatch: pytest.MonkeyPatch

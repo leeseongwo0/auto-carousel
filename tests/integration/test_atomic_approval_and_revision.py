@@ -235,8 +235,6 @@ def test_regenerate_supersedes_old_review_and_keeps_one_current_generation() -> 
     assert storage.fetch_one("SELECT COUNT(*) AS n FROM generations WHERE status='current'")["n"] == 0
 
 
-
-
 def test_terminal_edit_retains_approved_attempt_and_allows_one_new_attempt() -> None:
     storage = Storage.open(":memory:")
     candidate_id, generation_id, source_id = _review_state(storage)

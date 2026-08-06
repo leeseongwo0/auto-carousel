@@ -93,9 +93,9 @@ def test_candidate_digest_projects_preview_title_and_telegram_source_only() -> N
     storage = Storage.open(":memory:")
     _candidate(
         storage,
-        source_url="https://t.me/aipost/7687",
+        source_url="https://t.me/news_publisher/7687",
         body="긴 본문은 Telegram 후보 메시지에 포함되면 안 됩니다.",
-        channel_handle="aipost",
+        channel_handle="news_publisher",
         urls_json=json.dumps([{"url": "https://example.test", "title": "Anthropic 보안 평가 사고"}]),
     )
     service = CandidateApprovalService(storage, chat_id=100, authorized_user_ids={7}, now=FixtureClock().now)
@@ -103,7 +103,7 @@ def test_candidate_digest_projects_preview_title_and_telegram_source_only() -> N
     candidate = service.create_digest(1, actor_id=7).candidates[0]
 
     assert candidate["title"] == "Anthropic 보안 평가 사고"
-    assert candidate["source_url"] == "https://t.me/aipost/7687"
+    assert candidate["source_url"] == "https://t.me/news_publisher/7687"
 
 
 def test_selection_is_provider_free_and_idempotent() -> None:

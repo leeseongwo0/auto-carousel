@@ -57,7 +57,11 @@ def normalize_match_text(text: str) -> tuple[str, str]:
 
 
 def _markers(policy: object, category: str) -> tuple[tuple[str, bool], ...]:
-    return tuple((marker, korean) for korean in (True, False) for marker in getattr(policy, f"{category}_{'ko' if korean else 'en'}"))
+    return tuple(
+        (marker, korean)
+        for korean in (True, False)
+        for marker in getattr(policy, f"{category}_{'ko' if korean else 'en'}")
+    )
 
 
 def _match_markers(display: str, match: str, policy: object) -> tuple[MarkerMatch, ...]:
@@ -86,7 +90,14 @@ def _match_markers(display: str, match: str, policy: object) -> tuple[MarkerMatc
     normalized = "".join(rebuilt)
     assert normalized == match
     found: list[MarkerMatch] = []
-    for category in ("event_markers", "analysis_markers", "evidence_markers", "promotion_markers", "tutorial_markers", "reaction_markers"):
+    for category in (
+        "event_markers",
+        "analysis_markers",
+        "evidence_markers",
+        "promotion_markers",
+        "tutorial_markers",
+        "reaction_markers",
+    ):
         for marker, korean in _markers(policy, category):
             needle = unicodedata.normalize("NFC", marker).casefold()
             pattern = re.escape(needle) if korean else rf"(?<!\w){re.escape(needle)}(?!\w)"
@@ -132,7 +143,9 @@ def _policy(config: object) -> object:
     return getattr(config, "news_policy", config)
 
 
-def observation_facts(observation: SourceObservation, config: object, *, classification: str | None = None) -> ObservationPolicyFacts:
+def observation_facts(
+    observation: SourceObservation, config: object, *, classification: str | None = None
+) -> ObservationPolicyFacts:
     policy: Any = _policy(config)
     display, match = normalize_match_text(observation.text)
     matches = _match_markers(display, match, policy)
@@ -143,7 +156,8 @@ def observation_facts(observation: SourceObservation, config: object, *, classif
     meaningful_analysis = (
         "analysis" in categories
         and semantic_chars >= policy.analysis_semantic_chars
-        and sum(length >= policy.analysis_sentence_chars for length in sentence_lengths) >= policy.analysis_min_sentences
+        and sum(length >= policy.analysis_sentence_chars for length in sentence_lengths)
+        >= policy.analysis_min_sentences
     )
     urls = [match.group(0) for match in re.finditer(r"https?://\S+", display, flags=re.IGNORECASE)]
     urls.extend(candidate.url for candidate in observation.urls)
@@ -187,29 +201,68 @@ def evaluate_news_policy(
     if clean:
         return NewsPolicyResult(NewsOutcome.DEFINITE_NEWS, "clean_event", clean.observation.channel_id, clean.matches)
     trusted = next(
-        (fact for fact in facts if fact.classification in {"official", "original_publisher"} and fact.meaningful_analysis and not negative(fact)),
+        (
+            fact
+            for fact in facts
+            if fact.classification in {"official", "original_publisher"}
+            and fact.meaningful_analysis
+            and not negative(fact)
+        ),
         None,
     )
     if trusted:
-        return NewsPolicyResult(NewsOutcome.TRUSTED_ANALYSIS, "trusted_source_analysis", trusted.observation.channel_id, trusted.matches)
+        return NewsPolicyResult(
+            NewsOutcome.TRUSTED_ANALYSIS, "trusted_source_analysis", trusted.observation.channel_id, trusted.matches
+        )
     evidenced = next(
-        (fact for fact in facts if fact.classification in {"community", "aggregator"} and fact.meaningful_analysis and has(fact, "evidence") and fact.eligible_external_url and not negative(fact)),
+        (
+            fact
+            for fact in facts
+            if fact.classification in {"community", "aggregator"}
+            and fact.meaningful_analysis
+            and has(fact, "evidence")
+            and fact.eligible_external_url
+            and not negative(fact)
+        ),
         None,
     )
     if evidenced:
-        return NewsPolicyResult(NewsOutcome.DEFINITE_NEWS, "evidenced_analysis", evidenced.observation.channel_id, evidenced.matches)
+        return NewsPolicyResult(
+            NewsOutcome.DEFINITE_NEWS, "evidenced_analysis", evidenced.observation.channel_id, evidenced.matches
+        )
     for fact in facts:
         event = has(fact, "event")
         analysis = fact.meaningful_analysis
         if (event or analysis) and negative(fact):
-            return NewsPolicyResult(NewsOutcome.AMBIGUOUS, "policy_collision_or_insufficient_evidence", fact.observation.channel_id, fact.matches)
+            return NewsPolicyResult(
+                NewsOutcome.AMBIGUOUS,
+                "policy_collision_or_insufficient_evidence",
+                fact.observation.channel_id,
+                fact.matches,
+            )
         if event and not fact.material_context:
-            return NewsPolicyResult(NewsOutcome.AMBIGUOUS, "policy_collision_or_insufficient_evidence", fact.observation.channel_id, fact.matches)
-        if analysis and fact.classification not in {"official", "original_publisher"} and (not has(fact, "evidence") or not fact.eligible_external_url):
-            return NewsPolicyResult(NewsOutcome.AMBIGUOUS, "policy_collision_or_insufficient_evidence", fact.observation.channel_id, fact.matches)
+            return NewsPolicyResult(
+                NewsOutcome.AMBIGUOUS,
+                "policy_collision_or_insufficient_evidence",
+                fact.observation.channel_id,
+                fact.matches,
+            )
+        if (
+            analysis
+            and fact.classification not in {"official", "original_publisher"}
+            and (not has(fact, "evidence") or not fact.eligible_external_url)
+        ):
+            return NewsPolicyResult(
+                NewsOutcome.AMBIGUOUS,
+                "policy_collision_or_insufficient_evidence",
+                fact.observation.channel_id,
+                fact.matches,
+            )
     negative_only = next((fact for fact in facts if negative(fact)), None)
     if negative_only:
-        return NewsPolicyResult(NewsOutcome.NON_NEWS, "negative_only", negative_only.observation.channel_id, negative_only.matches)
+        return NewsPolicyResult(
+            NewsOutcome.NON_NEWS, "negative_only", negative_only.observation.channel_id, negative_only.matches
+        )
     return NewsPolicyResult(NewsOutcome.AMBIGUOUS, "no_decisive_signal", None, ())
 
 
@@ -223,14 +276,81 @@ def classify_news_title(title: str) -> Literal["definite_news", "trusted_analysi
     # This compatibility shim intentionally is not used by the pipeline.  It is
     # kept pure with a small in-memory policy equivalent for legacy title calls.
     class _Policy:
-        event_markers_ko = ("출시", "공개", "발표", "업데이트", "지원 시작", "파트너십", "인수", "합병", "투자 유치", "서비스 종료", "장애", "해킹", "승인", "규제", "정책 변경", "가격 인상", "가격 인하")
-        event_markers_en = ("launches", "launched", "released", "announced", "unveiled", "now available", "rolls out", "partnership", "acquires", "acquired", "merger", "raises funding", "shuts down", "outage", "breach", "hack", "approved", "regulation", "policy change", "price increase", "price cut")
+        event_markers_ko = (
+            "출시",
+            "공개",
+            "발표",
+            "업데이트",
+            "지원 시작",
+            "파트너십",
+            "인수",
+            "합병",
+            "투자 유치",
+            "서비스 종료",
+            "장애",
+            "해킹",
+            "승인",
+            "규제",
+            "정책 변경",
+            "가격 인상",
+            "가격 인하",
+        )
+        event_markers_en = (
+            "launches",
+            "launched",
+            "released",
+            "announced",
+            "unveiled",
+            "now available",
+            "rolls out",
+            "partnership",
+            "acquires",
+            "acquired",
+            "merger",
+            "raises funding",
+            "shuts down",
+            "outage",
+            "breach",
+            "hack",
+            "approved",
+            "regulation",
+            "policy change",
+            "price increase",
+            "price cut",
+        )
         analysis_markers_ko = ("분석", "해설", "전망", "리뷰", "비교", "평가", "보고서", "연구")
-        analysis_markers_en = ("analysis", "commentary", "outlook", "review", "comparison", "assessment", "report", "research")
+        analysis_markers_en = (
+            "analysis",
+            "commentary",
+            "outlook",
+            "review",
+            "comparison",
+            "assessment",
+            "report",
+            "research",
+        )
         evidence_markers_ko = ("에 따르면", "공식 문서", "원문", "데이터", "통계", "실험", "벤치마크", "조사")
-        evidence_markers_en = ("according to", "official documentation", "source document", "data", "statistics", "experiment", "benchmark", "survey")
+        evidence_markers_en = (
+            "according to",
+            "official documentation",
+            "source document",
+            "data",
+            "statistics",
+            "experiment",
+            "benchmark",
+            "survey",
+        )
         promotion_markers_ko = ("광고", "협찬", "할인", "쿠폰", "이벤트 참여", "추천인", "레퍼럴")
-        promotion_markers_en = ("ad", "sponsored", "discount", "coupon", "giveaway", "referral", "affiliate", "promo code")
+        promotion_markers_en = (
+            "ad",
+            "sponsored",
+            "discount",
+            "coupon",
+            "giveaway",
+            "referral",
+            "affiliate",
+            "promo code",
+        )
         tutorial_markers_ko = ("튜토리얼", "사용법", "하는 법", "가이드", "초보자")
         tutorial_markers_en = ("tutorial", "how to", "guide", "step by step", "beginner")
         reaction_markers_ko = ("내 생각", "개인 의견", "소감", "반응", "밈")

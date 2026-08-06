@@ -44,6 +44,57 @@ def test_capped_pages_continue_before_promoting_cursor(tmp_path):
     assert storage.fetch_one("SELECT * FROM collection_intervals WHERE channel_id=?", (CHANNEL.id,)) is None
 
 
+def test_one_page_budgets_progress_primary_then_overlap_and_promote_cursor(tmp_path):
+    fixture = _fixture(
+        tmp_path / "messages.json",
+        {"messages": [_message(index, NOW - timedelta(hours=6 - index)) for index in range(1, 6)]},
+    )
+    calls: list[dict[str, object]] = []
+
+    class CountingCollector:
+        def latest_message_id(self, channel):
+            return fixture.latest_message_id(channel)
+
+        def collect(self, channel, **kwargs):
+            calls.append(kwargs)
+            return fixture.collect(channel, **kwargs)
+
+    with Storage.open(tmp_path / "newsbot.sqlite") as storage:
+        collection = DurableCollection(storage)
+        results = [
+            collection.collect_channel(
+                CountingCollector(), CHANNEL, now=NOW, page_size=2, max_overlap_pages=1, max_remote_pages=1
+            )
+            for _ in range(4)
+        ]
+        interval = storage.fetch_one("SELECT * FROM collection_intervals WHERE channel_id=?", (CHANNEL.id,))
+        cursor = storage.fetch_one("SELECT * FROM collection_cursors WHERE channel_id=?", (CHANNEL.id,))
+
+    assert [result.cursor_promoted for result in results] == [False, False, False, True]
+    assert len(calls) == 4
+    assert [call["min_message_id"] for call in calls] == [0, 2, 4, 0]
+    assert interval is None
+    assert cursor is not None
+
+
+def test_one_page_budget_leaves_primary_continuation(tmp_path):
+    fixture = _fixture(
+        tmp_path / "messages.json",
+        {"messages": [_message(index, NOW - timedelta(hours=6 - index)) for index in range(1, 4)]},
+    )
+    with Storage.open(tmp_path / "newsbot.sqlite") as storage:
+        result = DurableCollection(storage).collect_channel(
+            fixture, CHANNEL, now=NOW, page_size=1, max_overlap_pages=1, max_remote_pages=1
+        )
+        interval = storage.fetch_one("SELECT * FROM collection_intervals WHERE channel_id=?", (CHANNEL.id,))
+        cursor = storage.fetch_one("SELECT * FROM collection_cursors WHERE channel_id=?", (CHANNEL.id,))
+
+    assert not result.cursor_promoted
+    assert interval is not None
+    assert not bool(interval["page_complete"])
+    assert cursor is None
+
+
 def test_initial_floor_is_inclusive_and_survives_a_restart(tmp_path):
     fixture_path = tmp_path / "messages.json"
     fixture = _fixture(
@@ -285,10 +336,10 @@ def test_fixture_reconcile_is_bounded_and_cursor_neutral(tmp_path, monkeypatch):
     fixture_path = tmp_path / "messages.json"
     _fixture(
         fixture_path,
-        {"messages": [{**_message(1, NOW - timedelta(minutes=30)), "channel_id": "aipost"}]},
+        {"messages": [{**_message(1, NOW - timedelta(minutes=30)), "channel_id": "news_publisher"}]},
     )
     database = tmp_path / "newsbot.sqlite"
-    channel = SimpleNamespace(id="aipost", handle="aipost")
+    channel = SimpleNamespace(id="news_publisher", handle="news_publisher")
     with Storage.open(database) as storage:
         collection = DurableCollection(storage)
         collection.collect_channel(FixtureCollector(fixture_path), channel, now=NOW, page_size=10)
@@ -301,8 +352,8 @@ def test_fixture_reconcile_is_bounded_and_cursor_neutral(tmp_path, monkeypatch):
         fixture_path,
         {
             "messages": [
-                {**_message(1, NOW - timedelta(minutes=30)), "channel_id": "aipost"},
-                {**_message(2, NOW - timedelta(minutes=20)), "channel_id": "aipost"},
+                {**_message(1, NOW - timedelta(minutes=30)), "channel_id": "news_publisher"},
+                {**_message(2, NOW - timedelta(minutes=20)), "channel_id": "news_publisher"},
             ]
         },
     )
@@ -313,7 +364,7 @@ def test_fixture_reconcile_is_bounded_and_cursor_neutral(tmp_path, monkeypatch):
                 "--fixture",
                 str(fixture_path),
                 "--channel",
-                "aipost",
+                "news_publisher",
                 "--from-id",
                 "2",
                 "--to-id",

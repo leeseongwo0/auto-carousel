@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -28,10 +29,15 @@ def test_open_initializes_schema_and_applies_migration_once(tmp_path: Path) -> N
             "telegram_notification_outbox",
             "automation_stream_leases",
         } <= tables
-        assert storage.fetch_one("SELECT COUNT(*) AS count FROM schema_migrations")["count"] == 8
+        assert storage.fetch_one("SELECT COUNT(*) AS count FROM schema_migrations")["count"] == 9
 
     with Storage.open(database) as storage:
-        assert storage.fetch_one("SELECT COUNT(*) AS count FROM schema_migrations")["count"] == 8
+        assert storage.fetch_one("SELECT COUNT(*) AS count FROM schema_migrations")["count"] == 9
+
+
+def test_manual_review_has_one_atomic_service_path() -> None:
+    assert not hasattr(Storage, "record_manual_local_approval")
+    assert not hasattr(Storage, "create_manual_local_exports")
 
 
 def test_telegram_outbox_and_attempt_identity_are_immutable_to_direct_sql(tmp_path: Path) -> None:
@@ -161,6 +167,8 @@ def test_sheets_migration_preserves_populated_database(tmp_path: Path) -> None:
             storage.fetch_one("SELECT name FROM sqlite_master WHERE type='table' AND name='sheet_handoffs'") is not None
         )
         assert storage.fetch_all("PRAGMA foreign_key_check") == []
+
+
 def test_hourly_news_migration_rejects_unsupported_007_before_ddl(tmp_path: Path) -> None:
     database = tmp_path / "unsupported-007.sqlite"
     migrations = Path(__file__).parents[2] / "src" / "newsbot" / "migrations"
@@ -188,11 +196,120 @@ def test_hourly_news_migration_rejects_unsupported_007_before_ddl(tmp_path: Path
 
     connection = sqlite3.connect(database)
     try:
-        assert connection.execute(
-            "SELECT 1 FROM schema_migrations WHERE version='008_hourly_news_eligibility.sql'"
-        ).fetchone() is None
-        assert connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ambiguous_digest_windows'"
-        ).fetchone() is None
+        assert (
+            connection.execute(
+                "SELECT 1 FROM schema_migrations WHERE version='008_hourly_news_eligibility.sql'"
+            ).fetchone()
+            is None
+        )
+        assert (
+            connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ambiguous_digest_windows'"
+            ).fetchone()
+            is None
+        )
     finally:
         connection.close()
+
+
+def test_constructor_phase_guard_names_connect_udf_pre_wal_post_wal_transactions_and_close(
+    tmp_path: Path,
+) -> None:
+    events: list[tuple[str, str]] = []
+
+    @contextmanager
+    def guard(phase: str):
+        events.append((phase, "before"))
+        try:
+            yield
+        finally:
+            events.append((phase, "after"))
+
+    storage = Storage(tmp_path / "guarded.sqlite", phase_guard=guard)
+    assert events == [
+        ("connect", "before"),
+        ("connect", "after"),
+        ("udf", "before"),
+        ("udf", "after"),
+        ("pre_wal", "before"),
+        ("pre_wal", "after"),
+        ("post_wal", "before"),
+        ("post_wal", "after"),
+    ]
+
+    assert storage.fetch_one("SELECT 1 AS value")["value"] == 1
+    with storage.transaction() as connection:
+        connection.execute("CREATE TEMP TABLE guard_probe(value INTEGER)")
+    storage.close()
+
+    assert events[-8:] == [
+        ("fetch_one", "before"),
+        ("fetch_one", "after"),
+        ("transaction_begin", "before"),
+        ("transaction_begin", "after"),
+        ("transaction_commit", "before"),
+        ("transaction_commit", "after"),
+        ("close", "before"),
+        ("close", "after"),
+    ]
+
+
+def test_constructor_guard_refuses_before_connect_without_creating_database(tmp_path: Path) -> None:
+    database = tmp_path / "blocked.sqlite"
+
+    @contextmanager
+    def mismatch(phase: str):
+        raise RuntimeError("state_path_changed")
+        yield
+
+    with pytest.raises(RuntimeError, match="state_path_changed"):
+        Storage(database, phase_guard=mismatch)
+
+    assert not database.exists()
+
+
+def test_constructor_guard_closes_connection_when_post_connect_attestation_fails(tmp_path: Path) -> None:
+
+    @contextmanager
+    def guard(phase: str):
+        yield
+        if phase == "connect":
+            raise RuntimeError("state_path_changed")
+
+    with pytest.raises(RuntimeError, match="state_path_changed"):
+        Storage(tmp_path / "guarded.sqlite", phase_guard=guard)
+
+    with sqlite3.connect(tmp_path / "guarded.sqlite") as connection:
+        assert connection.execute("PRAGMA journal_mode").fetchone()[0] != "wal"
+
+
+def test_constructor_guard_refuses_before_wal_configuration(tmp_path: Path) -> None:
+    database = tmp_path / "blocked.sqlite"
+
+    @contextmanager
+    def mismatch(phase: str):
+        if phase == "pre_wal":
+            raise RuntimeError("state_path_changed")
+        yield
+
+    with pytest.raises(RuntimeError, match="state_path_changed"):
+        Storage(database, phase_guard=mismatch)
+
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("PRAGMA journal_mode").fetchone()[0] != "wal"
+
+
+def test_constructor_guard_refuses_after_wal_configuration(tmp_path: Path) -> None:
+    database = tmp_path / "blocked.sqlite"
+
+    @contextmanager
+    def mismatch(phase: str):
+        yield
+        if phase == "post_wal":
+            raise RuntimeError("state_path_changed")
+
+    with pytest.raises(RuntimeError, match="state_path_changed"):
+        Storage(database, phase_guard=mismatch)
+
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"

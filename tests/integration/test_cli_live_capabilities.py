@@ -134,7 +134,7 @@ def test_live_sheets_uses_one_validated_credential_snapshot(monkeypatch, tmp_pat
     )
     credential_info = {
         "type": "service_account",
-        "client_email": "bot@project.iam.gserviceaccount.com",
+        "client_email": "bot@example.invalid",
     }
     reads = 0
     adapter = object()
@@ -172,7 +172,7 @@ def test_live_sheets_uses_one_validated_credential_snapshot(monkeypatch, tmp_pat
 
     assert actual_config is config
     assert actual_adapter is adapter
-    assert email == "bot@project.iam.gserviceaccount.com"
+    assert email == "bot@example.invalid"
     assert reads == 1
 
 
@@ -353,7 +353,7 @@ def test_targeted_live_reconcile_failure_is_nonzero_and_does_not_emit_digest(tmp
     config = SimpleNamespace(
         database_path=database,
         output_dir=tmp_path / "output",
-        enabled_channels=(SimpleNamespace(id="aipost", handle="aipost"),),
+        enabled_channels=(SimpleNamespace(id="news_publisher", handle="news_publisher"),),
     )
     monkeypatch.setattr(cli, "validate_capabilities", lambda *_: None)
     monkeypatch.setattr(cli, "_config", lambda _: config)
@@ -367,7 +367,7 @@ def test_targeted_live_reconcile_failure_is_nonzero_and_does_not_emit_digest(tmp
     monkeypatch.setattr(cli.DurableCollection, "reconcile_channel", fail_reconcile)
 
     with pytest.raises(SystemExit) as error:
-        cli.main(["reconcile-live", "--channel", "aipost", "--lookback-hours", "24"])
+        cli.main(["reconcile-live", "--channel", "news_publisher", "--lookback-hours", "24"])
 
     assert error.value.code == 2
     assert "targeted reconciliation failed" in capsys.readouterr().err
@@ -397,7 +397,7 @@ def test_reconcile_fixture_requires_complete_exclusive_bounds_before_collector(m
 
     monkeypatch.setattr(cli, "FixtureCollector", lambda _: pytest.fail("fixture collector must not be constructed"))
     with pytest.raises(SystemExit, match="2"):
-        cli.main(["reconcile", "--fixture", "ignored.json", "--channel", "aipost"])
+        cli.main(["reconcile", "--fixture", "ignored.json", "--channel", "news_publisher"])
     with pytest.raises(SystemExit, match="2"):
         cli.main(
             [
@@ -405,7 +405,7 @@ def test_reconcile_fixture_requires_complete_exclusive_bounds_before_collector(m
                 "--fixture",
                 "ignored.json",
                 "--channel",
-                "aipost",
+                "news_publisher",
                 "--from-id",
                 "10",
                 "--to-id",
@@ -564,8 +564,8 @@ def test_durable_live_pipeline_binds_the_latest_observation_material_version_aft
             {
                 "messages": [
                     {
-                        "channel_id": "aipost",
-                        "channel_handle": "aipost",
+                        "channel_id": "news_publisher",
+                        "channel_handle": "news_publisher",
                         "id": "7",
                         "published_at": "2026-07-29T11:00:00Z",
                         "text": "A",
@@ -583,7 +583,7 @@ def test_durable_live_pipeline_binds_the_latest_observation_material_version_aft
     collector = FixtureCollector(fixture_path)
     with Storage.open(tmp_path / "newsbot.sqlite") as storage:
         for _ in range(3):
-            observation = collector.collect(SimpleNamespace(id="aipost", handle="aipost"))[0]
+            observation = collector.collect(SimpleNamespace(id="news_publisher", handle="news_publisher"))[0]
             with storage.transaction() as connection:
                 persist_observation(connection, observation, datetime(2026, 7, 29, 12, tzinfo=UTC))
         latest = storage.latest_observations()
@@ -602,7 +602,7 @@ def test_durable_live_pipeline_binds_the_latest_observation_material_version_aft
         versions[1]["id"],
         versions[0]["id"],
     ]
-    assert bound == {("aipost", "7"): snapshots[-1]["id"]}
+    assert bound == {("news_publisher", "7"): snapshots[-1]["id"]}
 
 
 @pytest.mark.parametrize("kind", ("missing", "world_readable", "symlink"))
@@ -647,7 +647,7 @@ def test_openai_capability_failure_is_recoverable_after_selection(tmp_path, monk
 
     fixture = tmp_path / "fixture.json"
     fixture.write_text(
-        """{"messages":[{"channel_id":"aipost","channel_handle":"aipost","id":"1","published_at":"2026-07-29T11:00:00Z","text":"AIPost announced an AI technology release with independently useful product details, rollout scope, supported users, measured impact, and operational context for readers.","urls":["https://aipost.kr/news"]}]}""",
+        """{"messages":[{"channel_id":"news_publisher","channel_handle":"news_publisher","id":"1","published_at":"2026-07-29T11:00:00Z","text":"Synthetic Publisher announced an AI technology release with independently useful product details, rollout scope, supported users, measured impact, and operational context for readers.","urls":["https://publisher.example/news"]}]}""",
         encoding="utf-8",
     )
     root = Path(__file__).parents[2]
@@ -664,9 +664,7 @@ def test_openai_capability_failure_is_recoverable_after_selection(tmp_path, monk
         stage = asyncio.run(pipeline.run_fixture(FixtureCollector(fixture), approval_service=service, actor_id=1))
         assert stage.selection_digest is not None
         candidate_id = int(stage.selection_digest.candidates[0]["candidate_id"])
-        make = next(
-            button for button in stage.selection_digest.buttons[candidate_id] if button.label == "[제작]"
-        )
+        make = next(button for button in stage.selection_digest.buttons[candidate_id] if button.label == "[제작]")
         assert ScriptedApprovalAdapter(service).apply(ScriptedAction(make.token, 1, 1)).status == "queued"
 
     monkeypatch.setattr(cli, "_config", lambda _: config)
@@ -740,7 +738,7 @@ def test_candidate_set_keys_are_portable_and_separate_material_from_observation_
     base = next(
         observation
         for observation in FixtureCollector(fixture).collect()
-        if observation.channel_id == "exilist_official" and observation.external_post_id == "101"
+        if observation.channel_id == "official_updates" and observation.external_post_id == "101"
     )
     clock = FixtureClock(datetime(2026, 7, 29, 12, tzinfo=UTC))
     config = load_config(

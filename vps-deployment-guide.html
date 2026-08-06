@@ -3,16 +3,16 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Newsbot VPS 설치·복구 가이드</title>
+  <title>Newsbot 레거시 VPS 호환 배포 가이드</title>
   <style>
     :root{color-scheme:light dark;font-family:system-ui,sans-serif;line-height:1.6}body{margin:auto;max-width:980px;padding:24px;background:#f5f7fb;color:#172033}section,header{background:#fff;border:1px solid #dbe1ec;border-radius:12px;padding:20px;margin:16px 0}pre{overflow:auto;background:#101827;color:#e8edf7;padding:14px;border-radius:8px}code{font-family:ui-monospace,monospace}.warn{border-left:5px solid #a65200;padding-left:14px}.ok{border-left:5px solid #18794e;padding-left:14px}@media(prefers-color-scheme:dark){body{background:#0d1118;color:#e8edf7}section,header{background:#151b25;border-color:#2a3444}}
   </style>
 </head>
 <body>
 <header>
-  <h1>Newsbot VPS 설치·복구 가이드</h1>
-  <p>여섯 Telegram 채널을 매시간 자동 수집하고, 실제 뉴스만 사람의 승인 대상으로 보내며, 애매한 글은 정오 시간대에 제목만 묶어 알린 뒤 승인된 결과를 Sheets에 전달하는 초보자용 순서입니다. 명령은 VPS에서 실행합니다.</p>
-  <p class="warn"><strong>중요:</strong> <code>REPLACE_…</code> 값은 명시적 placeholder입니다. 실제 commit/digest/path로만 바꾸고 secret 값은 terminal, 문서, log에 붙여 넣지 마십시오. Telegram 또는 Sheets 효과가 ambiguous하면 자동으로 명령을 다시 실행하지 않습니다.</p>
+  <h1>Newsbot 레거시 VPS 호환 배포 가이드</h1>
+  <p>이 문서는 Telegram 수집·승인, Asia/Seoul 정오 처리, Google Sheets 전달, Codex 생성을 기존 방식으로 운영해야 하는 배포자를 위한 선택적 호환 가이드입니다. 일반 사용자는 README의 자격 증명 없는 수동·로컬 흐름부터 시작하십시오.</p>
+  <p class="warn"><strong>중요:</strong> 공개 저장소의 합성 채널 설정은 운영 설정이 아닙니다. <code>REPLACE_…</code> 값과 비공개 채널 프로필은 운영자가 별도로 검토·제공해야 하며, secret 값은 terminal, 문서, log에 붙여 넣지 마십시오. Telegram 또는 Sheets 효과가 ambiguous하면 자동으로 명령을 다시 실행하지 않습니다.</p>
 </header>
 
 <section>
@@ -42,7 +42,7 @@ sudo install -d -o root -g root -m 0700 /var/lib/newsbot-containment
 sudo install -d -o root -g root -m 0700 /var/backups/newsbot
 sudo install -d -o root -g newsbot -m 0750 /etc/newsbot
 sudo install -o newsbot -g newsbot -m 0600 /dev/null /etc/newsbot/newsbot.env
-sudo install -o root -g root -m 0644 /opt/newsbot/releases/$RELEASE_GIT_SHA/src/config/channels.toml /etc/newsbot/config.toml
+sudo install -o root -g root -m 0644 /secure/operator-provided-newsbot-config.toml /etc/newsbot/config.toml
 sudoedit /etc/newsbot/newsbot.env</code></pre>
 <p>새 호스트에서만 DB/lock file을 release window 전에 provision합니다. 이것은 schema migration이 아니며 <code>init-db</code>는 switch 뒤에 실행합니다. 이후 post-007 release에서는 existing SQLite authority나 lock file을 다시 만들거나 바꾸지 않습니다.</p>
 <p>환경 파일에는 Telegram API ID/HASH, owner-only <code>TELEGRAM_SESSION_PATH</code>, Bot token, approver chat/user IDs, 그 목록 안의 단 한 명인 <code>NEWSBOT_CALLBACK_ACTOR_ID</code>, Sheets ID 및 owner-only service-account JSON 경로를 설정합니다. secret 값 자체를 이 문서에 쓰지 마십시오.</p>
