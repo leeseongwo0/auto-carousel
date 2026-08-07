@@ -183,7 +183,7 @@ def test_scripted_fixture_rerun_reuses_ready_export(tmp_path, capsys, monkeypatc
             )
         }
         assert storage.fetch_one("SELECT COUNT(*) AS count FROM source_post_observations")["count"] > 0
-        assert storage.fetch_one("SELECT COUNT(*) AS count FROM collection_cursors")["count"] == 5
+        assert storage.fetch_one("SELECT COUNT(*) AS count FROM collection_cursors")["count"] == 6
         assert storage.fetch_one("SELECT COUNT(*) AS count FROM collection_intervals")["count"] == 0
 
     assert main(arguments) == 0

@@ -437,12 +437,11 @@ class AppConfig:
 
 
 def validate_automation_bindings(config: AppConfig) -> None:
-    """Require the current five-channel worker topology at each entrypoint."""
+    """Reassert the immutable six-channel worker shape at each entrypoint."""
     channels = config.enabled_channels
-    ids = frozenset(channel.id.casefold() for channel in channels)
     handles = frozenset(channel.handle.casefold() for channel in channels)
-    if len(channels) != 5 or len(ids) != 5 or len(handles) != 5:
-        raise ConfigError("automation requires exactly five unique enabled channels")
+    if len(channels) != 6 or len(handles) != 6:
+        raise ConfigError("automation requires exactly six unique enabled channels")
 
 
 def _decimal(value: Any, name: str) -> Decimal:
@@ -838,14 +837,14 @@ def load_config(
     channels_raw = raw.get("channels")
     if not isinstance(channels_raw, list):
         raise ConfigError("configuration requires [[channels]]")
-    if len(channels_raw) != 5:
-        raise ConfigError("configuration must define exactly five channels")
+    if len(channels_raw) != 6:
+        raise ConfigError("configuration must define exactly six channels")
     channels = tuple(_parse_channel(channel, index) for index, channel in enumerate(channels_raw))
     handles = {channel.handle.casefold() for channel in channels}
-    if len({channel.id.casefold() for channel in channels}) != 5 or len(handles) != 5:
+    if len({channel.id.casefold() for channel in channels}) != 6 or len(handles) != 6:
         raise ConfigError("configuration channel ids and handles must be unique")
-    if len(tuple(channel for channel in channels if channel.enabled)) != 5:
-        raise ConfigError("all five configured channels must be enabled")
+    if len(tuple(channel for channel in channels if channel.enabled)) != 6:
+        raise ConfigError("all six configured channels must be enabled")
     env = os.environ if environ is None else environ
     overrides = {} if cli_overrides is None else cli_overrides
     database = (

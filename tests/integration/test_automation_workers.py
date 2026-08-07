@@ -58,11 +58,10 @@ def _proposal(
     storage: Storage, proposal_id: str = "proposal-for-automation-tests"
 ) -> tuple[AutomationAuthority, int, str]:
     authority = AutomationAuthority(storage)
-    config = load_config(Path("config/channels.toml"), environ={})
     apply_proposal = authority.apply_proposal
 
     def apply_with_config(*args: object, **kwargs: object) -> dict[str, object]:
-        kwargs.setdefault("config", config)
+        kwargs.setdefault("config", load_config(Path("config/channels.toml"), environ={}))
         return apply_proposal(*args, **kwargs)  # type: ignore[arg-type]
 
     authority.apply_proposal = apply_with_config  # type: ignore[method-assign]
@@ -83,22 +82,17 @@ def _proposal(
             audience_digest=_digest(str(audience_id)),
             maxima=(0, 0, 0, 0, 0),
             approval_offset=0,
-            frontiers=tuple(
-                Frontier(_digest(channel.id), index, now) for index, channel in enumerate(config.enabled_channels)
-            ),
+            frontiers=tuple(Frontier(_digest(f"channel-{index}"), index, now) for index in range(6)),
         ),
         now=now,
     )
     return authority, audience_id, receipt
 
 
-def _candidate(storage: Storage, *, channel_id: str = "automation-test") -> int:
+def _candidate(storage: Storage) -> int:
     with storage.transaction() as connection:
         connection.execute("INSERT INTO runs(run_key,mode,status) VALUES('automation-test','test','done')")
-        connection.execute(
-            "INSERT INTO source_posts(channel_id,external_post_id) VALUES(?, '1')",
-            (channel_id,),
-        )
+        connection.execute("INSERT INTO source_posts(channel_id,external_post_id) VALUES('automation-test','1')")
         connection.execute("INSERT INTO source_post_versions(source_post_id,version_key,body) VALUES(1,'v1','body')")
         connection.execute(
             "INSERT INTO candidate_evaluations(run_id,source_post_version_id,source_set_key,evaluator_version,score) "
@@ -130,11 +124,11 @@ def _deliver_callbacks(
     assert authority.release_lease(lease, now=_now() + timedelta(seconds=1))
 
 
-def test_cutover_preview_authority_captures_five_and_apply_is_exact_replay_safe() -> None:
+def test_cutover_preview_authority_captures_six_and_apply_is_exact_replay_safe() -> None:
     with Storage.open(":memory:") as storage:
         authority, audience_id, receipt = _proposal(storage)
         assert authority.safe_cutover() == {"active": False}
-        assert storage.fetch_one("SELECT COUNT(*) AS count FROM automation_proposal_frontiers")["count"] == 5
+        assert storage.fetch_one("SELECT COUNT(*) AS count FROM automation_proposal_frontiers")["count"] == 6
 
         applied = authority.apply_proposal(
             "proposal-for-automation-tests",
@@ -367,7 +361,7 @@ def test_telegram_worker_admits_raw_callback_for_sent_outbox_by_hashed_token(mon
             now=_now(),
             validate=lambda: True,
         )
-        candidate_id = _candidate(storage, channel_id="removed-source")
+        candidate_id = _candidate(storage)
         with storage.transaction() as connection:
             connection.execute(
                 "INSERT INTO telegram_notification_outbox("
@@ -383,19 +377,6 @@ def test_telegram_worker_admits_raw_callback_for_sent_outbox_by_hashed_token(mon
             assert callback.lastrowid is not None
             callback_id = int(callback.lastrowid)
         _deliver_callbacks(authority, notification_id, (callback_id,))
-        with storage.transaction() as connection:
-            connection.execute(
-                "INSERT INTO automation_proposal_frontiers("
-                "proposal_id,channel_key_digest,upper_message_id,captured_at"
-                ") VALUES('proposal-for-automation-tests',?,?,?)",
-                (_digest("removed-source"), 1, _now().isoformat()),
-            )
-        authority.activate_release(
-            _digest("five-channel-release"),
-            config=load_config(Path("config/channels.toml"), environ={}),
-            now=_now() + timedelta(minutes=1),
-            validate=lambda: True,
-        )
 
     monkeypatch.setattr(automation, "automation_lock", no_lock)
     monkeypatch.setattr(cli, "validate_capabilities", lambda *_args: None)
@@ -943,84 +924,6 @@ def test_automated_collection_rejects_partial_failure_before_ranking(monkeypatch
     assert pipeline_constructed is False
 
 
-def test_five_channel_collection_preserves_removed_cursor_without_new_root(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    from newsbot import cli
-
-    enabled = tuple(SimpleNamespace(id=f"channel-{index}", enabled=True) for index in range(5))
-    database = tmp_path / "five-channel.sqlite"
-    collected: list[str] = []
-    pipeline_observations: list[object] = []
-
-    with Storage.open(database) as storage, storage.transaction() as connection:
-        connection.execute(
-            "INSERT INTO collection_cursors(channel_id,published_at,external_post_id) VALUES(?,?,?)",
-            ("removed-source", _now().isoformat(), "99"),
-        )
-
-    class FakeSessionStore:
-        def __init__(self, _path: str) -> None:
-            pass
-
-        def validate(self) -> Path:
-            return tmp_path / "session"
-
-    class FakeCollection:
-        def __init__(self, _storage: Storage) -> None:
-            pass
-
-        def collect_channel(self, _collector: object, channel: object, **_kwargs: object) -> SimpleNamespace:
-            collected.append(str(channel.id))
-            return SimpleNamespace(persisted=0)
-
-    class FakePipeline:
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
-
-        async def run(self, observations: tuple[object, ...], **_kwargs: object) -> SimpleNamespace:
-            pipeline_observations.extend(observations)
-            return SimpleNamespace(selection_digest=None, routed_counts={}, run_id=1)
-
-    config = SimpleNamespace(
-        enabled_channels=enabled,
-        channels=enabled,
-        database_path=database,
-        digest=_digest("five-channel-config"),
-    )
-    monkeypatch.setattr(cli, "validate_capabilities", lambda *_args: None)
-    monkeypatch.setattr(cli, "_config", lambda _args: config)
-    monkeypatch.setattr(cli, "SessionStore", FakeSessionStore)
-    monkeypatch.setattr(cli, "_live_collector", lambda *_args, **_kwargs: (object(), lambda: None))
-    monkeypatch.setattr(cli, "DurableCollection", FakeCollection)
-    monkeypatch.setattr(cli, "DurableLivePipeline", FakePipeline)
-    monkeypatch.setenv("TELEGRAM_SESSION_PATH", str(tmp_path / "session"))
-
-    assert (
-        cli._collect_live(
-            SimpleNamespace(
-                page_size=1,
-                max_pages=1,
-                lookback_hours=24,
-                fail_on_channel_error=True,
-                deadline=60,
-            ),
-            reconcile=False,
-        )
-        == 0
-    )
-
-    assert collected == [channel.id for channel in enabled]
-    assert pipeline_observations == []
-    with Storage.open(database) as storage:
-        cursor = storage.fetch_one(
-            "SELECT published_at,external_post_id FROM collection_cursors WHERE channel_id='removed-source'"
-        )
-        assert cursor is not None
-        assert cursor["external_post_id"] == "99"
-        assert storage.fetch_one("SELECT 1 FROM source_posts WHERE channel_id='removed-source'") is None
-
-
 def test_production_cutover_baseline_is_exact_and_rejects_drift() -> None:
     from newsbot import cli
 
@@ -1135,14 +1038,14 @@ def test_worker_no_work_handlers_are_redacted_and_do_not_construct_a_provider(mo
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
     monkeypatch.setattr(telegram, "TelegramApprovalAdapter", FakeAdapter)
     monkeypatch.setattr(cli, "_print", lambda value: print(value))
+    channels = tuple(SimpleNamespace(id=f"channel-{index}") for index in range(6))
     from newsbot.config import load_config
 
-    base_config = load_config(Path("config/channels.toml"), environ={})
     runtime_config = SimpleNamespace(
-        digest=base_config.digest,
-        enabled_channels=base_config.enabled_channels,
+        digest=_digest("config"),
+        enabled_channels=channels,
         database_path=database,
-        news_policy=base_config.news_policy,
+        news_policy=load_config(Path("config/channels.toml"), environ={}).news_policy,
     )
     monkeypatch.setattr(cli, "_config", lambda _args: runtime_config)
     with Storage.open(database) as storage:
@@ -1234,7 +1137,7 @@ def test_automated_collection_requires_matching_active_cutover(monkeypatch, tmp_
         yield
 
     database = tmp_path / "collect-cutover.sqlite"
-    channels = tuple(SimpleNamespace(id=f"channel-{index}") for index in range(5))
+    channels = tuple(SimpleNamespace(id=f"channel-{index}") for index in range(6))
     bound_config = SimpleNamespace(digest=_digest("config"), enabled_channels=channels, database_path=database)
     monkeypatch.setattr(automation, "automation_lock", no_lock)
     monkeypatch.setattr(cli, "validate_capabilities", lambda *_args: None)
