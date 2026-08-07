@@ -823,7 +823,9 @@ def generate_codex_once(args: argparse.Namespace) -> int:
     config = _config(args)
     with Storage.open(config.database_path) as storage:
         pipeline = NewsPipeline(storage, config, _fixture_provider_factory, SystemClock())
-        job_id = pipeline.select_codex_job_id()
+        job_id = pipeline.select_codex_job_id(
+            production_config=config if unit == "newsbot-generate-codex.service" else None
+        )
         if job_id is None:
             _print({"status": "no_job"})
             return 0
@@ -1829,6 +1831,28 @@ def automation_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def automation_topology_status(args: argparse.Namespace) -> int:
+    """Emit a redacted topology snapshot without migration or SQLite support-file writes."""
+    try:
+        config = _config(args)
+        database = _database(args)
+        connection = sqlite3.connect(
+            f"{database.resolve().as_uri()}?mode=ro&immutable=1",
+            uri=True,
+        )
+        try:
+            connection.row_factory = sqlite3.Row
+            from .observability import automation_topology_status as topology_status
+
+            result = topology_status(connection, config)
+        finally:
+            connection.close()
+    except (ConfigError, OSError, sqlite3.Error, ValueError) as error:
+        raise RuntimeError("automation topology status unavailable") from error
+    _print(result)
+    return 0 if result["status"] == "ok" else 2
+
+
 def automation_quiescence_check(args: argparse.Namespace) -> int:
     """Return a bounded redacted cutover quiescence assertion."""
     with Storage.open(_database(args)) as storage:
@@ -2141,24 +2165,14 @@ def automation_collect_once(args: argparse.Namespace) -> int:
     with automation_lock("collect"), Storage.open(_database(args)) as storage:
         authority = AutomationAuthority(storage)
         config = _config(args)
-        configured_frontiers = tuple(sha256(channel.id.encode()).hexdigest() for channel in config.enabled_channels)
-        active_cutover = storage.fetch_one(
-            "SELECT proposal.config_digest FROM automation_cutovers cutover "
-            "JOIN automation_cutover_proposals proposal ON proposal.id=cutover.proposal_id WHERE cutover.id=1"
-        )
-        active_frontiers = tuple(frontier.channel_key_digest for frontier in authority.active_frontiers())
-        if active_cutover is None:
-            raise RuntimeError("automated collection requires an active cutover")
-        if (
-            len(configured_frontiers) != 6
-            or len(set(configured_frontiers)) != 6
-            or tuple(sorted(configured_frontiers)) != active_frontiers
-            or str(active_cutover["config_digest"]) != config.digest
-        ):
-            raise RuntimeError("automated collection configuration drifted from the active cutover")
         with storage.transaction() as connection:
-            if authority.validate_active_config_binding(connection, config) == 0:
-                raise RuntimeError("automated collection requires a release/config binding")
+            topology = authority.topology_status(connection, config)
+            if not topology.active_cutover_present:
+                raise RuntimeError("automated collection requires an active cutover")
+            try:
+                authority.validate_active_topology(connection, config, require_binding=True)
+            except RuntimeError as error:
+                raise RuntimeError("automated collection configuration drifted") from error
         lease = authority.acquire_lease(
             "collect",
             now=datetime.now(UTC),
@@ -2766,6 +2780,7 @@ def build_parser() -> argparse.ArgumentParser:
         command.set_defaults(handler=handler)
     for name, handler, help_text in (
         ("automation-status", automation_status, "show redacted automation aggregates"),
+        ("automation-topology-status", automation_topology_status, "show redacted current automation topology"),
         ("automation-quiescence-check", automation_quiescence_check, "check bounded automation quiescence"),
         (
             "automation-notification-inspect",
@@ -2806,7 +2821,9 @@ def build_parser() -> argparse.ArgumentParser:
     ):
         command = commands.add_parser(name, help=help_text)
         command.add_argument("--db", type=Path)
-        if name == "automation-notification-inspect":
+        if name == "automation-topology-status":
+            command.add_argument("--config", type=Path, default=Path("config/channels.toml"))
+        elif name == "automation-notification-inspect":
             command.add_argument("--intent-id", type=int, required=True)
         elif name == "automation-notification-resolve":
             command.add_argument("--intent-id", type=int, required=True)
@@ -2910,7 +2927,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         # Legacy entry points must refuse a manually bound database before any
         # automation lock, provider, Telegram, or Sheets authority is acquired.
-        if not args.command.startswith("manual-") and args.command != "init-db" and hasattr(args, "db"):
+        if (
+            not args.command.startswith("manual-")
+            and args.command not in {"init-db", "automation-topology-status"}
+            and hasattr(args, "db")
+        ):
             _assert_legacy_database_authority(_database(args))
         handler = cast(CommandHandler, args.handler)
         return handler(args)

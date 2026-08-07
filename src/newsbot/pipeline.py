@@ -711,10 +711,12 @@ class NewsPipeline:
             )
         return GenerationResult(candidate_id, generation_id, draft, source_ids, False)
 
-    def select_codex_job_id(self) -> int | None:
+    def select_codex_job_id(self, *, production_config: object | None = None) -> int | None:
         """Bind and return the globally highest-priority admissible Codex job."""
         now = _utc(self.clock.now()).isoformat()
         with self.storage.transaction() as connection:
+            if production_config is not None:
+                AutomationAuthority.validate_active_topology(connection, production_config, require_binding=True)
             control = connection.execute(
                 "SELECT paused_at FROM generation_provider_controls WHERE provider_name='codex_cli'"
             ).fetchone()

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from .automation import AutomationAuthority
 from .storage import Storage
 
 
@@ -118,6 +120,21 @@ def automation_status(storage: Storage, *, now: datetime | None = None) -> dict[
             "id > COALESCE((SELECT baseline_handoff_id FROM automation_cutovers WHERE id=1),"
             "9223372036854775807) AND status IN ('pending','retryable','delivering','ambiguous')",
         ),
+    }
+
+
+def automation_topology_status(connection: sqlite3.Connection, config: object) -> dict[str, int | bool | str]:
+    """Serialize the frozen redacted topology contract from a read-only connection."""
+    topology = AutomationAuthority.topology_status(connection, config)
+    return {
+        "active_cutover_present": topology.active_cutover_present,
+        "active_frontier_count": topology.active_frontier_count,
+        "config_binding_match": topology.config_binding_match,
+        "configured_channel_count": topology.configured_channel_count,
+        "configured_channel_unique": topology.configured_channel_unique,
+        "frontier_coverage": topology.frontier_coverage,
+        "frontier_shape_supported": topology.frontier_shape_supported,
+        "status": topology.status,
     }
 
 

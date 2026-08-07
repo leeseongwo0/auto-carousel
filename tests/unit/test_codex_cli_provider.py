@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import contextmanager
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -167,3 +170,69 @@ def test_timeout_cleanup_signals_process_group_then_reaps(monkeypatch: pytest.Mo
     monkeypatch.setattr(asyncio, "wait_for", timed_wait)
     asyncio.run(codex_cli._terminate_process_group(Process()))  # type: ignore[arg-type]
     assert signals == [codex_cli.signal.SIGTERM]
+
+
+def test_production_codex_topology_drift_precedes_job_selection(monkeypatch, tmp_path: Path) -> None:
+    from newsbot import cli
+    from newsbot.automation import AutomationDriftError
+    from newsbot.storage import Storage
+
+    storage_open = Storage.open
+
+    @contextmanager
+    def open_storage(_path: Path):
+        with storage_open(tmp_path / "codex.sqlite") as storage:
+            yield storage
+
+    class Pipeline:
+        def select_codex_job_id(self, *, production_config: object | None = None) -> None:
+            assert production_config is not None
+            raise AutomationDriftError("drift")
+
+    monkeypatch.setattr(cli, "_attest_codex_activation", lambda: "newsbot-generate-codex.service")
+    monkeypatch.setattr(cli, "_database", lambda _args: Path("/var/lib/newsbot/newsbot.db"))
+    monkeypatch.setattr(cli, "_config", lambda _args: SimpleNamespace(database_path=tmp_path / "codex.sqlite"))
+    monkeypatch.setattr(cli, "validate_capabilities", lambda _capability: None)
+    monkeypatch.setattr(cli.Storage, "open", open_storage)
+    monkeypatch.setattr(cli, "NewsPipeline", lambda *_args, **_kwargs: Pipeline())
+
+    with pytest.raises(AutomationDriftError):
+        cli.generate_codex_once(
+            SimpleNamespace(config=Path("/etc/newsbot/config.toml"), db=Path("/var/lib/newsbot/newsbot.db"))
+        )
+
+
+def test_matching_production_codex_topology_allows_no_job_flow(monkeypatch, tmp_path: Path, capsys) -> None:
+    from newsbot import cli
+    from newsbot.storage import Storage
+
+    storage_open = Storage.open
+
+    @contextmanager
+    def open_storage(_path: Path):
+        with storage_open(tmp_path / "codex.sqlite") as storage:
+            yield storage
+
+    validated: list[object | None] = []
+
+    class Pipeline:
+        def select_codex_job_id(self, *, production_config: object | None = None) -> None:
+            validated.append(production_config)
+            return None
+
+    config = SimpleNamespace(database_path=tmp_path / "codex.sqlite")
+    monkeypatch.setattr(cli, "_attest_codex_activation", lambda: "newsbot-generate-codex.service")
+    monkeypatch.setattr(cli, "_database", lambda _args: Path("/var/lib/newsbot/newsbot.db"))
+    monkeypatch.setattr(cli, "_config", lambda _args: config)
+    monkeypatch.setattr(cli, "validate_capabilities", lambda _capability: None)
+    monkeypatch.setattr(cli.Storage, "open", open_storage)
+    monkeypatch.setattr(cli, "NewsPipeline", lambda *_args, **_kwargs: Pipeline())
+
+    assert (
+        cli.generate_codex_once(
+            SimpleNamespace(config=Path("/etc/newsbot/config.toml"), db=Path("/var/lib/newsbot/newsbot.db"))
+        )
+        == 0
+    )
+    assert validated == [config]
+    assert capsys.readouterr().out == '{"status": "no_job"}\n'

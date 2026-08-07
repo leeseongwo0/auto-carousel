@@ -81,6 +81,20 @@ class CutoverProposal:
 
 
 @dataclass(frozen=True, slots=True)
+class AutomationTopology:
+    """Redacted current-runtime authority result for one database connection."""
+
+    active_cutover_present: bool
+    active_frontier_count: int
+    config_binding_match: bool
+    configured_channel_count: int
+    configured_channel_unique: bool
+    frontier_coverage: bool
+    frontier_shape_supported: bool
+    status: Literal["ok", "drift"]
+
+
+@dataclass(frozen=True, slots=True)
 class NotificationClaim:
     notification_id: int
     state: NotificationState
@@ -159,6 +173,98 @@ def cutover_locks(*, directory: Path | None = None) -> Iterator[None]:
 class AutomationAuthority:
     """SQLite-backed fencing, cutover and safe notification authority."""
 
+    @staticmethod
+    def _canonical_policy(config: object) -> tuple[str, str, str]:
+        policy = getattr(config, "news_policy", None)
+        if policy is None:
+            raise AutomationDriftError("runtime news policy is unavailable")
+        fields = getattr(policy, "__dataclass_fields__", {})
+        canonical = json.dumps(
+            {name: getattr(policy, name) for name in sorted(fields)},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return str(getattr(config, "digest", "")), str(getattr(policy, "version", "")), canonical
+
+    @classmethod
+    def topology_status(cls, connection: sqlite3.Connection, config: object) -> AutomationTopology:
+        """Evaluate current topology on this connection without exposing membership."""
+        config_any: Any = config
+        try:
+            channels = tuple(config_any.enabled_channels)
+            configured_digests = tuple(sha256(str(channel.id).encode()).hexdigest() for channel in channels)
+        except (AttributeError, TypeError):
+            channels = ()
+            configured_digests = ()
+        configured_unique = len(configured_digests) == 5 and len(set(configured_digests)) == 5
+        cutover = connection.execute("SELECT proposal_id FROM automation_cutovers WHERE id=1").fetchone()
+        frontier_digests: set[str] = set()
+        if cutover is not None:
+            frontier_digests = {
+                str(row["channel_key_digest"])
+                for row in connection.execute(
+                    "SELECT channel_key_digest FROM automation_proposal_frontiers WHERE proposal_id=?",
+                    (str(cutover["proposal_id"]),),
+                )
+            }
+        frontier_count = len(frontier_digests)
+        frontier_shape_supported = frontier_count in {5, 6}
+        frontier_coverage = configured_unique and set(configured_digests).issubset(frontier_digests)
+        binding_match = False
+        try:
+            config_digest, policy_version, canonical = cls._canonical_policy(config)
+        except AutomationDriftError:
+            pass
+        else:
+            binding = connection.execute(
+                "SELECT binding.config_digest,binding.news_policy_version,binding.canonical_policy_json "
+                "FROM (SELECT id FROM automation_release_activations "
+                "WHERE cutover_id=1 ORDER BY id DESC LIMIT 1) activation "
+                "LEFT JOIN automation_release_config_bindings binding ON binding.activation_id=activation.id"
+            ).fetchone()
+            binding_match = (
+                binding is not None
+                and binding["config_digest"] is not None
+                and (
+                    compare_digest(str(binding["config_digest"]), config_digest)
+                    and compare_digest(str(binding["news_policy_version"]), policy_version)
+                    and str(binding["canonical_policy_json"]) == canonical
+                )
+            )
+        active = cutover is not None
+        return AutomationTopology(
+            active_cutover_present=active,
+            active_frontier_count=frontier_count,
+            config_binding_match=binding_match,
+            configured_channel_count=len(channels),
+            configured_channel_unique=configured_unique,
+            frontier_coverage=frontier_coverage,
+            frontier_shape_supported=frontier_shape_supported,
+            status=(
+                "ok"
+                if active and configured_unique and frontier_shape_supported and frontier_coverage and binding_match
+                else "drift"
+            ),
+        )
+
+    @classmethod
+    def validate_active_topology(
+        cls, connection: sqlite3.Connection, config: object, *, require_binding: bool
+    ) -> AutomationTopology:
+        """Require current five-channel authority, optionally including its latest binding."""
+        topology = cls.topology_status(connection, config)
+        if (
+            not topology.active_cutover_present
+            or topology.configured_channel_count != 5
+            or not topology.configured_channel_unique
+            or not topology.frontier_shape_supported
+            or not topology.frontier_coverage
+            or (require_binding and not topology.config_binding_match)
+        ):
+            raise AutomationDriftError("runtime automation topology drifted")
+        return topology
+
     def __init__(self, storage: Storage) -> None:
         self.storage = storage
 
@@ -178,34 +284,19 @@ class AutomationAuthority:
         )
         return cursor.rowcount == 1
 
-    @staticmethod
-    def validate_active_config_binding(connection: sqlite3.Connection, config: object) -> int:
+    @classmethod
+    def validate_active_config_binding(cls, connection: sqlite3.Connection, config: object) -> int:
         """Require the latest immutable release/config pair before worker mutation."""
-        policy = getattr(config, "news_policy", None)
-        if policy is None:
-            raise AutomationDriftError("runtime news policy is unavailable")
-        fields = getattr(policy, "__dataclass_fields__", {})
-        payload = json.dumps(
-            {name: getattr(policy, name) for name in sorted(fields)},
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
+        cls.validate_active_topology(connection, config, require_binding=True)
+        config_digest, policy_version, canonical = cls._canonical_policy(config)
         row = connection.execute(
-            "SELECT binding.id,binding.config_digest,binding.news_policy_version,binding.canonical_policy_json "
-            "FROM automation_release_activations activation "
+            "SELECT binding.id FROM (SELECT id FROM automation_release_activations "
+            "WHERE cutover_id=1 ORDER BY id DESC LIMIT 1) activation "
             "LEFT JOIN automation_release_config_bindings binding ON binding.activation_id=activation.id "
-            "WHERE activation.cutover_id=1 ORDER BY activation.id DESC LIMIT 1"
+            "WHERE binding.config_digest=? AND binding.news_policy_version=? AND binding.canonical_policy_json=?",
+            (config_digest, policy_version, canonical),
         ).fetchone()
-        if row is None:
-            raise AutomationDriftError("runtime release activation is unavailable")
-        if row["id"] is None:
-            raise AutomationDriftError("runtime release/config binding is missing")
-        if (
-            not compare_digest(str(row["config_digest"]), str(getattr(config, "digest", "")))
-            or not compare_digest(str(row["news_policy_version"]), str(getattr(policy, "version", "")))
-            or str(row["canonical_policy_json"]) != payload
-        ):
+        if row is None or row["id"] is None:
             raise AutomationDriftError("runtime release/config binding drifted")
         return int(row["id"])
 
@@ -678,8 +769,8 @@ class AutomationAuthority:
         )
 
     def persist_proposal(self, proposal: CutoverProposal, *, now: datetime) -> str:
-        if len(proposal.frontiers) != 6 or len({item.channel_key_digest for item in proposal.frontiers}) != 6:
-            raise ValueError("a cutover proposal requires exactly six distinct frontiers")
+        if len(proposal.frontiers) != 5 or len({item.channel_key_digest for item in proposal.frontiers}) != 5:
+            raise ValueError("a cutover proposal requires exactly five distinct frontiers")
         if any(item.upper_message_id < 0 for item in proposal.frontiers):
             raise ValueError("frontier IDs must be nonnegative")
         values = [
@@ -787,11 +878,18 @@ class AutomationAuthority:
                 "JOIN automation_cutover_proposals proposal ON proposal.id=cutover.proposal_id WHERE cutover.id=1"
             ).fetchone()
             if active is not None:
+                frontier_count = int(
+                    connection.execute(
+                        "SELECT COUNT(DISTINCT channel_key_digest) FROM automation_proposal_frontiers WHERE proposal_id=?",
+                        (str(active["proposal_id"]),),
+                    ).fetchone()[0]
+                )
                 if (
                     str(active["proposal_id"]) == proposal_id
                     and str(active["proposal_sha256"]) == expected_sha256
                     and str(active["release_digest"]) == release_digest
                     and int(active["audience_binding_id"]) == audience_binding_id
+                    and frontier_count in {5, 6}
                 ):
                     return {"changed": False, "status": "active"}
                 raise AutomationDriftError("active cutover replay identity drifted")
@@ -807,14 +905,13 @@ class AutomationAuthority:
                 raise AutomationDriftError("proposal is missing, expired, or for another release")
             proposal_state = dict(proposal)
             proposal_state["audience_binding_id"] = audience_binding_id
-            if (
+            frontier_count = int(
                 connection.execute(
-                    "SELECT COUNT(*) FROM automation_proposal_frontiers WHERE proposal_id=?", (proposal_id,)
+                    "SELECT COUNT(DISTINCT channel_key_digest) FROM automation_proposal_frontiers WHERE proposal_id=?",
+                    (proposal_id,),
                 ).fetchone()[0]
-                != 6
-                or not self._proposal_state_matches(connection, proposal_state)
-                or not validate()
-            ):
+            )
+            if frontier_count != 5 or not self._proposal_state_matches(connection, proposal_state) or not validate():
                 raise AutomationDriftError("cutover state drifted")
             connection.execute(
                 "INSERT INTO automation_cutovers(id,proposal_id,audience_binding_id,target_binding_id,release_digest,activated_at,baseline_candidate_id,baseline_generation_job_id,baseline_generation_id,baseline_decision_event_id,baseline_handoff_id,approval_offset) VALUES(1,?,?,?,?,?,?,?,?,?,?,?)",
@@ -874,15 +971,9 @@ class AutomationAuthority:
         """Append the latest immutable release/config pair under quiescence."""
         _digest(release_digest)
         config_any: Any = config
-        policy: Any = getattr(config_any, "news_policy", None)
-        fields = getattr(policy, "__dataclass_fields__", {}) if policy is not None else {}
-        canonical = json.dumps(
-            {name: getattr(policy, name) for name in sorted(fields)},
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
+        config_digest, policy_version, canonical = self._canonical_policy(config_any)
         with self.storage.transaction() as connection:
+            topology = self.validate_active_topology(connection, config_any, require_binding=False)
             latest = connection.execute(
                 "SELECT activation.id,activation.release_digest,binding.config_digest FROM automation_release_activations activation "
                 "LEFT JOIN automation_release_config_bindings binding ON binding.activation_id=activation.id "
@@ -893,8 +984,10 @@ class AutomationAuthority:
             if (
                 compare_digest(str(latest["release_digest"]), release_digest)
                 and latest["config_digest"] is not None
-                and compare_digest(str(latest["config_digest"]), str(getattr(config_any, "digest", "")))
+                and compare_digest(str(latest["config_digest"]), config_digest)
             ):
+                if not topology.config_binding_match:
+                    raise AutomationDriftError("runtime release/config binding drifted")
                 return {"activation_id": int(latest["id"]), "changed": False, "status": "active"}
             if not self._is_runtime_quiescent(connection) or not validate():
                 raise AutomationDriftError("runtime activation state drifted")
@@ -910,7 +1003,7 @@ class AutomationAuthority:
                 "INSERT INTO automation_release_config_bindings("
                 "activation_id,config_digest,news_policy_version,canonical_policy_json,created_at"
                 ") VALUES(?,?,?,?,?)",
-                (activation_id, str(config_any.digest), str(policy.version), canonical, _timestamp(now)),
+                (activation_id, config_digest, policy_version, canonical, _timestamp(now)),
             )
             return {"activation_id": activation_id, "changed": True, "status": "active"}
 

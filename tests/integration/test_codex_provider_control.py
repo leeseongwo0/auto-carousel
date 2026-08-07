@@ -129,6 +129,33 @@ def test_selector_binds_one_unbound_and_prioritizes_expired_due_then_queued() ->
     )
 
 
+def test_production_selector_rejects_drift_before_provider_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from newsbot.automation import AutomationAuthority, AutomationDriftError
+
+    storage = Storage.open(":memory:")
+    job = _job(storage, 1)
+
+    def reject_topology(*_args: object, **_kwargs: object) -> None:
+        raise AutomationDriftError("runtime automation topology drifted")
+
+    monkeypatch.setattr(AutomationAuthority, "validate_active_topology", reject_topology)
+
+    with pytest.raises(AutomationDriftError, match="topology drifted"):
+        _pipeline(storage).select_codex_job_id(production_config=SimpleNamespace())
+
+    assert (
+        storage.fetch_one(
+            "SELECT 1 FROM generation_job_provider_bindings WHERE generation_job_id=?",
+            (job,),
+        )
+        is None
+    )
+    assert storage.fetch_one("SELECT status FROM generation_jobs WHERE id=?", (job,))["status"] == "queued"
+    assert storage.fetch_one("SELECT COUNT(*) AS n FROM generation_provider_attempts")["n"] == 0
+
+
 def test_selector_blocks_pause_hold_and_no_due_job() -> None:
     storage = Storage.open(":memory:")
     job = _job(storage, 1, status="failed_recoverable")
