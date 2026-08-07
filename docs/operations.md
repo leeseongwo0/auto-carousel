@@ -51,10 +51,6 @@ and worker locks. They are not presented as independent security sandboxes.
 Codex remains separate: its provider credentials and containment controls must
 remain isolated from the non-Codex workers. Do not merge its schedule or
 credential boundary into the other workers.
-The current public synthetic configuration has exactly five enabled channels.
-The former six-channel frontier remains immutable history. Traceable descendants
-of work already authorized before the five-channel activation are grandfathered
-and must retain their durable authority/history.
 
 Legacy Telegram approval and Sheets delivery retain their safety rules:
 
@@ -74,20 +70,12 @@ An intent committed on time may still complete through its durable outbox.
 
 ## Legacy release, recovery, and rollback
 
-For an existing automation installation, drain the three non-Codex service/timer
-pairs and the Codex timer before changing its runtime. The legal authority order
-is `collect → noon → Telegram → Sheets → Codex`; verify inactive workers,
-authority locks, and clean Codex containment before building or switching a
-release. Keep a backup according to the installation's own retention policy.
-The canonical worker-lock order remains `collect → Telegram → Sheets`; the noon state-machine drain occurs between collection shutdown and Telegram drain.
-
-A private config must be staged beneath a `root:newsbot` trusted directory with
-mode 0750. The staged and live files must be regular, single-link
-`root:newsbot` files with mode 0640; reject symlinks, additional hard links, or
-ownership/mode drift. Promote the validated stage using same-filesystem atomic
-replacement. Root alone archives the validated semantic preimage and manifest;
-operator status exposes only a redacted five-channel topology.
-
+For an existing automation installation, drain scheduled workers before changing
+its runtime. Verify that workers are inactive, authority locks are held, and any
+Codex containment state is clean before building or switching a release. Keep a
+backup according to the installation's own retention policy.
+The compatibility drain and lock order is always `collect → Telegram → Sheets`;
+do not reorder or parallelize these authority boundaries.
 A generic compatibility release uses one owner-only quiescence proof across both
 the build and switch attestations:
 
@@ -111,20 +99,15 @@ sudo -u newsbot /usr/local/bin/newsbot automation-cutover-apply \
 
 `<COMMIT_SHA>` and `<PINNED_UV_SHA256>` are explicit, reviewed placeholders.
 Never substitute credentials, copy an unverified digest from logs, or recreate
-the proof between build and switch. The preview/apply sequence is staged
-activation: it appends the release digest, `AppConfig.digest`, and canonical
-`news_policy_v1` payload as one immutable binding. The latest valid five-channel
-release/config binding is current authority; only its unchanged pair may receive
-canonical replay.
+the proof between build and switch.
 
-On binding drift, root alone may start or clean up Codex containment, with zero
-Newsbot job/provider authority. Normal Codex restoration still requires its
-separate clean receipt and admission gate. Rollback is a forward switch: with every
-worker still disabled and quiescence attested, switch and re-attest the prior
-six-capable verified runtime first; then atomically install and attest the exact
-archived six-channel config and use that prior runtime to append/replay its
-release/config activation.
-Preserve migrations, approvals, cursors, outboxes, attempts, remote history,
-and containment receipts. Resolve production-specific incidents through that
-installation's private runbook; do not copy host names, account identities,
-credentials, or payloads into this public documentation.
+Apply database initialization and migration commands only at the documented
+point in that installation's release procedure. Treat release/config activation
+as append-only. Do not retrofit older activations, edit durable audit records,
+or restore a database snapshot as a shortcut around a failed remote effect.
+
+Rollback is a forward switch to a previously verified compatible runtime or a
+corrective runtime. Preserve migrations, approvals, cursors, outboxes, attempts,
+remote history, and containment receipts. Resolve production-specific incidents
+through that installation's private runbook; do not copy host names, account
+identities, credentials, or payloads into this public documentation.

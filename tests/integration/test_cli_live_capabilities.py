@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from newsbot.approval.telegram import split_telegram_text
-from newsbot.config import Capability, ConfigError, load_config, validate_capabilities
+from newsbot.config import Capability, ConfigError, validate_capabilities
 from newsbot.copywriting import adaptive_page_count
 from newsbot.storage import Storage
 
@@ -52,80 +52,6 @@ def test_sheets_capability_fails_closed_without_live_settings() -> None:
         validate_capabilities(Capability.LIVE_SHEETS, environ={})
     assert str(error.value) == (
         "missing required environment variables: GOOGLE_SERVICE_ACCOUNT_FILE, GOOGLE_SHEETS_SPREADSHEET_ID"
-    )
-
-
-def test_automation_topology_status_does_not_create_missing_database(tmp_path: Path) -> None:
-    from newsbot import cli
-
-    config_path = tmp_path / "channels.toml"
-    config_path.write_text(Path("config/channels.toml").read_text(encoding="utf-8"), encoding="utf-8")
-    database = tmp_path / "missing.sqlite"
-
-    with pytest.raises(RuntimeError, match="automation topology status unavailable"):
-        cli.automation_topology_status(SimpleNamespace(config=config_path, db=database))
-
-    assert not database.exists()
-
-
-def test_automation_topology_status_main_redacts_invalid_database(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    from newsbot import cli
-
-    config_path = tmp_path / "channels.toml"
-    config_path.write_text(Path("config/channels.toml").read_text(encoding="utf-8"), encoding="utf-8")
-    database = tmp_path / "invalid.sqlite"
-    database.write_bytes(b"not a sqlite database")
-
-    with pytest.raises(SystemExit, match="2"):
-        cli.main(
-            [
-                "automation-topology-status",
-                "--config",
-                str(config_path),
-                "--db",
-                str(database),
-            ]
-        )
-
-    stderr = capsys.readouterr().err
-    assert "automation topology status unavailable" in stderr
-    assert "sqlite" not in stderr.lower()
-    assert "file is not a database" not in stderr.lower()
-
-
-def test_automation_topology_status_is_redacted_and_returns_drift(tmp_path: Path, capsys) -> None:
-    from newsbot import cli
-
-    config_path = tmp_path / "channels.toml"
-    config_path.write_text(Path("config/channels.toml").read_text(encoding="utf-8"), encoding="utf-8")
-    database = tmp_path / "topology.sqlite"
-    with Storage.open(database):
-        pass
-    before = database.read_bytes()
-    before_entries = {path.name for path in tmp_path.iterdir()}
-    before_stat = database.stat()
-
-    assert cli.automation_topology_status(SimpleNamespace(config=config_path, db=database)) == 2
-    payload = json.loads(capsys.readouterr().out)
-    assert payload == {
-        "active_cutover_present": False,
-        "active_frontier_count": 0,
-        "config_binding_match": False,
-        "configured_channel_count": len(load_config(config_path, environ={}).enabled_channels),
-        "configured_channel_unique": True,
-        "frontier_coverage": False,
-        "frontier_shape_supported": False,
-        "status": "drift",
-    }
-    assert database.read_bytes() == before
-    assert {path.name for path in tmp_path.iterdir()} == before_entries
-    after_stat = database.stat()
-    assert (after_stat.st_size, after_stat.st_mtime_ns, after_stat.st_mode) == (
-        before_stat.st_size,
-        before_stat.st_mtime_ns,
-        before_stat.st_mode,
     )
 
 

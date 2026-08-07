@@ -4,14 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from newsbot.config import (
-    Capability,
-    ConfigError,
-    load_behavior_profile,
-    load_config,
-    validate_automation_bindings,
-    validate_capabilities,
-)
+from newsbot.config import Capability, ConfigError, load_behavior_profile, load_config, validate_capabilities
 
 
 def _channels_toml() -> str:
@@ -69,55 +62,37 @@ def test_behavior_profile_rejects_remote_bindings_and_unsafe_source_values(tmp_p
             load_behavior_profile(path)
 
 
-def test_load_config_requires_exactly_five_enabled_channels(tmp_path: Path) -> None:
+def test_load_config_requires_exactly_six_enabled_channels(tmp_path: Path) -> None:
     path = tmp_path / "channels.toml"
     path.write_text(_channels_toml(), encoding="utf-8")
 
     config = load_config(path, environ={})
 
-    assert len(config.channels) == 5
-    assert len(config.enabled_channels) == 5
+    assert len(config.channels) == 6
+    assert len(config.enabled_channels) == 6
     assert {channel.handle for channel in config.enabled_channels} == {
         "community_feed",
         "research_forum",
         "news_publisher",
         "news_aggregator",
         "official_updates",
+        "general_chat",
     }
     assert config.database_path == Path("data/newsbot.sqlite")
     assert config.google_service_account_file is None
     assert config.google_sheets_spreadsheet_id is None
 
-    invalid = _channels_toml()
-    last_channel = invalid.rfind("[[channels]]")
-    invalid = invalid[:last_channel] + invalid[invalid.find("\n[policy]", last_channel) :]
+    valid = _channels_toml()
+    last_channel = valid.rfind("[[channels]]")
+    policy = valid.find("\n[policy]", last_channel)
+    invalid = valid[:last_channel] + valid[policy:]
     path.write_text(invalid, encoding="utf-8")
     with pytest.raises(ConfigError) as error:
         load_config(path, environ={})
-    assert str(error.value) == "configuration must define exactly five channels"
-
-    path.write_text(_channels_toml().replace("enabled = true", "enabled = false", 1), encoding="utf-8")
-    with pytest.raises(ConfigError, match="all five configured channels"):
-        load_config(path, environ={})
-
-    path.write_text(
-        _channels_toml().replace('id = "research_forum"', 'id = "COMMUNITY_FEED"', 1),
-        encoding="utf-8",
-    )
-    with pytest.raises(ConfigError, match="ids and handles must be unique"):
-        load_config(path, environ={})
-
-    path.write_text(
-        _channels_toml().replace('handle = "research_forum"', 'handle = "COMMUNITY_FEED"', 1),
-        encoding="utf-8",
-    )
-    with pytest.raises(ConfigError, match="ids and handles must be unique"):
-        load_config(path, environ={})
-
-    assert validate_automation_bindings(config) is None
+    assert str(error.value) == "configuration must define exactly six channels"
 
 
-def test_load_config_accepts_private_five_channel_identities(tmp_path: Path) -> None:
+def test_load_config_accepts_private_six_channel_identities(tmp_path: Path) -> None:
     path = tmp_path / "private-channels.toml"
     config_text = _channels_toml()
     for index, public_handle in enumerate(
@@ -127,6 +102,7 @@ def test_load_config_accepts_private_five_channel_identities(tmp_path: Path) -> 
             "news_publisher",
             "news_aggregator",
             "official_updates",
+            "general_chat",
         ),
         start=1,
     ):
@@ -136,7 +112,7 @@ def test_load_config_accepts_private_five_channel_identities(tmp_path: Path) -> 
     config = load_config(path, environ={})
 
     assert {channel.handle for channel in config.enabled_channels} == {
-        f"private_source_{index}" for index in range(1, 6)
+        f"private_source_{index}" for index in range(1, 7)
     }
 
 

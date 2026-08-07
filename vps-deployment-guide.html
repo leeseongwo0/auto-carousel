@@ -42,15 +42,11 @@ sudo install -d -o root -g root -m 0700 /var/lib/newsbot-containment
 sudo install -d -o root -g root -m 0700 /var/backups/newsbot
 sudo install -d -o root -g newsbot -m 0750 /etc/newsbot
 sudo install -o newsbot -g newsbot -m 0600 /dev/null /etc/newsbot/newsbot.env
-sudo install -d -o root -g root -m 0700 /var/lib/newsbot/config-archive
-sudo install -o root -g newsbot -m 0640 /secure/operator-provided-newsbot-config.toml /etc/newsbot/.config.toml.stage
-sudo sh -c 'test -f /etc/newsbot/.config.toml.stage && test ! -L /etc/newsbot/.config.toml.stage && test "$(stat -c %h /etc/newsbot/.config.toml.stage)" = 1'
-sudo mv -f /etc/newsbot/.config.toml.stage /etc/newsbot/config.toml
-sudoedit /etc/newsbot/newsbot.env
+sudo install -o root -g root -m 0644 /secure/operator-provided-newsbot-config.toml /etc/newsbot/config.toml
+sudoedit /etc/newsbot/newsbot.env</code></pre>
 <p>새 호스트에서만 DB/lock file을 release window 전에 provision합니다. 이것은 schema migration이 아니며 <code>init-db</code>는 switch 뒤에 실행합니다. 이후 post-007 release에서는 existing SQLite authority나 lock file을 다시 만들거나 바꾸지 않습니다.</p>
-<p>config stage와 live file은 같은 filesystem의 <code>/etc/newsbot</code> 안에서만 atomic replacement합니다. 둘 다 <code>root:newsbot</code>, mode <code>0640</code>인 regular single-link file이어야 하며, symlink, 추가 hard link, ownership/mode drift는 fail closed입니다. root만 validated semantic preimage와 manifest를 <code>/var/lib/newsbot/config-archive</code>에 보관합니다. 공개 status에는 현재 다섯 채널 topology만 redacted하여 표시합니다; 여섯 채널 frontier는 immutable history이고 activation 전에 authorized된 work의 traceable descendant는 grandfathered입니다.</p>
 <p>환경 파일에는 Telegram API ID/HASH, owner-only <code>TELEGRAM_SESSION_PATH</code>, Bot token, approver chat/user IDs, 그 목록 안의 단 한 명인 <code>NEWSBOT_CALLBACK_ACTOR_ID</code>, Sheets ID 및 owner-only service-account JSON 경로를 설정합니다. secret 값 자체를 이 문서에 쓰지 마십시오.</p>
-<p class="warn">collect/telegram/sheets의 세 service/timer 쌍은 모두 <code>newsbot</code> UID, 이 env file, Telethon session과 locks를 공유합니다. 이 세 worker 사이에 cross-unit isolation/private mounts는 없습니다. Signed provenance and private cross-unit isolation are explicitly out of scope.</p>
+<p class="warn">collect/telegram/sheets unit은 모두 <code>newsbot</code> UID, 이 env file, Telethon session과 locks를 공유합니다. 이 세 unit 사이에 cross-unit isolation/private mounts는 없습니다. Signed provenance and private cross-unit isolation are explicitly out of scope.</p>
 </section>
 
 <section>
@@ -79,11 +75,11 @@ sudo test -f /opt/newsbot/releases/$RELEASE_GIT_SHA/runtime-manifest.json
 export RELEASE_DIGEST="$(sha256sum /opt/newsbot/releases/$RELEASE_GIT_SHA/runtime-manifest.json | cut -d' ' -f1)"
 sudo /opt/newsbot/releases/$RELEASE_GIT_SHA/src/deploy/build_newsbot_release.py --uv-sha256 $UV_SHA256 switch $RELEASE_GIT_SHA --quiescence-proof /var/lib/newsbot/quiescence-proof
 sudo rm -f /var/lib/newsbot/quiescence-proof</code></pre>
-<p>현 stable release의 non-migrating helper가 build와 switch 전후에 disabled timers, inactive services, read-only application DB, collect → Telegram → Sheets canonical flock 및 Codex clean containment를 재검증합니다. legal authority drain 순서는 collect → noon → Telegram → Sheets → Codex이며, switch에서는 이 세 validated <code>newsbot:newsbot</code>, regular, single-link, <code>0600</code> lock descriptor를 final pre-swap check, <code>os.replace</code>, target attestation까지 계속 보유하며 missing/invalid/replaced lock file은 거부합니다. 따라서 switch 전에는 <code>init-db</code>, cutover preview/apply 또는 다른 migration-capable 명령을 실행하지 않습니다. runtime manifest의 SHA-256을 확인한 값만 <code>RELEASE_DIGEST</code>에 넣습니다.</p>
+<p>현 stable release의 non-migrating helper가 build와 switch 전후에 disabled timers, inactive services, read-only application DB, collect → Telegram → Sheets canonical flock 및 Codex clean containment를 재검증합니다. switch에서는 이 세 validated <code>newsbot:newsbot</code>, regular, single-link, <code>0600</code> lock descriptor를 final pre-swap check, <code>os.replace</code>, target attestation까지 계속 보유하며 missing/invalid/replaced lock file은 거부합니다. 따라서 switch 전에는 <code>init-db</code>, cutover preview/apply 또는 다른 migration-capable 명령을 실행하지 않습니다. runtime manifest의 SHA-256을 확인한 값만 <code>RELEASE_DIGEST</code>에 넣습니다.</p>
 </section>
 
 <section>
-<h2>5. 세 non-Codex service/timer 쌍 설치, migration 008, staged cutover/config receipt</h2>
+<h2>5. 여섯 non-Codex unit 설치, migration 008, cutover/config receipt</h2>
 <pre><code>sudo install -o root -g root -m 0644 /opt/newsbot/releases/$RELEASE_GIT_SHA/src/deploy/systemd/newsbot-collect.service /etc/systemd/system/newsbot-collect.service
 sudo install -o root -g root -m 0644 /opt/newsbot/releases/$RELEASE_GIT_SHA/src/deploy/systemd/newsbot-collect.timer /etc/systemd/system/newsbot-collect.timer
 sudo install -o root -g root -m 0644 /opt/newsbot/releases/$RELEASE_GIT_SHA/src/deploy/systemd/newsbot-telegram.service /etc/systemd/system/newsbot-telegram.service
@@ -98,65 +94,12 @@ sudo -u newsbot -H bash -c 'set -a; . /etc/newsbot/newsbot.env; set +a; exec /us
 <pre><code>export PREVIEW_PROPOSAL_SHA256=REPLACE_WITH_EXACT_PREVIEW_RECEIPT_SHA256
 sudo -u newsbot -H bash -c 'set -a; . /etc/newsbot/newsbot.env; set +a; exec /usr/local/bin/newsbot "$@"' _ automation-cutover-apply --config /etc/newsbot/config.toml --db /var/lib/newsbot/newsbot.db --proposal-id "$PROPOSAL_ID" --proposal-sha256 "$PREVIEW_PROPOSAL_SHA256" --release-digest "$RELEASE_DIGEST"</code></pre>
 <p>이 block은 최초 switch 뒤 initial schema/cutover를 위한 것이다. migration 008은 기존 Telegram outbox ID·attempt·callback·resolution 증거를 보존하면서 policy/window/config-binding authority를 추가하고 어떤 알림 작업도 backfill하지 않습니다. proposal ID, SHA-256, release digest가 하나라도 다르면 apply하지 않습니다.</p>
-<pre><code># 기존 운영 DB를 6채널에서 5채널로 전환하는 후속 release에서만 실행
-# workers가 quiescent인 동안 switched release와 trusted config directory를 attest하고 새 5채널 config를 같은 filesystem에 stage한다.
-RELEASE_ROOT="/opt/newsbot/releases/$RELEASE_GIT_SHA"
-test "$(readlink -f /usr/local/bin/newsbot)" = "$RELEASE_ROOT/venv/bin/newsbot"
-sudo sh -c 'test -d /etc/newsbot &amp;&amp; test ! -L /etc/newsbot &amp;&amp; test "$(stat -c "%U:%G:%a" /etc/newsbot)" = "root:newsbot:750"'
-sudo install -o root -g newsbot -m 0640 /secure/operator-provided-five-channel-config.toml /etc/newsbot/.config.toml.stage
-sudo sh -c 'test -f /etc/newsbot/.config.toml.stage &amp;&amp; test ! -L /etc/newsbot/.config.toml.stage &amp;&amp; test "$(stat -c "%U:%G:%a:%h" /etc/newsbot/.config.toml.stage)" = "root:newsbot:640:1"'
-
-# binding 전에는 exact five-of-six topology에서 config binding만 false인 drift여야 한다.
-set +e
-STAGED_STATUS="$(sudo -u newsbot /usr/local/bin/newsbot automation-topology-status \
-  --config /etc/newsbot/.config.toml.stage --db /var/lib/newsbot/newsbot.db)"
-STAGED_RC=$?
-set -e
-test "$STAGED_RC" = 2
-printf '%s' "$STAGED_STATUS" | python3 -c 'import json,sys; actual=json.load(sys.stdin); expected={"active_cutover_present":True,"active_frontier_count":6,"config_binding_match":False,"configured_channel_count":5,"configured_channel_unique":True,"frontier_coverage":True,"frontier_shape_supported":True,"status":"drift"}; assert actual == expected, actual'
-
-# staged bytes로 immutable activation/config binding을 먼저 append하고 receipt를 구조적으로 확인한다.
-ACTIVATION_JSON="$(sudo -u newsbot /usr/local/bin/newsbot automation-release-activate \
-  --config /etc/newsbot/.config.toml.stage \
-  --db /var/lib/newsbot/newsbot.db \
-  --release-digest "$RELEASE_DIGEST")"
-ACTIVATION_ID="$(printf '%s' "$ACTIVATION_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["activation_id"])')"
-test "$(printf '%s' "$ACTIVATION_JSON" | python3 -c 'import json,sys; print(str(json.load(sys.stdin)["changed"]).lower())')" = true
-
-# exact config preimage와 matching runtime manifest를 activation ID 아래 root-only로 보존한다.
-CONFIG_SHA256="$(sudo sha256sum /etc/newsbot/.config.toml.stage | cut -d' ' -f1)"
-RUNTIME_MANIFEST="$RELEASE_ROOT/runtime-manifest.json"
-RUNTIME_MANIFEST_SHA256="$(sudo sha256sum "$RUNTIME_MANIFEST" | cut -d' ' -f1)"
-test "$RUNTIME_MANIFEST_SHA256" = "$RELEASE_DIGEST"
-ARCHIVE_ROOT="/var/lib/newsbot/config-archive/$ACTIVATION_ID"
-sudo install -d -o root -g root -m 0700 "$ARCHIVE_ROOT"
-sudo install -o root -g root -m 0600 /etc/newsbot/.config.toml.stage "$ARCHIVE_ROOT/config.toml"
-sudo install -o root -g root -m 0600 "$RUNTIME_MANIFEST" "$ARCHIVE_ROOT/runtime-manifest.json"
-printf 'activation_id=%s\nrelease_digest=%s\nconfig_sha256=%s\nruntime_manifest_sha256=%s\n' \
-  "$ACTIVATION_ID" "$RELEASE_DIGEST" "$CONFIG_SHA256" "$RUNTIME_MANIFEST_SHA256" |
-  sudo tee "$ARCHIVE_ROOT/manifest" &gt;/dev/null
-sudo chown root:root "$ARCHIVE_ROOT/manifest"
-sudo chmod 0600 "$ARCHIVE_ROOT/manifest"
-test "$(sudo sha256sum "$ARCHIVE_ROOT/config.toml" | cut -d' ' -f1)" = "$CONFIG_SHA256"
-test "$(sudo sha256sum "$ARCHIVE_ROOT/runtime-manifest.json" | cut -d' ' -f1)" = "$RUNTIME_MANIFEST_SHA256"
-
-# 같은 filesystem에서 non-directory target으로 atomic replace하고 canonical metadata/bytes를 다시 attest한다.
-sudo mv -Tf /etc/newsbot/.config.toml.stage /etc/newsbot/config.toml
-sudo sh -c 'test -f /etc/newsbot/config.toml &amp;&amp; test ! -L /etc/newsbot/config.toml &amp;&amp; test "$(stat -c "%U:%G:%a:%h" /etc/newsbot/config.toml)" = "root:newsbot:640:1"'
-test "$(sudo sha256sum /etc/newsbot/config.toml | cut -d' ' -f1)" = "$CONFIG_SHA256"
-
-# canonical bytes는 같은 activation ID의 changed=false replay여야 하며 최종 status는 ok여야 한다.
-REPLAY_JSON="$(sudo -u newsbot /usr/local/bin/newsbot automation-release-activate \
+<pre><code># 후속 migration-008-compatible release/rollback에서만 실행
+sudo -u newsbot /usr/local/bin/newsbot automation-release-activate \
   --config /etc/newsbot/config.toml \
   --db /var/lib/newsbot/newsbot.db \
-  --release-digest "$RELEASE_DIGEST")"
-test "$(printf '%s' "$REPLAY_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["activation_id"])')" = "$ACTIVATION_ID"
-test "$(printf '%s' "$REPLAY_JSON" | python3 -c 'import json,sys; print(str(json.load(sys.stdin)["changed"]).lower())')" = false
-FINAL_STATUS="$(sudo -u newsbot /usr/local/bin/newsbot automation-topology-status \
-  --config /etc/newsbot/config.toml \
-  --db /var/lib/newsbot/newsbot.db)"
-test "$(printf '%s' "$FINAL_STATUS" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])')" = ok</code></pre>
-<p>세 release/cutover 명령은 stable <code>/usr/local/bin/newsbot</code> symlink가 가리키는 versioned runtime manifest와 현재 <code>news_policy_v1</code> 설정 digest를 검증합니다. preview/apply는 staged activation으로 release digest, <code>AppConfig.digest</code>, canonical policy payload의 immutable binding을 append합니다. latest valid five-channel release/config binding이 current authority이며, 성공 뒤 canonical replay는 같은 pair의 무변경 replay만 허용합니다. code-only·config-only·combined rollout과 rollback은 quiescence 아래 새 immutable activation/config binding을 append합니다.</p>
+  --release-digest "$RELEASE_DIGEST"</code></pre>
+<p>세 release/cutover 명령은 stable <code>/usr/local/bin/newsbot</code> symlink가 가리키는 versioned runtime manifest와 현재 <code>news_policy_v1</code> 설정 digest를 검증합니다. 같은 release/config pair만 무변경 replay하며, code-only·config-only·combined rollout과 rollback은 quiescence 아래 새 immutable activation/config binding을 append합니다.</p>
 </section>
 
 <section>
@@ -181,7 +124,7 @@ sudo /usr/local/sbin/newsbot-codex-containment-v1 inspect
 sudo -u newsbot-codex -H /usr/local/libexec/codex-v0.146.0 login status
 sudo systemctl status newsbot-generate-codex.service
 sudo systemctl enable --now newsbot-generate-codex.timer</code></pre>
-<p>Codex는 실제 <strong>두 단계 UID boundary</strong>다. device auth/provider credential은 login-shell 없는 <code>newsbot-codex</code> UID의 owner-only <code>CODEX_HOME</code>에서만 수행하고, root-owned no-argument containment runner가 immutable authority/receipt를 attest한 activation만 별도로 그 UID에 전달한다. 마지막 enable 전에는 existing Codex containment 절차대로 inactive/cgroup-empty proof, clean/reset receipt가 참조된 immutable authority, migration/manifest/effective-profile attestation, provider-free canary, one-job canary와 one-job live activation을 모두 통과해야 합니다. binding drift에서는 root만 containment를 start/cleanup할 수 있고 이 경로의 Newsbot job/provider authority는 0입니다. 기존 Codex one-job timer는 위 세 timer와 합치거나 대체하지 않습니다.</p>
+<p>Codex는 실제 <strong>두 단계 UID boundary</strong>다. device auth/provider credential은 login-shell 없는 <code>newsbot-codex</code> UID의 owner-only <code>CODEX_HOME</code>에서만 수행하고, root-owned no-argument containment runner가 immutable authority/receipt를 attest한 activation만 별도로 그 UID에 전달한다. 마지막 enable 전에는 existing Codex containment 절차대로 inactive/cgroup-empty proof, clean/reset receipt가 참조된 immutable authority, migration/manifest/effective-profile attestation, provider-free canary, one-job canary와 one-job live activation을 모두 통과해야 합니다. 기존 Codex one-job timer는 위 세 timer와 합치거나 대체하지 않습니다.</p>
 </section>
 
 <section>
@@ -191,7 +134,7 @@ for unit in newsbot-collect.service newsbot-telegram.service newsbot-sheets.serv
 sudo /usr/local/sbin/newsbot-codex-containment-v1 inspect
 sudo -u newsbot /usr/local/bin/newsbot automation-notification-inspect --db /var/lib/newsbot/newsbot.db --intent-id REPLACE_WITH_NOTIFICATION_INTENT_ID</code></pre>
 <p class="warn">urgent stop 중 Telegram/Sheets/Codex 원격 효과가 불명확하면 재시도하지 말고 timer를 멈춥니다. notification은 verified transport evidence가 있을 때만 immutable resolution 하며, Sheets는 exact metadata probe/운영자 판단만 사용합니다.</p>
-<p>rollback은 initial cutover 후 migration-008-compatible한 이전 verified runtime release로의 <strong>forward</strong> switch입니다. 모든 worker를 disabled 상태로 유지하고 quiescence를 재검증한 뒤, 먼저 six-channel config를 해석할 수 있는 prior verified runtime으로 switch/re-attest합니다. 그 다음 root-only archive의 exact six-channel config를 같은-filesystem atomic replacement로 install/attest하고, prior runtime으로 새 release/config activation을 append/replay한 뒤에만 worker를 복구합니다. migration, cursor/outbox, noon window/items, attempts, Sheets/Telegram history, audit receipt를 DB backup으로 restore하거나 delete/update하지 않습니다.</p>
+<p>rollback은 initial cutover 후 migration-008-compatible한 이전 verified runtime release로의 <strong>forward</strong> switch입니다. 같은 quiescence gate에서 새 release/config activation을 append하고 migration, cursor/outbox, noon window/items, attempts, Sheets/Telegram history, audit receipt를 DB backup으로 restore하거나 delete/update하지 않습니다.</p>
 </section>
 </body>
 </html>

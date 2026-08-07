@@ -54,6 +54,17 @@ classification = "official"
 official_domains = ["official.example"]
 original_domains = []
 
+[[channels]]
+id = "general_chat"
+name = "Synthetic General Chat"
+handle = "general_chat"
+enabled = true
+priority = 50
+source_quality = 0.55
+classification = "community"
+official_domains = []
+original_domains = []
+
 [policy]
 version = "candidate_policy_v1"
 locale = "ko-KR"

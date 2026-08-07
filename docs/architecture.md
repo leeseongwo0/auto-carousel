@@ -52,10 +52,6 @@ not a claim of isolation between workers. Codex is a separate compatibility
 boundary: provider credentials remain outside the non-Codex configuration, and
 its containment authority and receipts control generation admission and
 recovery.
-The current public synthetic configuration has exactly five enabled channels. Its
-six-channel frontier is immutable history, not a second current topology.
-Traceable descendants of work already authorized before the five-channel activation
-are grandfathered; no later topology change rewrites that authority.
 
 For legacy noon routing, assignment and admission are linearized with the
 database write lock and an aware Asia/Seoul clock sample. An intent is admitted
@@ -67,32 +63,15 @@ explicit resolution.
 ## Releases and history
 
 Local users can update their checkout and database through the documented
-commands for their chosen version. Existing automation deployments drain the
-three non-Codex service/timer pairs and the Codex timer in the legal authority
-order—collection, noon, Telegram, Sheets, then Codex—before a private release.
-They verify durable authority and optional Codex containment, build a candidate,
-perform the stable runtime switch/re-attest step, run init-db with migration and
-foreign-key checks, and append a new activation only after validation.
+commands for their chosen version. Existing automation deployments use a
+private release procedure that drains workers, verifies durable authority and
+optional Codex containment, builds a candidate, performs the stable runtime
+switch/re-attest step, runs init-db with migration and foreign-key checks, and
+records a new activation only after validation.
 
-Private configuration is staged in a `root:newsbot` 0750 trusted directory.
-Both staged and live config files are regular, single-link `root:newsbot` 0640
-files; a same-filesystem atomic replacement promotes the validated stage. Root
-alone archives the semantic preimage and manifest. Operator-visible topology
-status is redacted and identifies only the current five-channel shape.
-
-A staged activation appends the exact release digest, `AppConfig.digest`, and
-canonical `news_policy_v1` payload as one immutable binding. The latest valid
-five-channel release/config binding is current authority. Canonical replay is
-permitted only for that unchanged pair. A compatible rollback is forward-only:
-while workers remain disabled, switch and re-attest the prior six-capable verified
-runtime before atomically installing and attesting the exact archived six-channel
-configuration; that prior runtime then appends/replays its release/config activation.
-It does not erase or edit migration state, cursors, outboxes, attempts,
-approvals, remote history, or containment receipts. The public GitHub `main`
-history is likewise canonical and must not be rewritten. Use ordinary commits,
-revert commits, and corrective releases instead of force-pushing or replacing
-published history.
-
-On binding drift, only root may start or clean up Codex containment; that path
-has zero Newsbot job or provider authority. Normal Codex admission remains
-controlled by its immutable containment authority and receipts.
+Release and configuration bindings are append-only. A compatible rollback is a
+forward switch to a verified or corrective runtime; it does not erase or edit
+migration state, cursors, outboxes, attempts, approvals, remote history, or
+containment receipts. The public GitHub `main` history is likewise canonical and
+must not be rewritten. Use ordinary commits, revert commits, and corrective
+releases instead of force-pushing or replacing published history.

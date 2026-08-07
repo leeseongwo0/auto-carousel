@@ -268,7 +268,7 @@ def test_active_release_refuses_config_drift_before_pipeline_mutation(tmp_path: 
         pipeline = NewsPipeline(storage, drifted, FakeGenerationProvider(), clock)
         service = CandidateApprovalService(storage, chat_id=7, authorized_user_ids={7}, now=clock.now)
 
-        with pytest.raises(AutomationDriftError, match="topology drifted"):
+        with pytest.raises(AutomationDriftError, match="binding drifted"):
             asyncio.run(
                 pipeline.run_fixture(
                     StaticCollector((_observation(99, "community_feed", "AI launch announced."),)),
