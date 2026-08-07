@@ -78,6 +78,8 @@ class CutoverProposal:
     maxima: tuple[int, int, int, int, int]
     approval_offset: int
     frontiers: tuple[Frontier, ...]
+
+
 @dataclass(frozen=True, slots=True)
 class AutomationTopology:
     """Redacted current-runtime authority result for one database connection."""
@@ -170,6 +172,7 @@ def cutover_locks(*, directory: Path | None = None) -> Iterator[None]:
 
 class AutomationAuthority:
     """SQLite-backed fencing, cutover and safe notification authority."""
+
     @staticmethod
     def _canonical_policy(config: object) -> tuple[str, str, str]:
         policy = getattr(config, "news_policy", None)
@@ -195,9 +198,7 @@ class AutomationAuthority:
             channels = ()
             configured_digests = ()
         configured_unique = len(configured_digests) == 5 and len(set(configured_digests)) == 5
-        cutover = connection.execute(
-            "SELECT proposal_id FROM automation_cutovers WHERE id=1"
-        ).fetchone()
+        cutover = connection.execute("SELECT proposal_id FROM automation_cutovers WHERE id=1").fetchone()
         frontier_digests: set[str] = set()
         if cutover is not None:
             frontier_digests = {
@@ -222,10 +223,14 @@ class AutomationAuthority:
                 "WHERE cutover_id=1 ORDER BY id DESC LIMIT 1) activation "
                 "LEFT JOIN automation_release_config_bindings binding ON binding.activation_id=activation.id"
             ).fetchone()
-            binding_match = binding is not None and binding["config_digest"] is not None and (
-                compare_digest(str(binding["config_digest"]), config_digest)
-                and compare_digest(str(binding["news_policy_version"]), policy_version)
-                and str(binding["canonical_policy_json"]) == canonical
+            binding_match = (
+                binding is not None
+                and binding["config_digest"] is not None
+                and (
+                    compare_digest(str(binding["config_digest"]), config_digest)
+                    and compare_digest(str(binding["news_policy_version"]), policy_version)
+                    and str(binding["canonical_policy_json"]) == canonical
+                )
             )
         active = cutover is not None
         return AutomationTopology(
@@ -238,11 +243,7 @@ class AutomationAuthority:
             frontier_shape_supported=frontier_shape_supported,
             status=(
                 "ok"
-                if active
-                and configured_unique
-                and frontier_shape_supported
-                and frontier_coverage
-                and binding_match
+                if active and configured_unique and frontier_shape_supported and frontier_coverage and binding_match
                 else "drift"
             ),
         )
@@ -263,7 +264,6 @@ class AutomationAuthority:
         ):
             raise AutomationDriftError("runtime automation topology drifted")
         return topology
-
 
     def __init__(self, storage: Storage) -> None:
         self.storage = storage
@@ -911,11 +911,7 @@ class AutomationAuthority:
                     (proposal_id,),
                 ).fetchone()[0]
             )
-            if (
-                frontier_count != 5
-                or not self._proposal_state_matches(connection, proposal_state)
-                or not validate()
-            ):
+            if frontier_count != 5 or not self._proposal_state_matches(connection, proposal_state) or not validate():
                 raise AutomationDriftError("cutover state drifted")
             connection.execute(
                 "INSERT INTO automation_cutovers(id,proposal_id,audience_binding_id,target_binding_id,release_digest,activated_at,baseline_candidate_id,baseline_generation_job_id,baseline_generation_id,baseline_decision_event_id,baseline_handoff_id,approval_offset) VALUES(1,?,?,?,?,?,?,?,?,?,?,?)",

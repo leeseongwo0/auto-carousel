@@ -53,6 +53,8 @@ def test_sheets_capability_fails_closed_without_live_settings() -> None:
     assert str(error.value) == (
         "missing required environment variables: GOOGLE_SERVICE_ACCOUNT_FILE, GOOGLE_SHEETS_SPREADSHEET_ID"
     )
+
+
 def test_automation_topology_status_does_not_create_missing_database(tmp_path: Path) -> None:
     from newsbot import cli
 
@@ -92,6 +94,7 @@ def test_automation_topology_status_main_redacts_invalid_database(
     assert "sqlite" not in stderr.lower()
     assert "file is not a database" not in stderr.lower()
 
+
 def test_automation_topology_status_is_redacted_and_returns_drift(tmp_path: Path, capsys) -> None:
     from newsbot import cli
 
@@ -124,7 +127,6 @@ def test_automation_topology_status_is_redacted_and_returns_drift(tmp_path: Path
         before_stat.st_mtime_ns,
         before_stat.st_mode,
     )
-
 
 
 def test_poll_generation_validates_bot_and_openai_capabilities_before_bot_effects(monkeypatch) -> None:

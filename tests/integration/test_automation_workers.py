@@ -84,8 +84,7 @@ def _proposal(
             maxima=(0, 0, 0, 0, 0),
             approval_offset=0,
             frontiers=tuple(
-                Frontier(_digest(channel.id), index, now)
-                for index, channel in enumerate(config.enabled_channels)
+                Frontier(_digest(channel.id), index, now) for index, channel in enumerate(config.enabled_channels)
             ),
         ),
         now=now,
@@ -1019,9 +1018,8 @@ def test_five_channel_collection_preserves_removed_cursor_without_new_root(
         )
         assert cursor is not None
         assert cursor["external_post_id"] == "99"
-        assert storage.fetch_one(
-            "SELECT 1 FROM source_posts WHERE channel_id='removed-source'"
-        ) is None
+        assert storage.fetch_one("SELECT 1 FROM source_posts WHERE channel_id='removed-source'") is None
+
 
 def test_production_cutover_baseline_is_exact_and_rejects_drift() -> None:
     from newsbot import cli

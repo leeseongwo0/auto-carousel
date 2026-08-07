@@ -535,7 +535,9 @@ def test_runtime_release_activations_form_an_immutable_append_only_chain(tmp_pat
         with pytest.raises(AutomationDriftError):
             authority.activate_release(
                 digest("release-3"),
-                config=replace(config, channels=(replace(config.channels[0], id="unknown-member"), *config.channels[1:])),
+                config=replace(
+                    config, channels=(replace(config.channels[0], id="unknown-member"), *config.channels[1:])
+                ),
                 now=NOW + timedelta(minutes=3),
                 validate=lambda: True,
             )
@@ -547,9 +549,7 @@ def test_runtime_release_activations_form_an_immutable_append_only_chain(tmp_pat
 def test_topology_rejects_latest_activation_without_config_binding(tmp_path: Path) -> None:
     with Storage.open(tmp_path / "latest-unbound.sqlite") as storage:
         authority, config, _ = activate_hourly(storage)
-        latest = storage.fetch_one(
-            "SELECT id FROM automation_release_activations ORDER BY id DESC LIMIT 1"
-        )
+        latest = storage.fetch_one("SELECT id FROM automation_release_activations ORDER BY id DESC LIMIT 1")
         assert latest is not None
         with storage.transaction() as connection:
             connection.execute(
@@ -565,6 +565,7 @@ def test_topology_rejects_latest_activation_without_config_binding(tmp_path: Pat
             assert topology.status == "drift"
             with pytest.raises(AutomationDriftError, match="topology drifted"):
                 authority.validate_active_config_binding(connection, config)
+
 
 def test_stream_fences_audience_outbox_status_and_quiescence(tmp_path: Path) -> None:
     with Storage.open(tmp_path / "leases.sqlite") as storage:

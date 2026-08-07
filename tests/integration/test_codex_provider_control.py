@@ -155,6 +155,7 @@ def test_production_selector_rejects_drift_before_provider_mutation(
     assert storage.fetch_one("SELECT status FROM generation_jobs WHERE id=?", (job,))["status"] == "queued"
     assert storage.fetch_one("SELECT COUNT(*) AS n FROM generation_provider_attempts")["n"] == 0
 
+
 def test_selector_blocks_pause_hold_and_no_due_job() -> None:
     storage = Storage.open(":memory:")
     job = _job(storage, 1, status="failed_recoverable")

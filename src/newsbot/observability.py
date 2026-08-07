@@ -121,6 +121,8 @@ def automation_status(storage: Storage, *, now: datetime | None = None) -> dict[
             "9223372036854775807) AND status IN ('pending','retryable','delivering','ambiguous')",
         ),
     }
+
+
 def automation_topology_status(connection: sqlite3.Connection, config: object) -> dict[str, int | bool | str]:
     """Serialize the frozen redacted topology contract from a read-only connection."""
     topology = AutomationAuthority.topology_status(connection, config)
@@ -134,7 +136,6 @@ def automation_topology_status(connection: sqlite3.Connection, config: object) -
         "frontier_shape_supported": topology.frontier_shape_supported,
         "status": topology.status,
     }
-
 
 
 def _current_config_binding_count(storage: Storage) -> int:

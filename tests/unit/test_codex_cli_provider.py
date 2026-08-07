@@ -170,6 +170,8 @@ def test_timeout_cleanup_signals_process_group_then_reaps(monkeypatch: pytest.Mo
     monkeypatch.setattr(asyncio, "wait_for", timed_wait)
     asyncio.run(codex_cli._terminate_process_group(Process()))  # type: ignore[arg-type]
     assert signals == [codex_cli.signal.SIGTERM]
+
+
 def test_production_codex_topology_drift_precedes_job_selection(monkeypatch, tmp_path: Path) -> None:
     from newsbot import cli
     from newsbot.automation import AutomationDriftError

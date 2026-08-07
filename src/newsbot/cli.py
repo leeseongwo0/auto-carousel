@@ -1829,6 +1829,8 @@ def automation_status(args: argparse.Namespace) -> int:
 
         _print(aggregate(storage))
     return 0
+
+
 def automation_topology_status(args: argparse.Namespace) -> int:
     """Emit a redacted topology snapshot without migration or SQLite support-file writes."""
     try:
@@ -1849,8 +1851,6 @@ def automation_topology_status(args: argparse.Namespace) -> int:
         raise RuntimeError("automation topology status unavailable") from error
     _print(result)
     return 0 if result["status"] == "ok" else 2
-
-
 
 
 def automation_quiescence_check(args: argparse.Namespace) -> int:
