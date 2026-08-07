@@ -33,7 +33,12 @@ def proposal() -> CutoverProposal:
         target_fingerprint=digest("target-ref"),
         release_digest=digest("release"),
         audience_digest=digest("1"),
-        frontiers=tuple(Frontier(digest(f"channel-{index}"), index, NOW) for index in range(6)),
+        frontiers=tuple(
+            Frontier(digest(channel), index, NOW)
+            for index, channel in enumerate(
+                ("community_feed", "research_forum", "news_publisher", "news_aggregator", "official_updates")
+            )
+        ),
     )
 
 
@@ -397,7 +402,7 @@ def test_proposal_cutover_replay_drift_expiry_and_immutable_records(tmp_path: Pa
             now=NOW,
             validate=lambda: False,
         ) == {"changed": False, "status": "active"}
-        assert sorted(frontier.upper_message_id for frontier in authority.active_frontiers()) == list(range(6))
+        assert sorted(frontier.upper_message_id for frontier in authority.active_frontiers()) == list(range(5))
         with storage.transaction() as connection:
             for statement in (
                 f"UPDATE automation_cutover_proposals SET config_digest='{digest('tampered-proposal')}' "
@@ -411,7 +416,7 @@ def test_proposal_cutover_replay_drift_expiry_and_immutable_records(tmp_path: Pa
             ):
                 with pytest.raises(sqlite3.IntegrityError):
                     connection.execute(statement)
-        with pytest.raises(ValueError, match="exactly six"):
+        with pytest.raises(ValueError, match="exactly five"):
             authority.persist_proposal(replace(item, frontiers=item.frontiers[:-1]), now=NOW)
 
     with Storage.open(tmp_path / "drift.sqlite") as storage:
@@ -494,6 +499,19 @@ def test_runtime_release_activations_form_an_immutable_append_only_chain(tmp_pat
             digest("release-2"), config=config, now=NOW + timedelta(minutes=1), validate=lambda: True
         )
         assert changed["changed"] is True
+        with storage.transaction() as connection:
+            connection.execute(
+                "INSERT INTO automation_proposal_frontiers(proposal_id,channel_key_digest,upper_message_id,captured_at) "
+                "VALUES(?,?,?,?)",
+                ("proposal-automation-0001", digest("legacy-sixth-frontier"), 99, NOW.isoformat()),
+            )
+        with storage.transaction(immediate=False) as connection:
+            topology = authority.topology_status(connection, config)
+        assert topology.active_frontier_count == 6
+        assert topology.configured_channel_count == 5
+        assert topology.frontier_coverage is True
+        assert topology.config_binding_match is True
+        assert topology.status == "ok"
         assert authority.activate_release(
             digest("release-2"),
             config=config,
@@ -513,7 +531,40 @@ def test_runtime_release_activations_form_an_immutable_append_only_chain(tmp_pat
                 )
             with pytest.raises(sqlite3.IntegrityError):
                 connection.execute("DELETE FROM automation_release_activations WHERE id=?", (rows[1]["id"],))
+        before_unknown_member = "\n".join(storage._connection.iterdump())
+        with pytest.raises(AutomationDriftError):
+            authority.activate_release(
+                digest("release-3"),
+                config=replace(config, channels=(replace(config.channels[0], id="unknown-member"), *config.channels[1:])),
+                now=NOW + timedelta(minutes=3),
+                validate=lambda: True,
+            )
+        assert "\n".join(storage._connection.iterdump()) == before_unknown_member
+        assert len(storage.fetch_all("SELECT id FROM automation_release_activations")) == 2
+        assert len(storage.fetch_all("SELECT id FROM automation_release_config_bindings")) == 1
 
+
+def test_topology_rejects_latest_activation_without_config_binding(tmp_path: Path) -> None:
+    with Storage.open(tmp_path / "latest-unbound.sqlite") as storage:
+        authority, config, _ = activate_hourly(storage)
+        latest = storage.fetch_one(
+            "SELECT id FROM automation_release_activations ORDER BY id DESC LIMIT 1"
+        )
+        assert latest is not None
+        with storage.transaction() as connection:
+            connection.execute(
+                "INSERT INTO automation_release_activations("
+                "cutover_id,prior_activation_id,release_digest,activated_at"
+                ") VALUES(1,?,?,?)",
+                (int(latest["id"]), digest("unbound-release"), (NOW + timedelta(minutes=1)).isoformat()),
+            )
+
+        with storage.transaction(immediate=False) as connection:
+            topology = authority.topology_status(connection, config)
+            assert topology.config_binding_match is False
+            assert topology.status == "drift"
+            with pytest.raises(AutomationDriftError, match="topology drifted"):
+                authority.validate_active_config_binding(connection, config)
 
 def test_stream_fences_audience_outbox_status_and_quiescence(tmp_path: Path) -> None:
     with Storage.open(tmp_path / "leases.sqlite") as storage:
