@@ -7,13 +7,16 @@ migrates the legacy Newsbot database.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
+import os
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from .collectors.base import SourceObservation, UrlCandidate
+from .collectors.telethon import TelethonCollector
 from .v2_runtime import V2Runtime
 from .v2_workflow import V2Workflow
 
@@ -44,6 +47,38 @@ def collect_fixture(args: argparse.Namespace) -> int:
                 raise ValueError("each fixture item must be an object")
             candidate = workflow.record_observation(_observation(item))
             if candidate is not None and candidate.id not in candidates:
+                candidates.append(candidate.id)
+    print(json.dumps({"candidates": candidates, "count": len(candidates)}, ensure_ascii=False))
+    return 0
+
+
+def collect_live(args: argparse.Namespace) -> int:
+    """Collect configured private-environment Telegram handles into only the V2 DB."""
+    api_id = os.environ["NEWSBOT_V2_TELETHON_API_ID"]
+    api_hash = os.environ["NEWSBOT_V2_TELETHON_API_HASH"]
+    session = os.environ["NEWSBOT_V2_TELETHON_SESSION"]
+    handles = tuple(
+        item.strip().lstrip("@") for item in os.environ["NEWSBOT_V2_TELEGRAM_HANDLES"].split(",") if item.strip()
+    )
+    if not handles:
+        raise ValueError("NEWSBOT_V2_TELEGRAM_HANDLES must contain at least one handle")
+    collector = TelethonCollector(int(api_id), api_hash, session)
+
+    async def collect() -> list[SourceObservation]:
+        try:
+            observations: list[SourceObservation] = []
+            for handle in handles:
+                observations.extend(await collector.collect(handle))
+            return observations
+        finally:
+            await collector.close()
+
+    observations = asyncio.run(collect())
+    candidates: list[str] = []
+    with V2Workflow(args.db) as workflow:
+        for observation in observations:
+            candidate = workflow.record_observation(observation)
+            if candidate is not None:
                 candidates.append(candidate.id)
     print(json.dumps({"candidates": candidates, "count": len(candidates)}, ensure_ascii=False))
     return 0
@@ -119,6 +154,11 @@ def build_parser() -> argparse.ArgumentParser:
     e2e = commands.add_parser("run-fixture", help="run the credential-free V2 approval and delivery flow")
     e2e.add_argument("--fixture", type=Path, required=True)
     e2e.set_defaults(handler=run_fixture)
+
+    live = commands.add_parser(
+        "collect-live", help="collect configured Telegram handles using private V2 environment credentials"
+    )
+    live.set_defaults(handler=collect_live)
 
     fixture = commands.add_parser("collect-fixture")
     fixture.add_argument("--fixture", type=Path, required=True)
