@@ -1,12 +1,13 @@
 """Small deterministic, exclusion-first selection policy for Newsbot V2."""
+
 from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import Iterable
 
 from .collectors.base import SourceObservation
 from .dedupe import select_outbound_url
@@ -24,8 +25,18 @@ V2PolicyOutcome = V2Outcome
 Outcome = V2Outcome
 
 DEFAULT_TOPIC_MARKERS = (
-    "ai", "openai", "artificial intelligence", "machine learning", "blockchain", "crypto",
-    "cryptocurrency", "bitcoin", "ethereum", "web3", "defi", "token",
+    "ai",
+    "openai",
+    "artificial intelligence",
+    "machine learning",
+    "blockchain",
+    "crypto",
+    "cryptocurrency",
+    "bitcoin",
+    "ethereum",
+    "web3",
+    "defi",
+    "token",
 )
 
 _SIGNIFICANT = {
@@ -43,8 +54,14 @@ _EXCLUSION_PATTERNS = {
     "opinion_rumor": r"\b(opinion|i think|probably|might|could|rumou?r|unconfirmed|anonymous source|according to commenters|reaction)\b|의견|전망|루머|미확인|익명|커뮤니티 반응|소감|밈",
     "minor_update": r"\b(ui|ux|design|bug fix|minor update|language support|roadmap|rebrand|branding|feature introduction)\b|UI|디자인|버그 수정|언어 지원|로드맵|브랜드명|기능 재소개",
 }
-_UNCERTAIN = re.compile(r"\b(rumou?r|unconfirmed|might|could|reportedly|allegedly|anonymous source|예고|미확인|루머|전해졌다)\b|루머|미확인", re.I)
-_INTEGRATION = re.compile(r"\b(integrat(?:e|ed|ion)|deployed|distribution|available to users|customers?|payments?|data|infrastructure|exclusive|rollout|launch(?:ed)? on)\b|통합|배포|사용자|고객|결제|데이터|인프라|독점|유통|출시", re.I)
+_UNCERTAIN = re.compile(
+    r"\b(rumou?r|unconfirmed|might|could|reportedly|allegedly|anonymous source|예고|미확인|루머|전해졌다)\b|루머|미확인",
+    re.I,
+)
+_INTEGRATION = re.compile(
+    r"\b(integrat(?:e|ed|ion)|deployed|distribution|available to users|customers?|payments?|data|infrastructure|exclusive|rollout|launch(?:ed)? on)\b|통합|배포|사용자|고객|결제|데이터|인프라|독점|유통|출시",
+    re.I,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,7 +130,9 @@ def evaluate_v2_policy(
         return V2PolicyResult(V2Outcome.NON_NEWS, "url_gate", "url")
 
     # Exceptions are deliberately evaluated before exclusions.
-    exception = bool(significant) or ("partnership" in _matches(text, {"partnership": _EXCLUSION_PATTERNS["partnership"]}) and integration)
+    exception = bool(significant) or (
+        "partnership" in _matches(text, {"partnership": _EXCLUSION_PATTERNS["partnership"]}) and integration
+    )
     if uncertain and significant:
         exception = False
     exclusions = _matches(text, _EXCLUSION_PATTERNS)
@@ -126,7 +145,9 @@ def evaluate_v2_policy(
             return V2PolicyResult(V2Outcome.NON_NEWS, exclusions[0], exclusions[0])
 
     if uncertain:
-        return V2PolicyResult(V2Outcome.AMBIGUOUS, "important_unconfirmed", significant[0] if significant else "opinion_rumor")
+        return V2PolicyResult(
+            V2Outcome.AMBIGUOUS, "important_unconfirmed", significant[0] if significant else "opinion_rumor"
+        )
     return V2PolicyResult(V2Outcome.CANDIDATE, "clear_candidate", None)
 
 
@@ -137,11 +158,22 @@ evaluate_policy = evaluate_v2_policy
 class V2Policy:
     """Configurable policy object; useful when evaluating a batch with one clock."""
 
-    def __init__(self, *, now: datetime | None = None, topic_markers: Iterable[str] = DEFAULT_TOPIC_MARKERS,
-                 freshness_window: timedelta = timedelta(hours=24), material_body_minimum: int = 80,
-                 require_original_url: bool = True) -> None:
-        self._options = dict(now=now, topic_markers=tuple(topic_markers), freshness_window=freshness_window,
-                             material_body_minimum=material_body_minimum, require_original_url=require_original_url)
+    def __init__(
+        self,
+        *,
+        now: datetime | None = None,
+        topic_markers: Iterable[str] = DEFAULT_TOPIC_MARKERS,
+        freshness_window: timedelta = timedelta(hours=24),
+        material_body_minimum: int = 80,
+        require_original_url: bool = True,
+    ) -> None:
+        self._options = dict(
+            now=now,
+            topic_markers=tuple(topic_markers),
+            freshness_window=freshness_window,
+            material_body_minimum=material_body_minimum,
+            require_original_url=require_original_url,
+        )
 
     def evaluate(self, observation: SourceObservation) -> V2PolicyResult:
         return evaluate_v2_policy(observation, **self._options)

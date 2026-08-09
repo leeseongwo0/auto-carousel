@@ -31,22 +31,29 @@ def test_exclusion_categories_are_non_news(category: str, text: str) -> None:
 
 
 def test_significant_event_exceptions_precede_price_exclusion() -> None:
-    result = evaluate_v2_policy(obs("Bitcoin price falls after regulators approved an ETF following a hack. " + "facts " * 20), now=NOW)
+    result = evaluate_v2_policy(
+        obs("Bitcoin price falls after regulators approved an ETF following a hack. " + "facts " * 20), now=NOW
+    )
     assert result.outcome is V2Outcome.CANDIDATE
     assert result.reason == "clear_candidate"
 
 
-@pytest.mark.parametrize("text", [
-    "Bitcoin exchange delisting follows a court-ordered market withdrawal. ",
-    "Blockchain partnership integrates payments into a service available to customers. ",
-])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Bitcoin exchange delisting follows a court-ordered market withdrawal. ",
+        "Blockchain partnership integrates payments into a service available to customers. ",
+    ],
+)
 def test_delisting_and_concrete_integration_exceptions(text: str) -> None:
     result = evaluate_v2_policy(obs(text + "details " * 20), now=NOW)
     assert result.outcome is V2Outcome.CANDIDATE
 
 
 def test_important_unconfirmed_rumor_is_ambiguous() -> None:
-    result = evaluate_v2_policy(obs("Rumor says regulators might ban Bitcoin after a possible security breach. " + "details " * 20), now=NOW)
+    result = evaluate_v2_policy(
+        obs("Rumor says regulators might ban Bitcoin after a possible security breach. " + "details " * 20), now=NOW
+    )
     assert result.outcome is V2Outcome.AMBIGUOUS
     assert result.category == "regulation"
 
@@ -60,6 +67,8 @@ def test_minimum_topic_freshness_body_and_url_gates() -> None:
 
 
 def test_clear_candidate_requires_all_gates() -> None:
-    result = evaluate_v2_policy(obs("A blockchain network outage was confirmed and service resumed. " + "details " * 20), now=NOW)
+    result = evaluate_v2_policy(
+        obs("A blockchain network outage was confirmed and service resumed. " + "details " * 20), now=NOW
+    )
     assert result.outcome is V2Outcome.CANDIDATE
     assert result.category is None

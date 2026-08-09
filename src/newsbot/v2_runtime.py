@@ -3,11 +3,12 @@
 Adapters are deliberately callbacks: production integrations can be supplied by a
 caller, while tests can use deterministic functions without Telegram or Sheets.
 """
+
 from __future__ import annotations
 
+from collections.abc import Callable
 from enum import StrEnum
-from pathlib import Path
-from typing import Callable, Protocol, TypeAlias
+from typing import Protocol
 
 from .collectors.base import SourceObservation
 from .v2_workflow import V2Candidate, V2Draft, V2State, V2Workflow
@@ -42,10 +43,10 @@ class SheetsDeliverer(Protocol):
     def __call__(self, draft: V2Draft) -> RemoteEffect | bool: ...
 
 
-CandidateNotification: TypeAlias = CandidateNotifier
-DraftGeneration: TypeAlias = DraftGenerator
-FinalDraftNotification: TypeAlias = DraftNotifier
-SheetsDelivery: TypeAlias = SheetsDeliverer
+type CandidateNotification = CandidateNotifier
+type DraftGeneration = DraftGenerator
+type FinalDraftNotification = DraftNotifier
+type SheetsDelivery = SheetsDeliverer
 
 
 class V2Runtime:
@@ -99,7 +100,11 @@ class V2Runtime:
             try:
                 content = self._generate(candidate)
             except (AmbiguousRemoteEffect, ClearNetworkFailure) as exc:
-                reason = "draft generation unclear" if isinstance(exc, AmbiguousRemoteEffect) else "draft generation network failure"
+                reason = (
+                    "draft generation unclear"
+                    if isinstance(exc, AmbiguousRemoteEffect)
+                    else "draft generation network failure"
+                )
                 return self.workflow.mark_manual_review(candidate.id, reason)
             draft = self.workflow.create_draft(candidate.id, content)
         else:
@@ -130,7 +135,6 @@ class V2Runtime:
             return []
         draft = self.workflow.get_draft_for_candidate(candidate_id)
         return [] if draft is None else [draft]
-
 
     def _generate(self, candidate: V2Candidate) -> str:
         for attempt in range(self.max_retries + 1):

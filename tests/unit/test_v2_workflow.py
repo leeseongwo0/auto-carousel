@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -8,9 +8,12 @@ from newsbot.v2_workflow import V2State, V2Workflow, V2WorkflowError
 
 def observation(post_id="1", text=None):
     return SourceObservation(
-        channel_id="channel", channel_handle="handle", external_post_id=post_id,
-        published_at=datetime.now(timezone.utc),
-        text=text or "OpenAI announced a major integration with enterprise data infrastructure available to users. "
+        channel_id="channel",
+        channel_handle="handle",
+        external_post_id=post_id,
+        published_at=datetime.now(UTC),
+        text=text
+        or "OpenAI announced a major integration with enterprise data infrastructure available to users. "
         "The deployment affects customers and includes important security details for the ecosystem.",
         urls=(UrlCandidate("https://example.test/story"),),
     )

@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from newsbot.collectors.base import SourceObservation, UrlCandidate
 from newsbot.v2_runtime import (
@@ -12,17 +12,29 @@ from newsbot.v2_workflow import V2State, V2Workflow
 
 def observation():
     return SourceObservation(
-        channel_id="channel", channel_handle="handle", external_post_id="1",
-        published_at=datetime.now(timezone.utc),
+        channel_id="channel",
+        channel_handle="handle",
+        external_post_id="1",
+        published_at=datetime.now(UTC),
         text="OpenAI announced a major integration with enterprise data infrastructure available to users.",
         urls=(UrlCandidate("https://example.test/story"),),
     )
 
 
-def runtime(db, events, *, candidate=lambda _: True, draft=lambda _: True, sheets=lambda _: True, generate=lambda _: "copy", max_retries=1):
+def runtime(
+    db,
+    events,
+    *,
+    candidate=lambda _: True,
+    draft=lambda _: True,
+    sheets=lambda _: True,
+    generate=lambda _: "copy",
+    max_retries=1,
+):
     workflow = V2Workflow(db)
     return workflow, V2Runtime(
-        workflow, notify_candidate=lambda value: (events.append("candidate"), candidate(value))[1],
+        workflow,
+        notify_candidate=lambda value: (events.append("candidate"), candidate(value))[1],
         generate_draft=lambda value: (events.append("generate"), generate(value))[1],
         notify_draft=lambda value: (events.append("draft"), draft(value))[1],
         deliver_sheets=lambda value: (events.append("sheets"), sheets(value))[1],
@@ -71,7 +83,9 @@ def test_ambiguous_remote_result_is_manual_review_without_resend(tmp_path):
 
 def test_explicit_ambiguous_effect_is_not_retried(tmp_path):
     events, calls = [], []
-    workflow, runner = runtime(tmp_path / "v2.sqlite", events, sheets=lambda _: (calls.append(1), RemoteEffect.AMBIGUOUS)[1])
+    workflow, runner = runtime(
+        tmp_path / "v2.sqlite", events, sheets=lambda _: (calls.append(1), RemoteEffect.AMBIGUOUS)[1]
+    )
     result = runner.process_observation(observation())
     assert result.state == V2State.MANUAL_REVIEW
     assert calls == [1]

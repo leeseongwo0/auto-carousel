@@ -3,18 +3,19 @@
 The commands intentionally accept explicit database paths. V2 never opens or
 migrates the legacy Newsbot database.
 """
+
 from __future__ import annotations
 
 import argparse
 import json
-from datetime import UTC, datetime
 from dataclasses import asdict
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from .collectors.base import SourceObservation, UrlCandidate
-from .v2_workflow import V2Workflow
 from .v2_runtime import V2Runtime
+from .v2_workflow import V2Workflow
 
 
 def _observation(value: dict[str, Any]) -> SourceObservation:
@@ -42,11 +43,11 @@ def collect_fixture(args: argparse.Namespace) -> int:
             if not isinstance(item, dict):
                 raise ValueError("each fixture item must be an object")
             candidate = workflow.record_observation(_observation(item))
-            if candidate is not None:
-                if candidate.id not in candidates:
-                    candidates.append(candidate.id)
+            if candidate is not None and candidate.id not in candidates:
+                candidates.append(candidate.id)
     print(json.dumps({"candidates": candidates, "count": len(candidates)}, ensure_ascii=False))
     return 0
+
 
 def run_fixture(args: argparse.Namespace) -> int:
     payload = json.loads(Path(args.fixture).read_text(encoding="utf-8"))
