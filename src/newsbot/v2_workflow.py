@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from .collectors.base import SourceObservation
 from .v2_policy import V2Outcome, V2Policy
@@ -191,7 +191,7 @@ class V2Workflow:
         ).fetchone()
         if not row:
             raise V2WorkflowError(f"unknown candidate: {candidate_id}")
-        return row
+        return cast(sqlite3.Row, row)
 
     def record_remote_attempt(self, entity_id: str, stage: str) -> int:
         now = self._now()

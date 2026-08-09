@@ -167,13 +167,18 @@ class V2Policy:
         material_body_minimum: int = 80,
         require_original_url: bool = True,
     ) -> None:
-        self._options = dict(
-            now=now,
-            topic_markers=tuple(topic_markers),
-            freshness_window=freshness_window,
-            material_body_minimum=material_body_minimum,
-            require_original_url=require_original_url,
-        )
+        self._now = now
+        self._topic_markers = tuple(topic_markers)
+        self._freshness_window = freshness_window
+        self._material_body_minimum = material_body_minimum
+        self._require_original_url = require_original_url
 
     def evaluate(self, observation: SourceObservation) -> V2PolicyResult:
-        return evaluate_v2_policy(observation, **self._options)
+        return evaluate_v2_policy(
+            observation,
+            now=self._now,
+            topic_markers=self._topic_markers,
+            freshness_window=self._freshness_window,
+            material_body_minimum=self._material_body_minimum,
+            require_original_url=self._require_original_url,
+        )

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from enum import StrEnum
-from typing import Protocol
+from typing import Protocol, TypeVar
 
 from .collectors.base import SourceObservation
 from .v2_workflow import V2Candidate, V2Draft, V2State, V2Workflow
@@ -47,6 +47,8 @@ type CandidateNotification = CandidateNotifier
 type DraftGeneration = DraftGenerator
 type FinalDraftNotification = DraftNotifier
 type SheetsDelivery = SheetsDeliverer
+
+_RemoteValue = TypeVar("_RemoteValue", V2Candidate, V2Draft)
 
 
 class V2Runtime:
@@ -108,9 +110,10 @@ class V2Runtime:
                 return self.workflow.mark_manual_review(candidate.id, reason)
             draft = self.workflow.create_draft(candidate.id, content)
         else:
-            draft = next(iter(self._drafts_for(candidate.id)), None)
-            if draft is None:
+            existing_draft = next(iter(self._drafts_for(candidate.id)), None)
+            if existing_draft is None:
                 return self.workflow.mark_manual_review(candidate.id, "missing draft")
+            draft = existing_draft
 
         if draft.state == V2State.DRAFT_PENDING_APPROVAL:
             result = self._remote(self.notify_draft, draft, draft.id, "draft_notification")
@@ -152,7 +155,13 @@ class V2Runtime:
                     raise
         raise AssertionError("unreachable")
 
-    def _remote(self, callback: Callable, value, entity_id: str, stage: str) -> bool | None:
+    def _remote(
+        self,
+        callback: Callable[[_RemoteValue], bool | RemoteEffect],
+        value: _RemoteValue,
+        entity_id: str,
+        stage: str,
+    ) -> bool | None:
         for attempt in range(self.max_retries + 1):
             self.workflow.record_remote_attempt(entity_id, stage)
             try:
