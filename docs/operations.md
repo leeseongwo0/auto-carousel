@@ -38,6 +38,39 @@ The manual/local workflow does not require a VPS, Telegram, Google Sheets,
 Codex, a scheduler, or Asia/Seoul time.
 Every existing ancestor of a state or output path must be owned by the current user or `root`, must not be a symbolic link, and must not be writable by group or other users. Shared and sticky paths such as `/tmp` are outside the supported manual/local trust boundary.
 
+## Newsbot V2 cutover
+
+V2 is an independent workflow and database. It does not migrate, delete, or write
+legacy Newsbot records. Provision a separate database such as
+`/var/lib/newsbot-v2/newsbot-v2.sqlite`, and run the V2 entrypoint with that path.
+
+The V2 order is fixed: Telegram collection → exclusion-first policy → first
+candidate approval → draft generation → second exact-draft approval → Sheets
+delivery. The only automatic retries are bounded retries for clear collection
+network failures. An unclear Telegram or Sheets result is `manual_review`; do not
+blindly resend it.
+
+The tracked channel profile keeps six enabled sources and replaces the old
+research counterpart with `the_block_crypto`. The private VPS profile must make
+the same one-for-one replacement before a cutover. Keep the legacy timers and
+legacy database read-only while validating V2.
+
+Before switching production traffic, run exclusion fixtures, a complete
+collection-to-Sheets approval test, and three consecutive clean runs. A V2
+cutover is a forward switch; rollback means switching back to the previously
+verified runtime without editing either database.
+
+The credential-free operational surface is available as:
+
+```bash
+newsbot-v2 --db /var/lib/newsbot-v2/newsbot-v2.sqlite status
+newsbot-v2 --db /var/lib/newsbot-v2/newsbot-v2.sqlite collect-fixture --fixture <fixture.json>
+```
+
+These commands never infer a legacy database path. Live Telegram, generation,
+and Sheets adapters must be wired by the deployment release using private
+credentials and explicit remote-effect inspection.
+
 ## Legacy VPS automation compatibility
 
 Newsbot retains an existing automated deployment model for installations that
