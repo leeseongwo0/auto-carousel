@@ -1164,11 +1164,24 @@ def test_automated_collection_requires_matching_active_cutover(monkeypatch, tmp_
         )
 
     drifted_config = SimpleNamespace(
-        digest=_digest("different-config"), enabled_channels=channels, database_path=database
+        digest=_digest("different-config"),
+        enabled_channels=channels,
+        database_path=database,
+        news_policy=SimpleNamespace(version="news_policy_v1"),
     )
     monkeypatch.setattr(cli, "_config", lambda _args: drifted_config)
-    with pytest.raises(RuntimeError, match="configuration drifted"):
+    with pytest.raises(RuntimeError, match="release/config binding drifted"):
         cli.automation_collect_once(args)
+
+    with Storage.open(database) as storage:
+        automation.AutomationAuthority(storage).activate_release(
+            _digest("release-2"),
+            config=drifted_config,
+            now=_now(),
+            validate=lambda: True,
+        )
+    monkeypatch.setattr(cli, "_collect_live", lambda *_args, **_kwargs: 7)
+    assert cli.automation_collect_once(args) == 7
 
     with Storage.open(database) as storage:
         assert storage.fetch_one("SELECT 1 FROM automation_stream_leases WHERE stream='collect'") is None

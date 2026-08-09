@@ -2142,10 +2142,7 @@ def automation_collect_once(args: argparse.Namespace) -> int:
         authority = AutomationAuthority(storage)
         config = _config(args)
         configured_frontiers = tuple(sha256(channel.id.encode()).hexdigest() for channel in config.enabled_channels)
-        active_cutover = storage.fetch_one(
-            "SELECT proposal.config_digest FROM automation_cutovers cutover "
-            "JOIN automation_cutover_proposals proposal ON proposal.id=cutover.proposal_id WHERE cutover.id=1"
-        )
+        active_cutover = storage.fetch_one("SELECT 1 FROM automation_cutovers WHERE id=1")
         active_frontiers = tuple(frontier.channel_key_digest for frontier in authority.active_frontiers())
         if active_cutover is None:
             raise RuntimeError("automated collection requires an active cutover")
@@ -2153,7 +2150,6 @@ def automation_collect_once(args: argparse.Namespace) -> int:
             len(configured_frontiers) != 6
             or len(set(configured_frontiers)) != 6
             or tuple(sorted(configured_frontiers)) != active_frontiers
-            or str(active_cutover["config_digest"]) != config.digest
         ):
             raise RuntimeError("automated collection configuration drifted from the active cutover")
         with storage.transaction() as connection:
