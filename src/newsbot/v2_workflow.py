@@ -90,6 +90,7 @@ class V2Workflow:
             "v2_candidates",
             "v2_drafts",
             "v2_manual_reviews",
+            "v2_callbacks",
         }
         if tables and "v2_metadata" not in tables:
             raise V2WorkflowError("refusing to open a database without a Newsbot V2 identity marker")
@@ -106,7 +107,7 @@ class V2Workflow:
         INSERT OR IGNORE INTO v2_metadata(key, value) VALUES ('schema', 'newsbot-v2-workflow-v1');
         CREATE TABLE IF NOT EXISTS v2_remote_effects (
             entity_id TEXT NOT NULL, stage TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
-            status TEXT NOT NULL DEFAULT 'pending', detail TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending', detail TEXT NOT NULL DEFAULT '', receipt_id TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL,
             PRIMARY KEY (entity_id, stage)
         );
         CREATE TABLE IF NOT EXISTS v2_observations (
@@ -126,7 +127,14 @@ class V2Workflow:
             id INTEGER PRIMARY KEY AUTOINCREMENT, entity_id TEXT NOT NULL, reason TEXT NOT NULL,
             created_at TEXT NOT NULL, UNIQUE(entity_id, reason)
         );
+        CREATE TABLE IF NOT EXISTS v2_callbacks (
+            token_hash TEXT PRIMARY KEY, entity_id TEXT NOT NULL, stage TEXT NOT NULL,
+            expires_at TEXT NOT NULL, consumed_at TEXT
+        );
         """)
+        columns = {row["name"] for row in self._db.execute("PRAGMA table_info(v2_remote_effects)")}
+        if "receipt_id" not in columns:
+            self._db.execute("ALTER TABLE v2_remote_effects ADD COLUMN receipt_id TEXT NOT NULL DEFAULT ''")
         self._db.commit()
 
     @staticmethod
@@ -197,7 +205,7 @@ class V2Workflow:
         now = self._now()
         with self._db:
             self._db.execute(
-                "INSERT INTO v2_remote_effects(entity_id,stage,attempts,status,detail,updated_at) VALUES(?,?,1,'pending','',?) "
+                "INSERT INTO v2_remote_effects(entity_id,stage,attempts,status,detail,receipt_id,updated_at) VALUES(?,?,1,'pending','','',?) "
                 "ON CONFLICT(entity_id,stage) DO UPDATE SET attempts=attempts+1,status='pending',updated_at=excluded.updated_at",
                 (str(entity_id), str(stage), now),
             )
@@ -206,13 +214,15 @@ class V2Workflow:
         ).fetchone()
         return int(row["attempts"])
 
-    def settle_remote_effect(self, entity_id: str, stage: str, status: str, detail: str = "") -> None:
+    def settle_remote_effect(
+        self, entity_id: str, stage: str, status: str, detail: str = "", receipt_id: str = ""
+    ) -> None:
         if status not in {"confirmed", "ambiguous", "failed"}:
             raise ValueError("invalid remote effect status")
         with self._db:
             self._db.execute(
-                "UPDATE v2_remote_effects SET status=?,detail=?,updated_at=? WHERE entity_id=? AND stage=?",
-                (status, str(detail), self._now(), str(entity_id), str(stage)),
+                "UPDATE v2_remote_effects SET status=?,detail=?,receipt_id=?,updated_at=? WHERE entity_id=? AND stage=?",
+                (status, str(detail), str(receipt_id), self._now(), str(entity_id), str(stage)),
             )
 
     def remote_effect(self, entity_id: str, stage: str) -> dict[str, object] | None:
@@ -220,6 +230,29 @@ class V2Workflow:
             "SELECT * FROM v2_remote_effects WHERE entity_id=? AND stage=?", (str(entity_id), str(stage))
         ).fetchone()
         return None if row is None else dict(row)
+
+    def issue_callback(self, token_hash: str, entity_id: str, stage: str, expires_at: str) -> None:
+        """Persist only a callback capability digest, never its transport value."""
+        if stage not in {"candidate", "draft"} or len(token_hash) != 64:
+            raise ValueError("invalid callback receipt")
+        with self._db:
+            self._db.execute(
+                "INSERT INTO v2_callbacks(token_hash,entity_id,stage,expires_at,consumed_at) VALUES(?,?,?,?,NULL)",
+                (token_hash, str(entity_id), stage, expires_at),
+            )
+
+    def consume_callback(self, token_hash: str, stage: str, now: str) -> str | None:
+        """Atomically consume an unexpired capability for its expected gate."""
+        with self._db:
+            row = self._db.execute(
+                "SELECT entity_id FROM v2_callbacks WHERE token_hash=? AND stage=? "
+                "AND consumed_at IS NULL AND expires_at>?",
+                (token_hash, stage, now),
+            ).fetchone()
+            if row is None:
+                return None
+            self._db.execute("UPDATE v2_callbacks SET consumed_at=? WHERE token_hash=?", (now, token_hash))
+        return str(row["entity_id"])
 
     def get_candidate(self, candidate_id: str) -> V2Candidate:
         row = self._candidate_row(candidate_id)
