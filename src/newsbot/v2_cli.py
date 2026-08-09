@@ -11,7 +11,7 @@ import asyncio
 import json
 import os
 from dataclasses import asdict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -67,8 +67,9 @@ def collect_live(args: argparse.Namespace) -> int:
     async def collect() -> list[SourceObservation]:
         try:
             observations: list[SourceObservation] = []
+            lower_bound = datetime.now(UTC) - timedelta(hours=args.lookback_hours)
             for handle in handles:
-                observations.extend(await collector.collect(handle))
+                observations.extend(await collector.collect(handle, lower_bound=lower_bound, limit=args.limit))
             return observations
         finally:
             await collector.close()
@@ -158,6 +159,8 @@ def build_parser() -> argparse.ArgumentParser:
     live = commands.add_parser(
         "collect-live", help="collect configured Telegram handles using private V2 environment credentials"
     )
+    live.add_argument("--lookback-hours", type=int, choices=range(1, 169), default=24)
+    live.add_argument("--limit", type=int, choices=range(1, 501), default=100)
     live.set_defaults(handler=collect_live)
 
     fixture = commands.add_parser("collect-fixture")
