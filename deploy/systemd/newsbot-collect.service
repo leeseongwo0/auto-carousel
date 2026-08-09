@@ -17,6 +17,6 @@ TimeoutStopSec=10
 KillMode=control-group
 SendSIGKILL=yes
 TasksMax=64
-MemoryMax=512M
+MemoryMax=4G
 MemorySwapMax=0
 CPUQuota=100%

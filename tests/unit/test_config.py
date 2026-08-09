@@ -72,7 +72,7 @@ def test_load_config_requires_exactly_six_enabled_channels(tmp_path: Path) -> No
     assert len(config.enabled_channels) == 6
     assert {channel.handle for channel in config.enabled_channels} == {
         "community_feed",
-        "research_forum",
+        "the_block_crypto",
         "news_publisher",
         "news_aggregator",
         "official_updates",
@@ -98,7 +98,7 @@ def test_load_config_accepts_private_six_channel_identities(tmp_path: Path) -> N
     for index, public_handle in enumerate(
         (
             "community_feed",
-            "research_forum",
+            "the_block_crypto",
             "news_publisher",
             "news_aggregator",
             "official_updates",

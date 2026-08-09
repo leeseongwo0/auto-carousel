@@ -35,7 +35,7 @@ SERVICES = {
         "deadline": 180,
         "timeout": 210,
         "lease": 225,
-        "memory": "512M",
+        "memory": "4G",
     },
 }
 

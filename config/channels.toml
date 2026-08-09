@@ -13,13 +13,13 @@ original_domains = []
 [[channels]]
 id = "research_forum"
 name = "Synthetic Research Forum"
-handle = "research_forum"
+handle = "the_block_crypto"
 enabled = true
-priority = 55
-source_quality = 0.60
-classification = "community"
+priority = 80
+source_quality = 0.85
+classification = "original_publisher"
 official_domains = []
-original_domains = []
+original_domains = ["theblock.co"]
 
 [[channels]]
 id = "news_publisher"

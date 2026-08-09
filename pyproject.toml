@@ -38,6 +38,7 @@ Repository = "https://github.com/leeseongwo0/auto-carousel"
 Issues = "https://github.com/leeseongwo0/auto-carousel/issues"
 [project.scripts]
 newsbot = "newsbot.cli:main"
+newsbot-v2 = "newsbot.v2_cli:main"
 
 [dependency-groups]
 dev = [
