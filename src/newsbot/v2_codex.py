@@ -61,7 +61,6 @@ class CodexClearPreDispatchNetworkError(ProviderError):
         ProviderError.__init__(self, "Codex network transport failed before dispatch")
 
 
-
 @dataclass(frozen=True, slots=True)
 class V2PreparedGeneration:
     candidate_id: str

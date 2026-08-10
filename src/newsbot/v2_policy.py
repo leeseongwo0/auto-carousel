@@ -100,8 +100,6 @@ def _significant_events(text: str) -> list[str]:
     return significant
 
 
-
-
 def _has_topic(text: str, markers: Iterable[str]) -> bool:
     for marker in markers:
         normalized = str(marker).strip().casefold()

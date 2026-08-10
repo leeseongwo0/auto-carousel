@@ -542,6 +542,7 @@ class V2Workflow:
                     )
                     reconciled += 1
         return reconciled
+
     def get_candidate(self, candidate_id: str) -> V2Candidate:
         row = self._candidate_row(candidate_id)
         payload = json.loads(row["payload"])

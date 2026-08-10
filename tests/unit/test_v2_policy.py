@@ -37,6 +37,7 @@ def test_significant_event_exceptions_precede_price_exclusion() -> None:
     assert result.outcome is V2Outcome.CANDIDATE
     assert result.reason == "clear_candidate"
 
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -63,6 +64,7 @@ def test_corporate_bankruptcy_and_liquidation_remain_significant_events(text: st
 
     assert result.outcome is V2Outcome.CANDIDATE
     assert result.reason == "clear_candidate"
+
 
 @pytest.mark.parametrize(
     "text",
