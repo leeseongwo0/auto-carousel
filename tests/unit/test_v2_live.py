@@ -1,7 +1,9 @@
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
+from newsbot import cli as legacy_cli
 from newsbot import v2_cli
+from newsbot.approval.base import hash_callback_token
 from newsbot.collectors.base import SourceObservation, UrlCandidate
 from newsbot.v2_live import TelethonV2Collector, V2LiveWorkflow
 from newsbot.v2_workflow import V2State, V2Workflow
@@ -114,3 +116,60 @@ def test_live_collection_is_bounded(monkeypatch, tmp_path):
     assert [handle for handle, _kwargs in calls] == ["first", "second"]
     assert all(kwargs["limit"] == 7 for _handle, kwargs in calls)
     assert all(datetime.now(UTC) - kwargs["lower_bound"] < timedelta(hours=13) for _handle, kwargs in calls)
+
+
+def test_legacy_poll_owner_routes_authorized_v2_callback(monkeypatch, tmp_path):
+    db = tmp_path / "v2.sqlite"
+    token = "A" * 43
+    with V2Workflow(db) as workflow:
+        candidate = workflow.record_observation(observation())
+        assert candidate is not None
+        workflow.issue_callback(
+            hash_callback_token(token),
+            candidate.id,
+            "candidate",
+            (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+        )
+
+    monkeypatch.setenv("NEWSBOT_V2_DATABASE", str(db))
+    monkeypatch.setenv("NEWSBOT_APPROVER_CHAT_ID", "100")
+    monkeypatch.setenv("NEWSBOT_APPROVER_USER_IDS", "200,201")
+    update = {
+        "callback_query": {
+            "data": token,
+            "message": {"chat": {"id": 100}},
+            "from": {"id": 200},
+        }
+    }
+    assert legacy_cli._settle_v2_callback_update(update, token) == "v2_candidate_approved"
+    assert legacy_cli._settle_v2_callback_update(update, token) is None
+    with V2Workflow(db) as workflow:
+        assert workflow.get_candidate(candidate.id).state == V2State.CANDIDATE_APPROVED
+
+
+def test_legacy_poll_owner_rejects_unauthorized_v2_callback(monkeypatch, tmp_path):
+    db = tmp_path / "v2.sqlite"
+    token = "B" * 43
+    with V2Workflow(db) as workflow:
+        candidate = workflow.record_observation(observation())
+        assert candidate is not None
+        workflow.issue_callback(
+            hash_callback_token(token),
+            candidate.id,
+            "candidate",
+            (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+        )
+
+    monkeypatch.setenv("NEWSBOT_V2_DATABASE", str(db))
+    monkeypatch.setenv("NEWSBOT_APPROVER_CHAT_ID", "100")
+    monkeypatch.setenv("NEWSBOT_APPROVER_USER_IDS", "200")
+    update = {
+        "callback_query": {
+            "data": token,
+            "message": {"chat": {"id": 100}},
+            "from": {"id": 999},
+        }
+    }
+    assert legacy_cli._settle_v2_callback_update(update, token) is None
+    with V2Workflow(db) as workflow:
+        assert workflow.get_candidate(candidate.id).state == V2State.PENDING_CANDIDATE
