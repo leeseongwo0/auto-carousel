@@ -119,12 +119,21 @@ sudo -u newsbot /usr/local/bin/newsbot automation-status --db /var/lib/newsbot/n
 <h2>7. Codex device auth와 별도 restoration gate</h2>
 <pre><code>test "$(/usr/local/libexec/codex-v0.146.0 --version)" = "codex-cli 0.146.0"
 sudo stat -c '%U:%G %a %n' /usr/local/libexec/codex-v0.146.0 /usr/local/libexec/newsbot-codex-runner-v1
+test "$(systemctl is-active newsbot-generate-codex.service || true)" = "inactive"
+sudo install -o root -g root -m 0644 RELEASE/deploy/systemd/newsbot-generate-codex.service /etc/systemd/system/newsbot-generate-codex.service
+sudo systemctl daemon-reload
 sudo /usr/local/sbin/newsbot-build-codex-manifest-v1
+sudo /usr/local/sbin/newsbot-codex-containment-v1 reset
 sudo /usr/local/sbin/newsbot-codex-containment-v1 inspect
 sudo -u newsbot-codex -H /usr/local/libexec/codex-v0.146.0 login status
+sudo install -d -o newsbot -g newsbot -m 0700 /var/lib/newsbot-v2
+sudo -u newsbot test -r /var/lib/newsbot-v2/newsbot-v2.sqlite
+test "$(stat -c '%U:%G %a' /var/lib/newsbot-v2)" = "newsbot:newsbot 700"
+systemctl cat newsbot-generate-codex.service | grep -F -- 'generate-codex-v2-once --db /var/lib/newsbot-v2/newsbot-v2.sqlite'
 sudo systemctl status newsbot-generate-codex.service
 sudo systemctl enable --now newsbot-generate-codex.timer</code></pre>
 <p>Codex는 실제 <strong>두 단계 UID boundary</strong>다. device auth/provider credential은 login-shell 없는 <code>newsbot-codex</code> UID의 owner-only <code>CODEX_HOME</code>에서만 수행하고, root-owned no-argument containment runner가 immutable authority/receipt를 attest한 activation만 별도로 그 UID에 전달한다. 마지막 enable 전에는 existing Codex containment 절차대로 inactive/cgroup-empty proof, clean/reset receipt가 참조된 immutable authority, migration/manifest/effective-profile attestation, provider-free canary, one-job canary와 one-job live activation을 모두 통과해야 합니다. 기존 Codex one-job timer는 위 세 timer와 합치거나 대체하지 않습니다.</p>
+<p>production unit은 첫 Telegram 승인 뒤의 V2 후보 하나만 선택하며, exact canonical request와 attempt receipt를 V2 DB에 먼저 commit한 뒤에만 고정 runner를 실행합니다. 성공 시 검증된 output digest·정확한 draft·<code>draft_pending_approval</code> 전이를 한 transaction으로 commit합니다. 재시작 시 남아 있는 pending attempt는 생성 재시도 없이 <code>manual_review</code>로 종결합니다. legacy 생성 확인은 canary unit에만 남고 production unit은 legacy DB를 열지 않습니다.</p>
 </section>
 
 <section>

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import os
 import signal
@@ -107,6 +108,17 @@ class _LaunchResult:
 
 
 _Launcher = Callable[[bytes], Awaitable[_LaunchResult]]
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedCodexGeneration:
+    """Canonical, request-bound bytes accepted by the fixed Codex runner."""
+
+    request: GenerationRequest
+    payload: bytes
+    sha256: str
+
+
 _Attester = Callable[[], None]
 
 
@@ -117,15 +129,26 @@ class _CodexCliCore:
         self._launcher = launcher or _launch_production
         self._attester = attester or _attest_production
 
-    async def generate(self, request: GenerationRequest) -> CopyDraft:
+    def prepare(self, request: GenerationRequest) -> PreparedCodexGeneration:
         payload = _encode_request(request)
         if len(payload) > _INPUT_LIMIT:
             raise CodexInputLimitError()
+        return PreparedCodexGeneration(request, payload, hashlib.sha256(payload).hexdigest())
+
+    async def generate(self, request: GenerationRequest) -> CopyDraft:
+        return await self.generate_prepared(self.prepare(request))
+
+    async def generate_prepared(self, prepared: PreparedCodexGeneration) -> CopyDraft:
+        expected = _encode_request(prepared.request)
+        if prepared.payload != expected or hashlib.sha256(expected).hexdigest() != prepared.sha256:
+            raise CodexRunnerConfigError()
+        if len(prepared.payload) > _INPUT_LIMIT:
+            raise CodexInputLimitError()
         self._attester()
-        result = await self._launcher(payload)
+        result = await self._launcher(prepared.payload)
         if result.returncode != 0:
             raise _EXIT_ERRORS.get(result.returncode, CodexUnknownExitError)()
-        return _decode_draft(result.stdout, request)
+        return _decode_draft(result.stdout, prepared.request)
 
 
 class CodexCliProvider:
@@ -134,8 +157,14 @@ class CodexCliProvider:
     def __init__(self) -> None:
         self._core = _CodexCliCore()
 
+    def prepare(self, request: GenerationRequest) -> PreparedCodexGeneration:
+        return self._core.prepare(request)
+
     async def generate(self, request: GenerationRequest) -> CopyDraft:
         return await self._core.generate(request)
+
+    async def generate_prepared(self, prepared: PreparedCodexGeneration) -> CopyDraft:
+        return await self._core.generate_prepared(prepared)
 
 
 def _encode_request(request: GenerationRequest) -> bytes:
@@ -303,4 +332,5 @@ __all__ = [
     "CodexSupervisorError",
     "CodexTimeoutError",
     "CodexUnknownExitError",
+    "PreparedCodexGeneration",
 ]

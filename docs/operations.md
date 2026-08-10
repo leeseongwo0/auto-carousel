@@ -66,16 +66,26 @@ The operational surface always requires the explicit V2 database path:
 newsbot-v2 --db /var/lib/newsbot-v2/newsbot-v2.sqlite status
 newsbot-v2 --db /var/lib/newsbot-v2/newsbot-v2.sqlite collect-fixture --fixture <fixture.json>
 newsbot-v2 --db /var/lib/newsbot-v2/newsbot-v2.sqlite collect-live --lookback-hours 24 --limit 20
-newsbot-v2 --db /var/lib/newsbot-v2/newsbot-v2.sqlite generate-codex <candidate-id>
+sudo systemctl start newsbot-generate-codex.service
 newsbot-v2 --db /var/lib/newsbot-v2/newsbot-v2.sqlite deliver-google-sheets <draft-id> --deadline 120
 ```
 
 `collect-live` uses the private `NEWSBOT_V2_TELETHON_*` variables and
-`NEWSBOT_V2_TELEGRAM_HANDLES`. `generate-codex` is admitted only after the first
-Telegram approval and uses the fixed privilege-separated Codex runner.
-`deliver-google-sheets` is admitted only after the second exact-draft approval;
-it reads `GOOGLE_SERVICE_ACCOUNT_FILE` and `GOOGLE_SHEETS_SPREADSHEET_ID`,
-projects the immutable draft onto the frozen A:V schema, and uses the existing
+`NEWSBOT_V2_TELEGRAM_HANDLES`. Production generation is not a manual
+candidate-ID command: `newsbot-generate-codex.service` admits only the fixed
+`generate-codex-v2-once --db /var/lib/newsbot-v2/newsbot-v2.sqlite` command.
+Before launching the fixed Codex child, the `newsbot` parent persists the exact
+canonical request and an attempt receipt; the `newsbot-codex` child never opens
+either database. A successful validated output, its digest, the exact draft,
+and the `draft_pending_approval` transition commit atomically. An interrupted
+attempt enters `manual_review`; only busy, timeout, outer-timeout, and nonzero
+failures may use the one remaining identical-request attempt.
+
+The sole legacy Telegram poll owner sends one newly committed exact V2 draft
+and records its callback capability before polling. `deliver-google-sheets` is
+admitted only after the second exact-draft approval; it reads
+`GOOGLE_SERVICE_ACCOUNT_FILE` and `GOOGLE_SHEETS_SPREADSHEET_ID`, projects the
+immutable draft onto the frozen A:V schema, and uses the existing
 prepared-mutation idempotency marker. A confirmed receipt is completed locally
 after restart, while an ambiguous receipt enters `manual_review` without a
 resend. None of these commands infer or open the legacy database.

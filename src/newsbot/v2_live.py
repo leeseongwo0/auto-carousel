@@ -16,14 +16,13 @@ from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol, cast
 
-from .ai.base import FactClaim, GenerationProvider, GenerationRequest
-from .ai.codex_cli import CodexCliProvider
 from .ai.structured_copy import draft_from_mapping
 from .approval.base import hash_callback_token
 from .collectors.base import SourceObservation
-from .copywriting import CopyDraft, validate_copy
+from .copywriting import validate_copy
 from .sheets.base import DeliveryOutcome, MetadataState, SheetDelivery
 from .sheets.schema import project_handoff
+from .v2_codex import exact_review_text
 from .v2_runtime import AmbiguousRemoteEffect, ClearNetworkFailure
 from .v2_workflow import V2Candidate, V2Draft, V2State, V2Workflow, V2WorkflowError
 
@@ -213,52 +212,6 @@ class V2LiveWorkflow:
     @staticmethod
     def _now() -> str:
         return datetime.now(UTC).isoformat()
-
-
-class V2CodexGenerator:
-    """Build one evidence-bound request for the fixed privilege-separated Codex runner."""
-
-    def __init__(self, provider: GenerationProvider | None = None) -> None:
-        self.provider = provider or CodexCliProvider()
-
-    def __call__(self, candidate: V2Candidate) -> str:
-        text = str(candidate.observation.get("text", "")).strip()
-        if not text:
-            raise AmbiguousRemoteEffect("V2 candidate has no generation evidence")
-        urls = candidate.observation.get("urls", [])
-        source_url = str(urls[0]) if isinstance(urls, list) and urls else None
-        source_version_id = self._positive_id(f"source:{candidate.channel_id}:{candidate.external_post_id}")
-        claim_id = (
-            "claim_"
-            + hashlib.sha256(f"{candidate.channel_id}:{candidate.external_post_id}:{text}".encode()).hexdigest()
-        )
-        claim = FactClaim(
-            id=claim_id,
-            source_version_id=source_version_id,
-            source_identity=candidate.channel_id,
-            material_identity=f"{candidate.channel_id}:{candidate.external_post_id}",
-            observation_identity=f"{candidate.channel_id}:{candidate.external_post_id}",
-            captured_at=str(candidate.observation["published_at"]),
-            source_url=source_url,
-            evidence=text,
-            evidence_spans=((0, len(text)),),
-            conflicts=(),
-            uncertainty=(),
-        )
-        request = GenerationRequest(
-            candidate_id=self._positive_id(f"candidate:{candidate.id}"),
-            source_version_ids=(source_version_id,),
-            page_count=CopyDraft.adaptive_page_count((text,)),
-            facts=(claim,),
-            locale="ko-KR",
-            flexible_page_count=True,
-        )
-        draft = asyncio.run(self.provider.generate(request))
-        return json.dumps(asdict(draft), ensure_ascii=False, sort_keys=True)
-
-    @staticmethod
-    def _positive_id(value: str) -> int:
-        return int(hashlib.sha256(value.encode()).hexdigest()[:15], 16) or 1
 
 
 def v2_draft_handoff_values(draft: V2Draft, approved_date: str) -> tuple[str, ...]:
@@ -493,7 +446,7 @@ class TelegramV2Notifier:
         return self._send(f"V2 candidate {candidate.id}\n{candidate.observation['text']}", token)
 
     def draft(self, draft: V2Draft, token: str) -> str:
-        return self._send(f"V2 exact draft {draft.id}\n{draft.content}", token)
+        return self._send(exact_review_text(draft.id, draft.content), token)
 
     def _send(self, text: str, token: str) -> str:
         from .approval.telegram import TelegramDeadline
