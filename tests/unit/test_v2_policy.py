@@ -37,6 +37,32 @@ def test_significant_event_exceptions_precede_price_exclusion() -> None:
     assert result.outcome is V2Outcome.CANDIDATE
     assert result.reason == "clear_candidate"
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Bitcoin traders faced $500 million in long-position liquidation after a price crash. ",
+        "Crypto 시장에서 비트코인 가격 급락으로 롱 포지션 청산이 발생했고 투자자들은 차트를 분석했다. ",
+    ],
+)
+def test_trading_liquidations_remain_price_investment_exclusions(text: str) -> None:
+    result = evaluate_v2_policy(obs(text + "details " * 20), now=NOW)
+
+    assert result.outcome is V2Outcome.NON_NEWS
+    assert result.category == "price_investment"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Bitcoin service provider company entered court-supervised liquidation proceedings after insolvency. ",
+        "Crypto 블록체인 기업이 법원 명령에 따라 청산 절차를 개시해 서비스를 종료한다. ",
+    ],
+)
+def test_corporate_bankruptcy_and_liquidation_remain_significant_events(text: str) -> None:
+    result = evaluate_v2_policy(obs(text + "details " * 20), now=NOW)
+
+    assert result.outcome is V2Outcome.CANDIDATE
+    assert result.reason == "clear_candidate"
 
 @pytest.mark.parametrize(
     "text",

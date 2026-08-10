@@ -45,12 +45,21 @@ class V2CodexErrorCode(StrEnum):
     UNKNOWN_EXIT = "unknown_exit"
     PROVIDER_ERROR = "provider_error"
     UNEXPECTED = "unexpected"
+    CLEAR_PRE_DISPATCH_NETWORK = "clear_pre_dispatch_network"
 
 
 @dataclass(frozen=True, slots=True)
 class V2CodexFailure:
     code: V2CodexErrorCode
     retryable: bool
+
+
+class CodexClearPreDispatchNetworkError(ProviderError):
+    """A provider proved its network transport failed before dispatching the request."""
+
+    def __init__(self) -> None:
+        ProviderError.__init__(self, "Codex network transport failed before dispatch")
+
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,10 +170,15 @@ def validate_exact_review_content(content: str) -> None:
 def classify_provider_error(error: BaseException) -> V2CodexFailure:
     """Return only bounded safe codes; exception text is never persisted."""
     mapping: tuple[tuple[type[BaseException], V2CodexErrorCode, bool], ...] = (
-        (CodexBusyError, V2CodexErrorCode.BUSY, True),
-        (CodexTimeoutError, V2CodexErrorCode.TIMEOUT, True),
-        (CodexOuterTimeoutError, V2CodexErrorCode.OUTER_TIMEOUT, True),
-        (CodexNonzeroError, V2CodexErrorCode.NONZERO, True),
+        (
+            CodexClearPreDispatchNetworkError,
+            V2CodexErrorCode.CLEAR_PRE_DISPATCH_NETWORK,
+            True,
+        ),
+        (CodexBusyError, V2CodexErrorCode.BUSY, False),
+        (CodexTimeoutError, V2CodexErrorCode.TIMEOUT, False),
+        (CodexOuterTimeoutError, V2CodexErrorCode.OUTER_TIMEOUT, False),
+        (CodexNonzeroError, V2CodexErrorCode.NONZERO, False),
         (CodexAuthUnavailableError, V2CodexErrorCode.AUTH_UNAVAILABLE, False),
         (CodexInputLimitError, V2CodexErrorCode.INPUT_LIMIT, False),
         (CodexOutputLimitError, V2CodexErrorCode.OUTPUT_LIMIT, False),
@@ -190,6 +204,8 @@ class V2CodexWorker:
         self.provider = provider or CodexCliProvider()
 
     async def generate_next(self) -> V2Draft | None:
+        if self.workflow.reconcile_interrupted_codex_requests():
+            return None
         candidate = self.workflow.next_codex_candidate()
         return None if candidate is None else await self.generate(candidate.id)
 
@@ -215,7 +231,7 @@ class V2CodexWorker:
             )
             output, digest = canonical_validated_output(draft)
             validate_exact_review_content(output.decode("utf-8"))
-        except Exception as error:
+        except BaseException as error:
             failure = classify_provider_error(error)
             self.workflow.settle_codex_attempt_failure(attempt.id, failure.code.value, retryable=failure.retryable)
             raise
@@ -225,6 +241,7 @@ class V2CodexWorker:
 __all__ = [
     "V2CodexErrorCode",
     "V2CodexFailure",
+    "CodexClearPreDispatchNetworkError",
     "V2CodexWorker",
     "V2PreparedGeneration",
     "build_generation_request",

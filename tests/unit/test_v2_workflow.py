@@ -1,5 +1,5 @@
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -118,9 +118,12 @@ def test_codex_request_state_identity_attempt_cap_and_pending_restart(tmp_path):
         attempt = workflow.begin_codex_attempt(candidate.id, digest)
         with pytest.raises(V2WorkflowError, match="interrupted pending"):
             workflow.begin_codex_attempt(candidate.id, digest)
-        workflow.settle_codex_attempt_failure(attempt.id, "busy", retryable=True)
+        workflow.settle_codex_attempt_failure(attempt.id, "clear_pre_dispatch_network", retryable=True)
         second = workflow.begin_codex_attempt(candidate.id, digest)
-        assert workflow.settle_codex_attempt_failure(second.id, "busy", retryable=True) == "terminal_failed"
+        assert (
+            workflow.settle_codex_attempt_failure(second.id, "clear_pre_dispatch_network", retryable=True)
+            == "terminal_failed"
+        )
         assert len(workflow.list_codex_attempts(candidate.id)) == 2
         assert workflow.get_candidate(candidate.id).state == V2State.MANUAL_REVIEW
         with pytest.raises(V2WorkflowError, match="cannot launch"):
@@ -196,26 +199,45 @@ def test_telegram_cursor_handoff_merges_and_runtime_advances_monotonically(tmp_p
         unseeded.advance_telegram_cursor(1)
 
 
-def test_remote_effect_selectors_only_return_safe_retry_work(tmp_path):
+def test_remote_effect_selectors_include_durable_recovery_receipts(tmp_path):
     with V2Workflow(tmp_path / "v2.sqlite") as workflow:
         candidate = workflow.record_observation(observation())
         assert candidate is not None
         assert workflow.next_candidate_pending_notification().id == candidate.id
         workflow.record_remote_attempt(candidate.id, "candidate_notification")
-        assert workflow.next_candidate_pending_notification() is None
-        workflow.settle_remote_effect(candidate.id, "candidate_notification", "failed")
+        assert workflow.next_candidate_pending_notification().id == candidate.id
+        workflow.settle_remote_effect(candidate.id, "candidate_notification", "confirmed")
         assert workflow.next_candidate_pending_notification().id == candidate.id
 
         workflow.approve_candidate(candidate.id)
         draft = workflow.create_draft(candidate.id, "copy")
         assert workflow.next_draft_pending_notification().id == draft.id
         workflow.record_remote_attempt(draft.id, "draft_notification")
-        assert workflow.next_draft_pending_notification() is None
+        assert workflow.next_draft_pending_notification().id == draft.id
         workflow.settle_remote_effect(draft.id, "draft_notification", "ambiguous")
-        assert workflow.next_draft_pending_notification() is None
+        assert workflow.next_draft_pending_notification().id == draft.id
         workflow.approve_draft(draft.id)
         assert workflow.next_draft_approved_sheets_delivery().id == draft.id
         workflow.record_remote_attempt(draft.id, "sheets_delivery")
-        assert workflow.next_draft_approved_sheets_delivery() is None
-        workflow.settle_remote_effect(draft.id, "sheets_delivery", "ambiguous")
-        assert workflow.next_draft_approved_sheets_delivery() is None
+        assert workflow.next_draft_approved_sheets_delivery().id == draft.id
+        workflow.settle_remote_effect(draft.id, "sheets_delivery", "confirmed")
+        assert workflow.next_draft_approved_sheets_delivery().id == draft.id
+
+
+def test_expired_approval_capabilities_move_each_gate_to_manual_review(tmp_path):
+    with V2Workflow(tmp_path / "v2.sqlite") as workflow:
+        candidate = workflow.record_observation(observation("candidate"))
+        assert candidate is not None
+        expired = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+        workflow.issue_callback("a" * 64, candidate.id, "candidate", expired)
+        assert workflow.reconcile_expired_approval_capabilities(datetime.now(UTC).isoformat()) == 1
+        assert workflow.get_candidate(candidate.id).state == V2State.MANUAL_REVIEW
+
+        approved = workflow.record_observation(observation("draft"))
+        assert approved is not None
+        workflow.approve_candidate(approved.id)
+        draft = workflow.create_draft(approved.id, "copy")
+        workflow.issue_callback("b" * 64, draft.id, "draft", expired)
+        assert workflow.reconcile_expired_approval_capabilities(datetime.now(UTC).isoformat()) == 1
+        assert workflow.get_candidate(approved.id).state == V2State.MANUAL_REVIEW
+        assert workflow.get_draft(draft.id).state == V2State.MANUAL_REVIEW

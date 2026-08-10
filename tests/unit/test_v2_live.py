@@ -76,8 +76,18 @@ def exact_draft_content() -> str:
     )
 
 
-def approved_draft(workflow: V2Workflow):
-    candidate = workflow.record_observation(observation())
+def approved_draft(workflow: V2Workflow, post_id: str = "1"):
+    source = observation()
+    if post_id != source.external_post_id:
+        source = SourceObservation(
+            channel_id=source.channel_id,
+            channel_handle=source.channel_handle,
+            external_post_id=post_id,
+            published_at=source.published_at,
+            text=source.text,
+            urls=source.urls,
+        )
+    candidate = workflow.record_observation(source)
     assert candidate is not None
     workflow.approve_candidate(candidate.id)
     pending = workflow.create_draft(candidate.id, exact_draft_content())
@@ -586,6 +596,119 @@ def test_v2_telegram_tick_refuses_before_cursor_handoff(monkeypatch, tmp_path):
     with pytest.raises(V2WorkflowError, match="handoff is required"):
         v2_cli.telegram_tick(SimpleNamespace(db=db, deadline=5.0, timeout=0))
     assert calls == []
+
+
+def test_v2_telegram_tick_recovers_crashed_notification_receipts_without_resend(monkeypatch, tmp_path):
+    db = tmp_path / "v2.sqlite"
+    with V2Workflow(db) as workflow:
+        candidate = workflow.record_observation(observation())
+        assert candidate is not None
+        workflow.record_remote_attempt(candidate.id, "candidate_notification")
+        approved = workflow.record_observation(
+            SourceObservation(
+                channel_id="channel",
+                channel_handle="configured",
+                external_post_id="crashed-draft",
+                published_at=datetime.now(UTC),
+                text=observation().text,
+                urls=(UrlCandidate("https://example.test/crashed-draft"),),
+            )
+        )
+        assert approved is not None
+        workflow.approve_candidate(approved.id)
+        draft = workflow.create_draft(approved.id, exact_draft_content())
+        workflow.record_remote_attempt(draft.id, "draft_notification")
+        workflow.settle_remote_effect(draft.id, "draft_notification", "confirmed", receipt_id="remote-message")
+        workflow.handoff_telegram_cursor(0)
+
+    calls = []
+
+    class Adapter:
+        def __init__(self, *_args):
+            pass
+
+        def send_message_once(self, *_args, **_kwargs):
+            calls.append("send")
+            raise AssertionError("recovery must not resend")
+
+        def _request(self, method, _payload, **_kwargs):
+            calls.append(method)
+            return {"result": []}
+
+    monkeypatch.setattr(v2_cli, "TelegramApprovalAdapter", Adapter)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token")
+    monkeypatch.setenv("NEWSBOT_APPROVER_CHAT_ID", "100")
+    monkeypatch.setenv("NEWSBOT_APPROVER_USER_IDS", "200")
+    args = SimpleNamespace(db=db, deadline=5.0, timeout=0)
+    assert v2_cli.telegram_tick(args) == 0
+    assert calls == ["getUpdates"]
+    with V2Workflow(db) as workflow:
+        assert workflow.get_candidate(approved.id).state == V2State.DRAFT_PENDING_APPROVAL
+        assert workflow.get_candidate(candidate.id).state == V2State.PENDING_CANDIDATE
+        workflow.mark_manual_review(draft.id, "test completed confirmed notification recovery")
+    assert v2_cli.telegram_tick(args) == 0
+    assert calls == ["getUpdates", "getUpdates"]
+    with V2Workflow(db) as workflow:
+        assert workflow.get_candidate(candidate.id).state == V2State.MANUAL_REVIEW
+
+
+def test_v2_telegram_tick_reconciles_expired_approval_capability(monkeypatch, tmp_path):
+    db = tmp_path / "v2.sqlite"
+    with V2Workflow(db) as workflow:
+        candidate = workflow.record_observation(observation())
+        assert candidate is not None
+        workflow.issue_callback(
+            hash_callback_token("E" * 43),
+            candidate.id,
+            "candidate",
+            (datetime.now(UTC) - timedelta(seconds=1)).isoformat(),
+        )
+        workflow.handoff_telegram_cursor(0)
+
+    class Adapter:
+        def __init__(self, *_args):
+            pass
+
+        def send_message_once(self, *_args, **_kwargs):
+            raise AssertionError("expired approval must not resend")
+
+        def _request(self, _method, _payload, **_kwargs):
+            return {"result": []}
+
+    monkeypatch.setattr(v2_cli, "TelegramApprovalAdapter", Adapter)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token")
+    monkeypatch.setenv("NEWSBOT_APPROVER_CHAT_ID", "100")
+    monkeypatch.setenv("NEWSBOT_APPROVER_USER_IDS", "200")
+    assert v2_cli.telegram_tick(SimpleNamespace(db=db, deadline=5.0, timeout=0)) == 0
+    with V2Workflow(db) as workflow:
+        assert workflow.get_candidate(candidate.id).state == V2State.MANUAL_REVIEW
+
+
+def test_deliver_google_sheets_next_recovers_crashed_receipts_without_dispatch(tmp_path, capsys):
+    db = tmp_path / "v2.sqlite"
+    with V2Workflow(db) as workflow:
+        _candidate, confirmed = approved_draft(workflow)
+        workflow.record_remote_attempt(confirmed.id, "sheets_delivery")
+        workflow.settle_remote_effect(confirmed.id, "sheets_delivery", "confirmed", receipt_id="remote-row")
+    assert v2_cli.deliver_google_sheets_next(SimpleNamespace(db=db, deadline=120.0)) == 0
+    assert json.loads(capsys.readouterr().out)["state"] == V2State.SHEET_DELIVERED
+    with V2Workflow(db) as workflow:
+        assert workflow.get_draft(confirmed.id).state == V2State.SHEET_DELIVERED
+
+    with V2Workflow(db) as workflow:
+        _candidate, pending = approved_draft(workflow, "pending-recovery")
+        detail = json.dumps(
+            {
+                "lease_expires_at": (datetime.now(UTC) - timedelta(seconds=1)).isoformat(),
+                "phase": "possibly_sent",
+            },
+            sort_keys=True,
+        )
+        assert workflow.claim_remote_effect(pending.id, "sheets_delivery", detail)
+    assert v2_cli.deliver_google_sheets_next(SimpleNamespace(db=db, deadline=120.0)) == 0
+    assert json.loads(capsys.readouterr().out)["state"] == V2State.MANUAL_REVIEW
+    with V2Workflow(db) as workflow:
+        assert workflow.get_draft(pending.id).state == V2State.MANUAL_REVIEW
 
 
 def test_deliver_google_sheets_next_reports_no_work(tmp_path, capsys):

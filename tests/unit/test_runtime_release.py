@@ -358,28 +358,29 @@ def test_live_quiescence_refuses_enabled_timer_and_sheets_lock(tmp_path: Path, m
     assert not runtime_release.live_quiescence(paths, runner)
 
 
-def test_deployment_docs_require_one_quiescence_proof_across_build_and_switch() -> None:
+def test_deployment_docs_preserve_release_and_archive_boundaries() -> None:
     repository = Path(__file__).parents[2]
     operations = (repository / "docs/operations.md").read_text()
     guide = (repository / "vps-deployment-guide.html").read_text()
 
-    cases = (
-        (operations, "build <COMMIT_SHA>", "switch <COMMIT_SHA>"),
-        (guide, "build $RELEASE_GIT_SHA", "switch $RELEASE_GIT_SHA"),
-    )
-    for document, build_marker, switch_marker in cases:
-        proof = document.index('printf "quiescent\\n"')
-        build = document.index(build_marker)
-        switch = document.index(switch_marker)
-        migration = document.index("init-db", switch)
-        preview = document.index("automation-cutover-preview", migration)
-        apply = document.index("automation-cutover-apply", preview)
-        assert proof < build < switch < migration < preview < apply
-        assert "--quiescence-proof" in document[build:switch]
-        assert "--quiescence-proof" in document[switch:migration]
-
+    proof = operations.index('printf "quiescent\\n"')
+    build = operations.index("build <COMMIT_SHA>")
+    switch = operations.index("switch <COMMIT_SHA>")
+    migration = operations.index("init-db", switch)
+    preview = operations.index("automation-cutover-preview", migration)
+    apply = operations.index("automation-cutover-apply", preview)
+    assert proof < build < switch < migration < preview < apply
+    assert "--quiescence-proof" in operations[build:switch]
+    assert "--quiescence-proof" in operations[switch:migration]
     assert "collect → Telegram → Sheets" in operations
-    assert "collect → Telegram → Sheets" in guide
+
+    assert "root:newsbot 440" in guide
+    assert "sha256sum -c SHA256SUMS" in guide
+    assert "/var/lib/newsbot-v2/newsbot-v2.sqlite" in guide
+    assert "/usr/local/bin/newsbot init-db" not in guide
+    assert "automation-cutover-preview --" not in guide
+    assert "automation-cutover-apply --" not in guide
+    assert "automation-release-activate" not in guide
     architecture = (repository / "docs/architecture.md").read_text()
     requirements = (repository / "docs/requirements.md").read_text()
     assert architecture.index("switch/re-attest") < architecture.index("init-db")

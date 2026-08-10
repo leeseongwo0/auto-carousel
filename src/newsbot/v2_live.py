@@ -385,10 +385,20 @@ def deliver_v2_google_sheets(
     return workflow.mark_sheet_delivered(draft.id)
 
 
+def recover_v2_google_sheets_delivery(workflow: V2Workflow, draft: V2Draft) -> V2Draft:
+    """Recover a durable Sheets receipt without constructing a dispatch adapter."""
+    receipt = workflow.remote_effect(draft.id, "sheets_delivery")
+    if receipt is None or receipt["status"] == "failed":
+        raise V2WorkflowError("Sheets delivery has no durable recovery receipt")
+    return _recover_v2_sheets_receipt(workflow, draft, receipt, allow_active_pending=True)
+
+
 def _recover_v2_sheets_receipt(
     workflow: V2Workflow,
     draft: V2Draft,
     receipt: dict[str, object],
+    *,
+    allow_active_pending: bool = False,
 ) -> V2Draft:
     status = str(receipt["status"])
     if status == "confirmed":
@@ -406,6 +416,8 @@ def _recover_v2_sheets_receipt(
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise V2WorkflowError("invalid pending Sheets delivery receipt") from exc
     if lease_expires_at > datetime.now(UTC):
+        if allow_active_pending:
+            return draft
         raise V2WorkflowError("Sheets delivery is already in progress")
     settled = workflow.settle_remote_effect_claim(
         draft.id,
