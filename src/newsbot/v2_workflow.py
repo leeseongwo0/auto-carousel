@@ -247,13 +247,7 @@ class V2Workflow:
         ).fetchall()
         for row in rows:
             status = row["status"]
-            if status is None or status in {"confirmed", "pending"}:
-                return self.get_draft(str(row["id"]))
-            if (
-                status == "failed"
-                and int(row["attempts"]) < 2
-                and self._is_clear_pre_dispatch_sheets_failure(str(row["detail"]))
-            ):
+            if status is None or status in {"confirmed", "pending", "ambiguous", "failed"}:
                 return self.get_draft(str(row["id"]))
         return None
 

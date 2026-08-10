@@ -438,6 +438,45 @@ def test_sheets_typed_clear_pre_dispatch_network_retries_once_without_dispatch(t
         assert reopened.next_draft_approved_sheets_delivery() is None
 
 
+@pytest.mark.parametrize(
+    ("status", "detail", "attempts"),
+    [
+        ("ambiguous", "unknown post-dispatch outcome", 1),
+        (
+            "failed",
+            json.dumps({"failure": "terminal_pre_dispatch_failure", "phase": "prepare_failed"}, sort_keys=True),
+            1,
+        ),
+        (
+            "failed",
+            json.dumps({"failure": "clear_pre_dispatch_network", "phase": "pre_dispatch_failed"}, sort_keys=True),
+            2,
+        ),
+    ],
+)
+def test_terminal_sheets_receipt_reconciles_manual_after_crash_without_credentials(
+    status, detail, attempts, monkeypatch, tmp_path, capsys
+):
+    db = tmp_path / f"terminal-{status}-{attempts}.sqlite"
+    with V2Workflow(db) as workflow:
+        _candidate, draft = approved_draft(workflow)
+        for _ in range(attempts):
+            workflow.record_remote_attempt(draft.id, "sheets_delivery")
+        workflow.settle_remote_effect(draft.id, "sheets_delivery", status, detail=detail)
+
+    monkeypatch.delenv("GOOGLE_SERVICE_ACCOUNT_FILE", raising=False)
+    monkeypatch.delenv("GOOGLE_SHEETS_SPREADSHEET_ID", raising=False)
+    with V2Workflow(db) as reopened:
+        selected = reopened.next_draft_approved_sheets_delivery()
+        assert selected is not None
+        assert v2_cli._deliver_google_sheets_draft(reopened, selected, 120).state == V2State.MANUAL_REVIEW
+        receipt = reopened.remote_effect(draft.id, "sheets_delivery")
+        assert receipt is not None and receipt["status"] == status and receipt["attempts"] == attempts
+
+    assert v2_cli.deliver_google_sheets_next(SimpleNamespace(db=db, deadline=120.0)) == 0
+    assert json.loads(capsys.readouterr().out) == {"status": "no_work"}
+
+
 def test_sheets_missing_credentials_settle_terminal_without_timer_loop(monkeypatch, tmp_path, capsys):
     db = tmp_path / "credentials.sqlite"
     with V2Workflow(db) as workflow:
