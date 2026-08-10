@@ -106,6 +106,7 @@ class V2Workflow:
         expected = {
             "sqlite_sequence",
             "v2_metadata",
+            "v2_telegram_cursor",
             "v2_remote_effects",
             "v2_observations",
             "v2_candidates",
@@ -128,6 +129,10 @@ class V2Workflow:
             key TEXT PRIMARY KEY, value TEXT NOT NULL
         );
         INSERT OR IGNORE INTO v2_metadata(key, value) VALUES ('schema', 'newsbot-v2-workflow-v1');
+        CREATE TABLE IF NOT EXISTS v2_telegram_cursor (
+            stream INTEGER PRIMARY KEY CHECK(stream=1),
+            next_offset INTEGER NOT NULL CHECK(next_offset>=0)
+        );
         CREATE TABLE IF NOT EXISTS v2_remote_effects (
             entity_id TEXT NOT NULL, stage TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
             status TEXT NOT NULL DEFAULT 'pending', detail TEXT NOT NULL DEFAULT '', receipt_id TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL,
@@ -184,6 +189,64 @@ class V2Workflow:
         if "receipt_id" not in columns:
             self._db.execute("ALTER TABLE v2_remote_effects ADD COLUMN receipt_id TEXT NOT NULL DEFAULT ''")
         self._db.commit()
+
+    def handoff_telegram_cursor(self, next_offset: int) -> int:
+        """Merge the stopped legacy owner's final frontier without regression."""
+        if isinstance(next_offset, bool) or not isinstance(next_offset, int) or next_offset < 0:
+            raise ValueError("Telegram next offset must be a nonnegative integer")
+        with self._db:
+            self._db.execute(
+                "INSERT INTO v2_telegram_cursor(stream,next_offset) VALUES(1,?) "
+                "ON CONFLICT(stream) DO UPDATE SET next_offset=MAX(next_offset,excluded.next_offset)",
+                (next_offset,),
+            )
+        current = self.telegram_next_offset()
+        assert current is not None
+        return current
+
+    def telegram_next_offset(self) -> int | None:
+        """Return the V2-owned Bot API stream cursor, when it has been seeded."""
+        row = self._db.execute("SELECT next_offset FROM v2_telegram_cursor WHERE stream=1").fetchone()
+        return None if row is None else int(row["next_offset"])
+
+    def advance_telegram_cursor(self, next_offset: int) -> int:
+        """Advance an explicitly handed-off V2 cursor monotonically."""
+        if isinstance(next_offset, bool) or not isinstance(next_offset, int) or next_offset < 0:
+            raise ValueError("Telegram next offset must be a nonnegative integer")
+        with self._db:
+            updated = self._db.execute(
+                "UPDATE v2_telegram_cursor SET next_offset=MAX(next_offset,?) WHERE stream=1",
+                (next_offset,),
+            )
+        if updated.rowcount != 1:
+            raise V2WorkflowError("Telegram cursor handoff is required")
+        current = self.telegram_next_offset()
+        assert current is not None
+        return current
+
+    def next_candidate_pending_notification(self) -> V2Candidate | None:
+        """Select one candidate whose Telegram notification was never sent or clearly failed."""
+        row = self._db.execute(
+            "SELECT candidate.id FROM v2_candidates candidate "
+            "LEFT JOIN v2_remote_effects effect "
+            "ON effect.entity_id=candidate.id AND effect.stage='candidate_notification' "
+            "WHERE candidate.state=? AND (effect.entity_id IS NULL OR effect.status='failed') "
+            "ORDER BY candidate.created_at,candidate.id LIMIT 1",
+            (V2State.PENDING_CANDIDATE.value,),
+        ).fetchone()
+        return None if row is None else self.get_candidate(str(row["id"]))
+
+    def next_draft_approved_sheets_delivery(self) -> V2Draft | None:
+        """Select one approved draft with no non-retryable Sheets receipt."""
+        row = self._db.execute(
+            "SELECT draft.id FROM v2_drafts draft "
+            "LEFT JOIN v2_remote_effects effect "
+            "ON effect.entity_id=draft.id AND effect.stage='sheets_delivery' "
+            "WHERE draft.state=? AND (effect.entity_id IS NULL OR effect.status='failed') "
+            "ORDER BY draft.created_at,draft.id LIMIT 1",
+            (V2State.DRAFT_APPROVED.value,),
+        ).fetchone()
+        return None if row is None else self.get_draft(str(row["id"]))
 
     @staticmethod
     def _identity(observation: SourceObservation) -> str:

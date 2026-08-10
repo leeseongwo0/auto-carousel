@@ -852,6 +852,36 @@ def generate_codex_v2_once(args: argparse.Namespace) -> int:
     return 0
 
 
+def v2_status(args: argparse.Namespace) -> int:
+    from .v2_cli import status
+
+    return status(args)
+
+
+def v2_collect_live(args: argparse.Namespace) -> int:
+    from .v2_cli import collect_live
+
+    return collect_live(args)
+
+
+def v2_telegram_tick(args: argparse.Namespace) -> int:
+    from .v2_cli import telegram_tick
+
+    return telegram_tick(args)
+
+
+def v2_deliver_google_sheets_next(args: argparse.Namespace) -> int:
+    from .v2_cli import deliver_google_sheets_next
+
+    return deliver_google_sheets_next(args)
+
+
+def v2_seed_telegram_cursor(args: argparse.Namespace) -> int:
+    from .v2_cli import seed_telegram_cursor
+
+    return seed_telegram_cursor(args)
+
+
 def _positive_actor(actor_id: int) -> int:
     if actor_id <= 0:
         raise ValueError("actor-id must be positive")
@@ -1224,80 +1254,6 @@ def _advance_approval_poll_offset(storage: Storage, update_id: int) -> None:
             "updated_at=CURRENT_TIMESTAMP",
             (update_id + 1,),
         )
-
-
-def _settle_v2_callback_update(update: dict[str, Any], token: str) -> str | None:
-    database = os.environ.get("NEWSBOT_V2_DATABASE", "").strip()
-    if not database:
-        return None
-    callback = update.get("callback_query")
-    if not isinstance(callback, dict):
-        return None
-    message = callback.get("message")
-    user = callback.get("from")
-    if not isinstance(message, dict) or not isinstance(user, dict):
-        return None
-    chat = message.get("chat")
-    chat_id = chat.get("id") if isinstance(chat, dict) else None
-    user_id = user.get("id")
-    try:
-        expected_chat_id = int(os.environ["NEWSBOT_APPROVER_CHAT_ID"])
-        authorized_user_ids = {
-            int(value.strip()) for value in os.environ["NEWSBOT_APPROVER_USER_IDS"].split(",") if value.strip()
-        }
-        token_hash = hash_callback_token(token)
-    except (KeyError, ValueError):
-        return None
-    if chat_id != expected_chat_id or user_id not in authorized_user_ids:
-        return None
-    from .v2_workflow import V2Workflow
-
-    with V2Workflow(Path(database)) as workflow:
-        settled = workflow.settle_callback_any(token_hash, datetime.now(UTC).isoformat())
-    if settled is None:
-        return None
-    _entity_id, stage = settled
-    return f"v2_{stage}_approved"
-
-
-def _notify_v2_draft_once(adapter: Any) -> str | None:
-    database = os.environ.get("NEWSBOT_V2_DATABASE", "").strip()
-    if not database:
-        return None
-
-    from .sheets.base import SheetDelivery
-    from .v2_live import (
-        CandidateNotificationPort,
-        DraftNotificationPort,
-        GenerationPort,
-        SheetsDeliveryPort,
-        TelegramV2Notifier,
-        V2LiveWorkflow,
-    )
-    from .v2_runtime import AmbiguousRemoteEffect
-    from .v2_workflow import V2Candidate, V2Draft, V2Workflow
-
-    def refuse_candidate(_candidate: V2Candidate, _token: str) -> str | bool:
-        raise AmbiguousRemoteEffect("unexpected V2 candidate notification transition")
-
-    def refuse_generation(_candidate: V2Candidate) -> str:
-        raise AmbiguousRemoteEffect("unexpected V2 generation transition")
-
-    def refuse_sheets(_draft: V2Draft) -> SheetDelivery | bool:
-        raise AmbiguousRemoteEffect("unexpected V2 Sheets transition")
-
-    with V2Workflow(Path(database)) as workflow:
-        draft = workflow.next_draft_pending_notification()
-        if draft is None:
-            return None
-        live = V2LiveWorkflow(
-            workflow,
-            notify_candidate=cast(CandidateNotificationPort, refuse_candidate),
-            generate_draft=cast(GenerationPort, refuse_generation),
-            notify_draft=cast(DraftNotificationPort, TelegramV2Notifier(adapter).draft),
-            deliver_sheets=cast(SheetsDeliveryPort, refuse_sheets),
-        )
-        return str(live.run(draft.candidate_id).state)
 
 
 def _poll_approvals_unlocked(args: argparse.Namespace) -> int:
@@ -2430,10 +2386,8 @@ def telegram_tick(args: argparse.Namespace) -> int:
             now=datetime.now(UTC),
             lease_seconds=int(getattr(args, "lease_seconds", 90)),
         )
-        v2_notification: str | None = None
         try:
             authority.seal_noon_window(config, now=lambda: datetime.now(UTC))
-            v2_notification = _notify_v2_draft_once(adapter)
         finally:
             authority.release_lease(admission, now=datetime.now(UTC), outcome="done")
         poll = authority.acquire_lease(
@@ -2442,7 +2396,7 @@ def telegram_tick(args: argparse.Namespace) -> int:
             lease_seconds=int(getattr(args, "lease_seconds", 90)),
         )
         poll_outcome = "failed"
-        handled = int(v2_notification is not None)
+        handled = 0
         try:
             response = adapter._request(
                 "getUpdates",
@@ -2475,18 +2429,6 @@ def telegram_tick(args: argparse.Namespace) -> int:
                 if admitted:
                     adapter.handle_update(update, automation_lease=poll, deadline=tick_deadline)
                     handled += 1
-                elif isinstance(token, str):
-                    v2_status = _settle_v2_callback_update(update, token)
-                    if v2_status is not None:
-                        callback_id = callback.get("id") if isinstance(callback, dict) else None
-                        if isinstance(callback_id, str):
-                            with suppress(Exception):
-                                adapter._request(
-                                    "answerCallbackQuery",
-                                    {"callback_query_id": callback_id, "text": v2_status},
-                                    deadline=tick_deadline,
-                                )
-                        handled += 1
                 _advance_approval_poll_offset(storage, int(update["update_id"]))
             poll_outcome = "done"
         finally:
@@ -2795,6 +2737,30 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path("/var/lib/newsbot-v2/newsbot-v2.sqlite"),
     )
     codex_v2_once.set_defaults(handler=generate_codex_v2_once)
+    v2_collect = commands.add_parser("v2-collect-live", help="collect one bounded V2 Telegram cycle")
+    v2_collect.add_argument("--db", type=Path, required=True)
+    v2_collect.add_argument("--lookback-hours", type=int, choices=range(1, 169), default=24)
+    v2_collect.add_argument("--limit", type=int, choices=range(1, 501), default=100)
+    v2_collect.set_defaults(handler=v2_collect_live)
+
+    v2_telegram = commands.add_parser("v2-telegram-tick", help="run one V2 approval send-and-poll cycle")
+    v2_telegram.add_argument("--db", type=Path, required=True)
+    v2_telegram.add_argument("--deadline", type=float, default=30.0)
+    v2_telegram.add_argument("--timeout", type=int, choices=range(0, 51), default=10)
+    v2_telegram.set_defaults(handler=v2_telegram_tick)
+
+    v2_sheets = commands.add_parser("v2-deliver-google-sheets-next", help="deliver one approved V2 draft")
+    v2_sheets.add_argument("--db", type=Path, required=True)
+    v2_sheets.add_argument("--deadline", type=float, default=120.0)
+    v2_sheets.set_defaults(handler=v2_deliver_google_sheets_next)
+
+    v2_cursor = commands.add_parser("v2-seed-telegram-cursor", help="merge the stopped owner's V2 cursor")
+    v2_cursor.add_argument("--db", type=Path, required=True)
+    v2_cursor.add_argument("--next-offset", type=int, required=True)
+    v2_cursor.set_defaults(handler=v2_seed_telegram_cursor)
+    v2_view = commands.add_parser("v2-status", help="show redacted V2 workflow status")
+    v2_view.add_argument("--db", type=Path, required=True)
+    v2_view.set_defaults(handler=v2_status)
     provider_pause = commands.add_parser("codex-provider-pause")
     provider_pause.add_argument("--db", type=Path)
     provider_pause.add_argument("--actor-id", type=int, required=True)
