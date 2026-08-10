@@ -122,3 +122,17 @@ def test_analyst_investment_cycle_outlook_is_non_news() -> None:
 
     assert result.outcome is V2Outcome.NON_NEWS
     assert result.category == "opinion_rumor"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "An analyst documented that the blockchain company launched its AI payment product to customers today. ",
+        "증권사 애널리스트가 블록체인 기업의 AI 결제 제품이 오늘 고객에게 정식 출시된 사실을 확인했다. ",
+    ],
+)
+def test_analyst_attribution_does_not_mask_completed_factual_news(text: str) -> None:
+    result = evaluate_v2_policy(obs(text + "verified deployment facts " * 20), now=NOW)
+
+    assert result.outcome is V2Outcome.CANDIDATE
+    assert result.reason == "clear_candidate"
