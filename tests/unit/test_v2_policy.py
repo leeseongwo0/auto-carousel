@@ -72,3 +72,10 @@ def test_clear_candidate_requires_all_gates() -> None:
     )
     assert result.outcome is V2Outcome.CANDIDATE
     assert result.category is None
+
+
+def test_korean_hype_opinion_is_non_news() -> None:
+    text = "AI 업계에서 하이프를 쫓아야 할까, 무시해야 할까? 개인적인 분석과 소감입니다. " + "설명 " * 30
+    result = evaluate_v2_policy(obs(text), now=NOW)
+    assert result.outcome is V2Outcome.NON_NEWS
+    assert result.category == "opinion_rumor"

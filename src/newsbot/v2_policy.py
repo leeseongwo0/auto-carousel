@@ -51,7 +51,7 @@ _EXCLUSION_PATTERNS = {
     "exchange_token_promotion": r"\b(list(?:ing|ed)?|delist(?:ing|ed)?|exchange support|airdrop|points program|meme coin|presale|staking reward|defi yield|referral|coupon|giveaway|token sale)\b|상장|상장폐지|에어드롭|포인트|밈코인|프리세일|스테이킹|수익률|레퍼럴|쿠폰|경품",
     "marketing_promotion": r"\b(sponsored|advertis(?:e|ed|ement)|partner content|paid promotion|press release|pre.?order|waitlist|beta sign.?up|countdown|teaser|campaign|event registration)\b|광고|협찬|홍보|보도자료|사전예약|대기자|베타 신청|카운트다운|티저|캠페인|참가 모집",
     "partnership": r"\b(partnership|partnered|memorandum of understanding|\bmou\b|collaborat(?:ion|e)|strategic alliance)\b|파트너십|업무협약|협력",
-    "opinion_rumor": r"\b(opinion|i think|probably|might|could|rumou?r|unconfirmed|anonymous source|according to commenters|reaction)\b|의견|전망|루머|미확인|익명|커뮤니티 반응|소감|밈",
+    "opinion_rumor": r"\b(opinion|i think|probably|might|could|rumou?r|unconfirmed|anonymous source|according to commenters|reaction|hype)\b|의견|전망|루머|미확인|익명|커뮤니티 반응|소감|밈|하이프|쫓아야|무시해야",
     "minor_update": r"\b(ui|ux|design|bug fix|minor update|language support|roadmap|rebrand|branding|feature introduction)\b|UI|디자인|버그 수정|언어 지원|로드맵|브랜드명|기능 재소개",
 }
 _UNCERTAIN = re.compile(
