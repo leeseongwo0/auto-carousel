@@ -20,6 +20,7 @@ from newsbot.v2_live import (
     V2LiveWorkflow,
     deliver_v2_google_sheets,
     v2_draft_handoff_values,
+    v2_sheet_export_id,
 )
 from newsbot.v2_workflow import V2State, V2Workflow, V2WorkflowError
 
@@ -277,9 +278,13 @@ class ScriptedSheetsAdapter:
         self.prepared = False
         self.armed = False
         self.dispatched = False
+        self.export_ids = []
 
     def prepare_delivery(self, *, export_id, canonical_sha256, values):
         self.prepared = True
+        self.export_ids.append(export_id)
+        assert export_id.startswith("exp_")
+        assert len(export_id) == 36
         assert export_id
         assert len(canonical_sha256) == 64
         assert len(values) == 22
@@ -340,6 +345,7 @@ def test_v2_sheets_delivery_honors_prepared_metadata(
         assert result.state == expected_state
         assert adapter.armed is armed
         assert adapter.dispatched is dispatched
+        assert adapter.export_ids == [v2_sheet_export_id(draft.id)]
         receipt = workflow.remote_effect(draft.id, "sheets_delivery")
         assert receipt is not None
         detail = json.loads(str(receipt["detail"]))
@@ -348,6 +354,13 @@ def test_v2_sheets_delivery_honors_prepared_metadata(
         assert detail["owner"]
         if metadata is MetadataState.ABSENT:
             assert detail["attestation"]["scope_ok"] is True
+
+
+def test_v2_sheet_export_identity_is_deterministic_and_namespaced():
+    assert v2_sheet_export_id("draft") == v2_sheet_export_id("draft")
+    assert v2_sheet_export_id("draft") != v2_sheet_export_id("other")
+    with pytest.raises(ValueError, match="must not be empty"):
+        v2_sheet_export_id("")
 
 
 @pytest.mark.parametrize(

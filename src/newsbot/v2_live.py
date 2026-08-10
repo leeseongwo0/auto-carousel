@@ -237,6 +237,13 @@ def v2_draft_handoff_values(draft: V2Draft, approved_date: str) -> tuple[str, ..
         raise ValueError("invalid V2 exact draft projection") from exc
 
 
+def v2_sheet_export_id(draft_id: str) -> str:
+    """Map an immutable V2 draft identity onto the frozen Sheets export namespace."""
+    if not draft_id:
+        raise ValueError("draft_id must not be empty")
+    return "exp_" + hashlib.sha256(f"newsbot-v2-draft:{draft_id}".encode()).hexdigest()[:32]
+
+
 def _v2_sheets_receipt_detail(previous: str, phase: str, **updates: object) -> str:
     try:
         detail = json.loads(previous)
@@ -271,7 +278,7 @@ def deliver_v2_google_sheets(
 
     canonical_sha256 = hashlib.sha256(draft.content.encode("utf-8")).hexdigest()
     prepared = adapter.prepare_delivery(
-        export_id=draft.id,
+        export_id=v2_sheet_export_id(draft.id),
         canonical_sha256=canonical_sha256,
         values=values,
     )
