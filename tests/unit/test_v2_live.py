@@ -644,12 +644,8 @@ def test_v2_telegram_tick_recovers_crashed_notification_receipts_without_resend(
     assert calls == ["getUpdates"]
     with V2Workflow(db) as workflow:
         assert workflow.get_candidate(approved.id).state == V2State.DRAFT_PENDING_APPROVAL
-        assert workflow.get_candidate(candidate.id).state == V2State.PENDING_CANDIDATE
-        workflow.mark_manual_review(draft.id, "test completed confirmed notification recovery")
-    assert v2_cli.telegram_tick(args) == 0
-    assert calls == ["getUpdates", "getUpdates"]
-    with V2Workflow(db) as workflow:
         assert workflow.get_candidate(candidate.id).state == V2State.MANUAL_REVIEW
+        assert workflow.get_draft(draft.id).state == V2State.DRAFT_PENDING_APPROVAL
 
 
 def test_v2_telegram_tick_reconciles_expired_approval_capability(monkeypatch, tmp_path):

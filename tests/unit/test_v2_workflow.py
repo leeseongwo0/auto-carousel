@@ -207,7 +207,7 @@ def test_remote_effect_selectors_include_durable_recovery_receipts(tmp_path):
         workflow.record_remote_attempt(candidate.id, "candidate_notification")
         assert workflow.next_candidate_pending_notification().id == candidate.id
         workflow.settle_remote_effect(candidate.id, "candidate_notification", "confirmed")
-        assert workflow.next_candidate_pending_notification().id == candidate.id
+        assert workflow.next_candidate_pending_notification() is None
 
         workflow.approve_candidate(candidate.id)
         draft = workflow.create_draft(candidate.id, "copy")

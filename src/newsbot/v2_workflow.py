@@ -230,7 +230,7 @@ class V2Workflow:
             "SELECT candidate.id FROM v2_candidates candidate "
             "LEFT JOIN v2_remote_effects effect "
             "ON effect.entity_id=candidate.id AND effect.stage='candidate_notification' "
-            "WHERE candidate.state=? "
+            "WHERE candidate.state=? AND (effect.status IS NULL OR effect.status!='confirmed') "
             "ORDER BY candidate.created_at,candidate.id LIMIT 1",
             (V2State.PENDING_CANDIDATE.value,),
         ).fetchone()
@@ -581,7 +581,7 @@ class V2Workflow:
             "SELECT draft.id FROM v2_drafts draft "
             "LEFT JOIN v2_remote_effects effect "
             "ON effect.entity_id=draft.id AND effect.stage='draft_notification' "
-            "WHERE draft.state=? "
+            "WHERE draft.state=? AND (effect.status IS NULL OR effect.status!='confirmed') "
             "ORDER BY draft.created_at,draft.id LIMIT 1",
             (V2State.DRAFT_PENDING_APPROVAL.value,),
         ).fetchone()
