@@ -107,3 +107,18 @@ def test_korean_hype_opinion_is_non_news() -> None:
     result = evaluate_v2_policy(obs(text), now=NOW)
     assert result.outcome is V2Outcome.NON_NEWS
     assert result.category == "opinion_rumor"
+
+
+def test_analyst_investment_cycle_outlook_is_non_news() -> None:
+    text = (
+        "🤑메모리 슈퍼사이클은 아직 초기 (Bernstein) source\n"
+        "Bernstein은 AI 발전을 네 단계로 구분하며 HBM, DRAM, NAND, HDD 수요가 확산된다고 분석한다. "
+        "현재를 고급 추론에서 에이전틱 AI로 넘어가는 구간으로 본다면 메모리 수요의 외연이 더 중요하다. "
+        + "투자 사이클 설명 "
+        * 20
+    )
+
+    result = evaluate_v2_policy(obs(text), now=NOW)
+
+    assert result.outcome is V2Outcome.NON_NEWS
+    assert result.category == "opinion_rumor"
