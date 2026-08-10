@@ -8,14 +8,6 @@ from newsbot import cli as legacy_cli
 from newsbot import v2_cli
 from newsbot.approval.base import hash_callback_token
 from newsbot.collectors.base import SourceObservation, UrlCandidate
-from newsbot.copywriting import (
-    BodyPage,
-    Caption,
-    CopyDraft,
-    CoverPage,
-    FactReference,
-    FactualUnit,
-)
 from newsbot.sheets.base import (
     DeliveryOutcome,
     DispatchCredentialAttestation,
@@ -25,7 +17,6 @@ from newsbot.sheets.base import (
 )
 from newsbot.v2_live import (
     TelethonV2Collector,
-    V2CodexGenerator,
     V2LiveWorkflow,
     deliver_v2_google_sheets,
     v2_draft_handoff_values,
@@ -248,41 +239,31 @@ def test_legacy_poll_owner_rejects_unauthorized_v2_callback(monkeypatch, tmp_pat
         assert workflow.get_candidate(candidate.id).state == V2State.PENDING_CANDIDATE
 
 
-def test_v2_codex_generator_builds_evidence_bound_request(tmp_path):
-    requests = []
-
-    class Provider:
-        async def generate(self, request):
-            requests.append(request)
-            claim = request.facts[0]
-            unit = FactualUnit(
-                text="검증된 사실",
-                references=(FactReference(claim.id, claim.source_version_id),),
-            )
-            return CopyDraft(
-                cover=CoverPage("브라질 암호화폐 규제", "송금 대기 제도", (unit,)),
-                bodies=(
-                    BodyPage("핵심 내용", "브라질이 암호화폐 사기 방지를 위해 송금 대기 제도를 도입했습니다.", (unit,)),
-                ),
-                caption=Caption(
-                    "새로운 규제입니다.",
-                    "브라질의 제도 변화입니다.",
-                    "송금에 대기 시간이 적용됩니다.",
-                    "이용자 보호에 영향을 줍니다.",
-                    "다른 국가에도 확산될까요?",
-                    ("#블록체인",),
-                ),
-                category="Blockchain",
-            )
-
-    with V2Workflow(tmp_path / "v2.sqlite") as workflow:
+def test_telegram_tick_notifies_one_new_v2_draft_without_regeneration(monkeypatch, tmp_path):
+    db = tmp_path / "v2.sqlite"
+    with V2Workflow(db) as workflow:
         candidate = workflow.record_observation(observation())
         assert candidate is not None
-        content = V2CodexGenerator(Provider())(candidate)
-    value = json.loads(content)
-    assert value["cover"]["title"] == "브라질 암호화폐 규제"
-    assert requests[0].facts[0].evidence == observation().text
-    assert requests[0].facts[0].source_url == "https://example.test/source"
+        workflow.approve_candidate(candidate.id)
+        draft = workflow.create_draft(candidate.id, exact_draft_content())
+
+    sent = []
+
+    class Adapter:
+        def send_message_once(self, text, *, markup, deadline):
+            sent.append((text, markup, deadline))
+            return SimpleNamespace(accepted=True, message_id=91, safe_code=None)
+
+    monkeypatch.setenv("NEWSBOT_V2_DATABASE", str(db))
+    assert legacy_cli._notify_v2_draft_once(Adapter()) == V2State.DRAFT_PENDING_APPROVAL
+    assert legacy_cli._notify_v2_draft_once(Adapter()) is None
+    assert len(sent) == 1
+    assert draft.id in sent[0][0]
+    with V2Workflow(db) as workflow:
+        receipt = workflow.remote_effect(draft.id, "draft_notification")
+        assert receipt is not None
+        assert receipt["status"] == "confirmed"
+        assert receipt["receipt_id"] == "91"
 
 
 class ScriptedSheetsAdapter:

@@ -9,7 +9,7 @@ import pytest
 ROOT = Path(__file__).parents[2]
 SYSTEMD = ROOT / "deploy" / "systemd"
 CODEX_UNIT_HASHES = {
-    "newsbot-generate-codex.service": "7deea7ee96fe97b8b5ce85e09f36a5003743622e15e780b6d4d58c59c0d8b231",
+    "newsbot-generate-codex.service": "ce46c88b3a58db0c625a6324890a3b7999362f84d210ba1583e949cb031c7a80",  # pragma: allowlist secret
     "newsbot-generate-codex-canary.service": "64e00828d97f72c2bdbf9efe23c7631005ae0af853fe97162c4c7aa10c363f61",
     "newsbot-generate-codex.timer": "612070bf7ea70047c67424e554a5a90997cd7e091f8e3f587ed549835a5a74f3",
 }
@@ -90,6 +90,23 @@ def codex_units_remain_byte_for_byte_unchanged() -> None:
     assert {
         name: hashlib.sha256((SYSTEMD / name).read_bytes()).hexdigest() for name in CODEX_UNIT_HASHES
     } == CODEX_UNIT_HASHES
+
+
+def test_production_codex_unit_routes_only_to_fixed_v2_worker() -> None:
+    production = _parse_unit(SYSTEMD / "newsbot-generate-codex.service")
+    canary = _parse_unit(SYSTEMD / "newsbot-generate-codex-canary.service")
+    assert production["Service"]["ExecStart"] == (
+        "/usr/local/bin/newsbot generate-codex-v2-once --db /var/lib/newsbot-v2/newsbot-v2.sqlite"
+    )
+    assert canary["Service"]["ExecStart"] == (
+        "/usr/local/bin/newsbot generate-codex-once "
+        "--config /etc/newsbot/config.toml --db /var/lib/newsbot-canary/newsbot.db"
+    )
+
+    from newsbot.cli import build_parser
+
+    parsed = build_parser().parse_args(shlex.split(production["Service"]["ExecStart"])[1:])
+    assert callable(parsed.handler)
 
 
 @pytest.mark.parametrize(("name", "contract"), SERVICES.items())

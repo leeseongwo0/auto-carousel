@@ -13,7 +13,7 @@ import os
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from .collectors.base import SourceObservation, UrlCandidate
 from .collectors.telethon import TelethonCollector
@@ -111,65 +111,39 @@ def run_fixture(args: argparse.Namespace) -> int:
     return 0
 
 
-def generate_codex(args: argparse.Namespace) -> int:
-    """Generate one approved V2 candidate through the fixed Codex runner and notify its exact draft."""
-    from types import SimpleNamespace
-
-    from .approval.telegram import TelegramApprovalAdapter
-    from .sheets.base import SheetDelivery
-    from .v2_live import (
-        CandidateNotificationPort,
-        DraftNotificationPort,
-        SheetsDeliveryPort,
-        TelegramV2Notifier,
-        V2CodexGenerator,
-        V2LiveWorkflow,
-    )
-    from .v2_runtime import AmbiguousRemoteEffect
-    from .v2_workflow import V2Candidate, V2Draft
-
-    def refuse_candidate(_candidate: V2Candidate, _token: str) -> str | bool:
-        raise AmbiguousRemoteEffect("unexpected V2 candidate notification transition")
-
-    def refuse_sheets(_draft: V2Draft) -> SheetDelivery | bool:
-        raise AmbiguousRemoteEffect("unexpected V2 Sheets transition")
-
-    with V2Workflow(args.db) as workflow:
-        adapter = TelegramApprovalAdapter(
-            os.environ["TELEGRAM_BOT_TOKEN"],
-            cast(Any, SimpleNamespace(chat_id=int(os.environ["NEWSBOT_APPROVER_CHAT_ID"]))),
-        )
-        notifier = TelegramV2Notifier(adapter)
-        live = V2LiveWorkflow(
-            workflow,
-            notify_candidate=cast(CandidateNotificationPort, refuse_candidate),
-            generate_draft=V2CodexGenerator(),
-            notify_draft=cast(DraftNotificationPort, notifier.draft),
-            deliver_sheets=cast(SheetsDeliveryPort, refuse_sheets),
-        )
-        result = live.run(args.candidate_id)
-        print(json.dumps({"id": result.id, "state": result.state}))
-    return 0
-
-
 def status(args: argparse.Namespace) -> int:
     with V2Workflow(args.db) as workflow:
         candidates = workflow.list_candidates()
-        print(json.dumps({"candidates": [asdict(candidate) for candidate in candidates]}, ensure_ascii=False))
-    return 0
-
-
-def approve_candidate(args: argparse.Namespace) -> int:
-    with V2Workflow(args.db) as workflow:
-        candidate = workflow.approve_candidate(args.candidate_id)
-        print(json.dumps({"id": candidate.id, "state": candidate.state}))
-    return 0
-
-
-def create_draft(args: argparse.Namespace) -> int:
-    with V2Workflow(args.db) as workflow:
-        draft = workflow.create_draft(args.candidate_id, args.content)
-        print(json.dumps({"id": draft.id, "candidate_id": draft.candidate_id, "state": draft.state}))
+        codex = []
+        for candidate in candidates:
+            request = workflow.get_codex_request(candidate.id)
+            if request is None:
+                continue
+            codex.append(
+                {
+                    "candidate_id": candidate.id,
+                    "request_digest": request.digest,
+                    "status": request.status,
+                    "output_digest": request.output_digest,
+                    "attempts": [
+                        {
+                            "number": attempt.number,
+                            "status": attempt.status,
+                            "error_code": attempt.error_code,
+                        }
+                        for attempt in workflow.list_codex_attempts(candidate.id)
+                    ],
+                }
+            )
+        print(
+            json.dumps(
+                {
+                    "candidates": [asdict(candidate) for candidate in candidates],
+                    "codex": codex,
+                },
+                ensure_ascii=False,
+            )
+        )
     return 0
 
 
@@ -214,13 +188,6 @@ def deliver_google_sheets(args: argparse.Namespace) -> int:
     return 0
 
 
-def approve_draft(args: argparse.Namespace) -> int:
-    with V2Workflow(args.db) as workflow:
-        draft = workflow.approve_draft(args.draft_id)
-        print(json.dumps({"id": draft.id, "state": draft.state}))
-    return 0
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="newsbot-v2")
     parser.add_argument("--db", type=Path, required=True)
@@ -237,29 +204,12 @@ def build_parser() -> argparse.ArgumentParser:
     live.add_argument("--limit", type=int, choices=range(1, 501), default=100)
     live.set_defaults(handler=collect_live)
 
-    codex = commands.add_parser("generate-codex", help="generate and notify one approved V2 candidate")
-    codex.add_argument("candidate_id")
-    codex.set_defaults(handler=generate_codex)
-
     fixture = commands.add_parser("collect-fixture")
     fixture.add_argument("--fixture", type=Path, required=True)
     fixture.set_defaults(handler=collect_fixture)
 
     view = commands.add_parser("status")
     view.set_defaults(handler=status)
-
-    candidate = commands.add_parser("approve-candidate")
-    candidate.add_argument("candidate_id")
-    candidate.set_defaults(handler=approve_candidate)
-
-    draft = commands.add_parser("create-draft")
-    draft.add_argument("candidate_id")
-    draft.add_argument("content")
-    draft.set_defaults(handler=create_draft)
-
-    approve = commands.add_parser("approve-draft")
-    approve.add_argument("draft_id")
-    approve.set_defaults(handler=approve_draft)
 
     sheets = commands.add_parser("deliver-google-sheets", help="deliver one second-approved V2 draft")
     sheets.add_argument("draft_id")

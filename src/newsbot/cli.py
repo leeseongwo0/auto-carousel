@@ -813,10 +813,9 @@ def _attest_codex_activation() -> str:
 def generate_codex_once(args: argparse.Namespace) -> int:
     """Systemd-only exact Codex activation; no user-controlled provider settings."""
     unit = _attest_codex_activation()
-    expected_db = {
-        "newsbot-generate-codex.service": Path("/var/lib/newsbot/newsbot.db"),
-        "newsbot-generate-codex-canary.service": Path("/var/lib/newsbot-canary/newsbot.db"),
-    }[unit]
+    if unit != "newsbot-generate-codex-canary.service":
+        raise ConfigError("legacy Codex generation is canary-only")
+    expected_db = Path("/var/lib/newsbot-canary/newsbot.db")
     if args.config != Path("/etc/newsbot/config.toml") or _database(args) != expected_db:
         raise ConfigError("Codex service paths are fixed")
     validate_capabilities(Capability.GENERATE_CODEX)
@@ -829,6 +828,27 @@ def generate_codex_once(args: argparse.Namespace) -> int:
             return 0
         result = asyncio.run(pipeline.generate_codex_job_exact(job_id))
     _print({"status": "no_op" if result is None else "pending_review"})
+    return 0
+
+
+def generate_codex_v2_once(args: argparse.Namespace) -> int:
+    """Systemd-only V2 Codex worker with durable request and attempt receipts."""
+    unit = _attest_codex_activation()
+    database = _database(args)
+    if unit != "newsbot-generate-codex.service" or database != Path("/var/lib/newsbot-v2/newsbot-v2.sqlite"):
+        raise ConfigError("V2 Codex service path and unit are fixed")
+    validate_capabilities(Capability.GENERATE_CODEX)
+
+    from .v2_codex import V2CodexWorker
+    from .v2_workflow import V2Workflow
+
+    with V2Workflow(database) as workflow:
+        interrupted = workflow.reconcile_interrupted_codex_requests()
+        if interrupted:
+            _print({"manual_review": interrupted, "status": "interrupted"})
+            return 0
+        draft = asyncio.run(V2CodexWorker(workflow).generate_next())
+    _print({"status": "no_job" if draft is None else "pending_review"})
     return 0
 
 
@@ -1238,6 +1258,46 @@ def _settle_v2_callback_update(update: dict[str, Any], token: str) -> str | None
         return None
     _entity_id, stage = settled
     return f"v2_{stage}_approved"
+
+
+def _notify_v2_draft_once(adapter: Any) -> str | None:
+    database = os.environ.get("NEWSBOT_V2_DATABASE", "").strip()
+    if not database:
+        return None
+
+    from .sheets.base import SheetDelivery
+    from .v2_live import (
+        CandidateNotificationPort,
+        DraftNotificationPort,
+        GenerationPort,
+        SheetsDeliveryPort,
+        TelegramV2Notifier,
+        V2LiveWorkflow,
+    )
+    from .v2_runtime import AmbiguousRemoteEffect
+    from .v2_workflow import V2Candidate, V2Draft, V2Workflow
+
+    def refuse_candidate(_candidate: V2Candidate, _token: str) -> str | bool:
+        raise AmbiguousRemoteEffect("unexpected V2 candidate notification transition")
+
+    def refuse_generation(_candidate: V2Candidate) -> str:
+        raise AmbiguousRemoteEffect("unexpected V2 generation transition")
+
+    def refuse_sheets(_draft: V2Draft) -> SheetDelivery | bool:
+        raise AmbiguousRemoteEffect("unexpected V2 Sheets transition")
+
+    with V2Workflow(Path(database)) as workflow:
+        draft = workflow.next_draft_pending_notification()
+        if draft is None:
+            return None
+        live = V2LiveWorkflow(
+            workflow,
+            notify_candidate=cast(CandidateNotificationPort, refuse_candidate),
+            generate_draft=cast(GenerationPort, refuse_generation),
+            notify_draft=cast(DraftNotificationPort, TelegramV2Notifier(adapter).draft),
+            deliver_sheets=cast(SheetsDeliveryPort, refuse_sheets),
+        )
+        return str(live.run(draft.candidate_id).state)
 
 
 def _poll_approvals_unlocked(args: argparse.Namespace) -> int:
@@ -2370,8 +2430,10 @@ def telegram_tick(args: argparse.Namespace) -> int:
             now=datetime.now(UTC),
             lease_seconds=int(getattr(args, "lease_seconds", 90)),
         )
+        v2_notification: str | None = None
         try:
             authority.seal_noon_window(config, now=lambda: datetime.now(UTC))
+            v2_notification = _notify_v2_draft_once(adapter)
         finally:
             authority.release_lease(admission, now=datetime.now(UTC), outcome="done")
         poll = authority.acquire_lease(
@@ -2380,7 +2442,7 @@ def telegram_tick(args: argparse.Namespace) -> int:
             lease_seconds=int(getattr(args, "lease_seconds", 90)),
         )
         poll_outcome = "failed"
-        handled = 0
+        handled = int(v2_notification is not None)
         try:
             response = adapter._request(
                 "getUpdates",
@@ -2721,8 +2783,18 @@ def build_parser() -> argparse.ArgumentParser:
     generate.set_defaults(handler=generate_pending)
     codex_once = commands.add_parser("generate-codex-once", help="run one attested exact Codex generation job")
     codex_once.add_argument("--config", type=Path, default=Path("/etc/newsbot/config.toml"))
-    codex_once.add_argument("--db", type=Path, default=Path("/var/lib/newsbot/newsbot.db"))
+    codex_once.add_argument("--db", type=Path, default=Path("/var/lib/newsbot-canary/newsbot.db"))
     codex_once.set_defaults(handler=generate_codex_once)
+    codex_v2_once = commands.add_parser(
+        "generate-codex-v2-once",
+        help="run one attested V2 Codex generation job",
+    )
+    codex_v2_once.add_argument(
+        "--db",
+        type=Path,
+        default=Path("/var/lib/newsbot-v2/newsbot-v2.sqlite"),
+    )
+    codex_v2_once.set_defaults(handler=generate_codex_v2_once)
     provider_pause = commands.add_parser("codex-provider-pause")
     provider_pause.add_argument("--db", type=Path)
     provider_pause.add_argument("--actor-id", type=int, required=True)
