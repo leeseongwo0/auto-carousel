@@ -8,7 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from newsbot.ai.structured_copy import RESPONSE_SCHEMA, SYSTEM_INSTRUCTION
+from newsbot.ai.structured_copy import FEW_SHOT_EXAMPLES, RESPONSE_SCHEMA, SYSTEM_INSTRUCTION, draft_from_mapping
+from newsbot.copywriting import validate_copy
 
 
 @pytest.fixture
@@ -97,6 +98,34 @@ def test_bundled_output_schema_matches_runtime_contract() -> None:
     assert "exact pair from the same supplied evidence" in SYSTEM_INSTRUCTION
     assert "formal polite 합니다체" in SYSTEM_INSTRUCTION
     assert "one through five hashtags" in SYSTEM_INSTRUCTION
+
+
+def test_bundled_few_shot_examples_are_valid_and_prompted_as_style_only() -> None:
+    assert {example["example_id"] for example in FEW_SHOT_EXAMPLES} == {
+        "ai_product_claude_37",
+        "blockchain_upgrade_pectra",
+        "blockchain_regulation_genius_act",
+        "ai_funding_openai",
+        "blockchain_security_bybit",
+    }
+    for example in FEW_SHOT_EXAMPLES:
+        evidence = example["input_evidence"]
+        expected = example["expected_output"]
+        assert isinstance(evidence, list)
+        allowed_sources = {
+            item["id"]: item["source_version_id"]
+            for item in evidence
+            if isinstance(item, dict)
+            and isinstance(item.get("id"), str)
+            and isinstance(item.get("source_version_id"), int)
+        }
+        assert len(allowed_sources) == len(evidence)
+        validate_copy(draft_from_mapping(expected), allowed_claim_sources=allowed_sources)
+
+    compact_examples = json.dumps(FEW_SHOT_EXAMPLES, ensure_ascii=False, separators=(",", ":"))
+    assert compact_examples in SYSTEM_INSTRUCTION
+    assert "only as style and structure templates" in SYSTEM_INSTRUCTION
+    assert "current evidence is the sole factual authority" in SYSTEM_INSTRUCTION
 
 
 def test_attest_dir_accepts_fixed_runner_group_only(runner: object, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1,0 +1,121 @@
+[
+  {
+    "example_id": "ai_product_claude_37",
+    "article_type": "product_launch",
+    "keywords": ["Claude", "Anthropic", "모델 출시", "확장 사고", "코딩 에이전트", "AI 제품"],
+    "input_evidence": [
+      {"id": "example_claude_1", "source_version_id": 1, "evidence": "Anthropic은 2025년 2월 24일 Claude 3.7 Sonnet을 공개했다. Claude 3.7 Sonnet은 일반 응답과 확장 사고를 한 모델에서 제공한다."},
+      {"id": "example_claude_2", "source_version_id": 1, "evidence": "API 사용자는 모델의 사고에 사용할 토큰 예산을 지정할 수 있다. 최대 출력 한도는 128K 토큰이다."},
+      {"id": "example_claude_3", "source_version_id": 1, "evidence": "Anthropic은 터미널 기반 에이전틱 코딩 도구 Claude Code를 연구 프리뷰로 함께 공개했다. Claude Code는 코드 탐색, 수정, 테스트 실행, GitHub 커밋과 푸시를 지원한다."}
+    ],
+    "expected_output": {
+      "draft": true,
+      "source_reported": true,
+      "category": "AI",
+      "cover": {"title": "빠른 답변과 깊은 추론을 한 모델에", "subtitle": "Anthropic, Claude 3.7 Sonnet 공개", "factual_units": [{"text": "Anthropic은 Claude 3.7 Sonnet을 공개했습니다.", "references": [{"claim_id": "example_claude_1", "source_version_id": 1}]}]},
+      "bodies": [
+        {"subtitle": "한 모델, 두 가지 사고 방식", "body": "Claude 3.7 Sonnet은 일반 응답과 확장 사고를 한 모델에서 제공합니다. 사용자는 빠른 답변이 필요할 때는 일반 응답을, 복잡한 문제에는 더 깊은 추론을 활용할 수 있습니다.", "factual_units": [{"text": "Claude 3.7 Sonnet은 일반 응답과 확장 사고를 한 모델에서 제공합니다.", "references": [{"claim_id": "example_claude_1", "source_version_id": 1}]}]},
+        {"subtitle": "개발자가 정하는 사고 예산", "body": "API에서는 모델이 사고에 사용할 토큰 예산을 지정할 수 있습니다. 최대 128K 출력 한도 안에서 작업에 필요한 추론량을 조절할 수 있습니다.", "factual_units": [{"text": "API 사용자는 사고 토큰 예산을 지정할 수 있으며 최대 출력 한도는 128K 토큰입니다.", "references": [{"claim_id": "example_claude_2", "source_version_id": 1}]}]},
+        {"subtitle": "Claude Code도 함께 공개", "body": "Anthropic은 터미널 기반 코딩 도구 Claude Code도 연구 프리뷰로 공개했습니다. 코드를 탐색·수정하고 테스트를 실행하며 GitHub 커밋과 푸시까지 지원합니다.", "factual_units": [{"text": "Anthropic은 Claude Code를 연구 프리뷰로 공개했습니다.", "references": [{"claim_id": "example_claude_3", "source_version_id": 1}]}]}
+      ],
+      "caption": {"hook": "하나의 모델이 빠르게 답할지, 더 깊게 추론할지 조절할 수 있게 됐습니다.", "context": "Anthropic은 2025년 2월 24일 Claude 3.7 Sonnet과 Claude Code를 공개했습니다.", "details": "Claude 3.7 Sonnet은 일반 응답과 확장 사고를 함께 제공하며, API 사용자는 사고 토큰 예산을 지정할 수 있습니다. Claude Code는 코드 탐색부터 수정, 테스트와 GitHub 작업까지 지원합니다.", "implications": "AI 모델의 추론량을 작업에 따라 조절하고 이를 실제 개발 워크플로에 연결한 제품 출시입니다.", "questions": "빠른 응답과 깊은 추론 중 어떤 상황에 더 많은 비용을 사용할 것인가요?", "hashtags": ["#AI", "#Claude", "#Anthropic", "#ClaudeCode"]}
+    }
+  },
+  {
+    "example_id": "blockchain_upgrade_pectra",
+    "article_type": "protocol_upgrade",
+    "keywords": ["Ethereum", "Pectra", "EIP", "메인넷 업그레이드", "지갑", "스테이킹", "롤업"],
+    "input_evidence": [
+      {"id": "example_pectra_1", "source_version_id": 1, "evidence": "Ethereum Pectra 업그레이드는 2025년 5월 7일 메인넷에 적용됐다."},
+      {"id": "example_pectra_2", "source_version_id": 1, "evidence": "EIP-7702는 일반 계정이 스마트컨트랙트 기능을 사용하도록 확장한다. 거래 묶음 처리와 가스비 대납 같은 기능을 지원할 수 있다."},
+      {"id": "example_pectra_3", "source_version_id": 1, "evidence": "EIP-7251은 검증자의 최대 유효 잔액을 32 ETH에서 2,048 ETH로 높인다."},
+      {"id": "example_pectra_4", "source_version_id": 1, "evidence": "EIP-7691은 블록당 목표 블롭 수를 3개에서 6개로, 최대 블롭 수를 6개에서 9개로 늘린다."},
+      {"id": "example_pectra_5", "source_version_id": 1, "evidence": "Pectra 적용 뒤에도 기존 ETH를 새로운 토큰으로 교환하거나 업그레이드할 필요가 없다."}
+    ],
+    "expected_output": {
+      "draft": true,
+      "source_reported": true,
+      "category": "Blockchain",
+      "cover": {"title": "이더리움 지갑과 스테이킹이 함께 바뀌었다", "subtitle": "Pectra, 2025년 5월 메인넷 적용", "factual_units": [{"text": "Ethereum Pectra 업그레이드는 2025년 5월 7일 메인넷에 적용됐습니다.", "references": [{"claim_id": "example_pectra_1", "source_version_id": 1}]}]},
+      "bodies": [
+        {"subtitle": "일반 지갑도 프로그래밍 가능하게", "body": "EIP-7702는 일반 계정이 스마트컨트랙트 기능을 사용하도록 확장합니다. 이를 통해 거래 묶음 처리와 가스비 대납 같은 프로그래머블 지갑 기능을 지원할 수 있습니다.", "factual_units": [{"text": "EIP-7702는 일반 계정이 스마트컨트랙트 기능을 사용하도록 확장합니다.", "references": [{"claim_id": "example_pectra_2", "source_version_id": 1}]}]},
+        {"subtitle": "검증자 한도 32→2,048 ETH", "body": "EIP-7251은 검증자의 최대 유효 잔액을 32 ETH에서 2,048 ETH로 높였습니다. 여러 검증자를 통합해 운영할 수 있는 기반을 마련한 변화입니다.", "factual_units": [{"text": "검증자의 최대 유효 잔액이 32 ETH에서 2,048 ETH로 높아졌습니다.", "references": [{"claim_id": "example_pectra_3", "source_version_id": 1}]}]},
+        {"subtitle": "롤업용 블롭 처리량 확대", "body": "EIP-7691은 블록당 목표 블롭 수를 3개에서 6개로, 최대치를 6개에서 9개로 늘렸습니다. 롤업이 사용할 수 있는 데이터 처리 용량이 확대됩니다.", "factual_units": [{"text": "목표 블롭 수는 3개에서 6개로, 최대 블롭 수는 6개에서 9개로 증가했습니다.", "references": [{"claim_id": "example_pectra_4", "source_version_id": 1}]}]},
+        {"subtitle": "보유 ETH는 바꿀 필요 없음", "body": "Pectra 적용 뒤에도 기존 ETH를 새로운 토큰으로 교환하거나 별도로 업그레이드할 필요는 없습니다.", "factual_units": [{"text": "기존 ETH 보유자는 토큰을 교환하거나 업그레이드할 필요가 없습니다.", "references": [{"claim_id": "example_pectra_5", "source_version_id": 1}]}]}
+      ],
+      "caption": {"hook": "Pectra는 사용자 지갑, 검증자 운영, 롤업 용량을 함께 변경한 이더리움 업그레이드입니다.", "context": "Ethereum Pectra는 2025년 5월 7일 메인넷에 적용됐습니다.", "details": "EIP-7702는 일반 계정에 프로그래머블 기능을 추가하고, EIP-7251은 검증자 최대 유효 잔액을 2,048 ETH로 높였습니다. EIP-7691은 블롭 목표와 최대치를 확대했습니다.", "implications": "사용자 지갑 기능과 검증자 운영, 롤업 데이터 처리량을 하나의 업그레이드에서 함께 다뤘습니다.", "questions": "Pectra 변화 중 지갑, 스테이킹, 롤업 가운데 무엇이 가장 중요하다고 보시나요?", "hashtags": ["#Blockchain", "#Ethereum", "#Pectra", "#EIP7702"]}
+    }
+  },
+  {
+    "example_id": "blockchain_regulation_genius_act",
+    "article_type": "regulation",
+    "keywords": ["스테이블코인", "법안", "규제", "GENIUS Act", "준비금", "발행사"],
+    "input_evidence": [
+      {"id": "example_genius_1", "source_version_id": 1, "evidence": "GENIUS Act는 2025년 7월 18일 미국에서 법률로 확정됐다."},
+      {"id": "example_genius_2", "source_version_id": 1, "evidence": "미국에서 결제용 스테이블코인을 발행하려면 허가된 발행사 지위를 갖춰야 한다."},
+      {"id": "example_genius_3", "source_version_id": 1, "evidence": "발행사는 미국 달러나 단기 국채 등 허용된 유동 자산으로 스테이블코인을 1대1 뒷받침해야 한다. 준비금 구성과 상환 정책은 매달 공개해야 한다."},
+      {"id": "example_genius_4", "source_version_id": 1, "evidence": "허가된 결제용 스테이블코인은 연방 증권법상 증권으로 보지 않는다. 발행사는 은행비밀법 적용을 받는다."},
+      {"id": "example_genius_5", "source_version_id": 1, "evidence": "법은 제정 18개월 뒤 또는 연방 규제기관의 최종 규칙 공표 120일 뒤 중 더 이른 시점에 효력이 발생한다."}
+    ],
+    "expected_output": {
+      "draft": true,
+      "source_reported": true,
+      "category": "Blockchain",
+      "cover": {"title": "미국의 연방 스테이블코인 규칙", "subtitle": "GENIUS Act, 2025년 7월 법률 확정", "factual_units": [{"text": "GENIUS Act는 2025년 7월 18일 미국에서 법률로 확정됐습니다.", "references": [{"claim_id": "example_genius_1", "source_version_id": 1}]}]},
+      "bodies": [
+        {"subtitle": "허가받은 발행사만 시장 진입", "body": "미국에서 결제용 스테이블코인을 발행하려면 허가된 발행사 지위를 갖춰야 합니다.", "factual_units": [{"text": "결제용 스테이블코인은 허가된 발행사만 발행할 수 있습니다.", "references": [{"claim_id": "example_genius_2", "source_version_id": 1}]}]},
+        {"subtitle": "준비금은 1대1, 매달 공개", "body": "발행사는 미국 달러나 단기 국채 등 허용된 유동 자산으로 스테이블코인을 1대1 뒷받침해야 합니다. 준비금 구성과 상환 정책도 매달 공개해야 합니다.", "factual_units": [{"text": "발행사는 1대1 준비금을 유지하고 준비금 구성과 상환 정책을 매달 공개해야 합니다.", "references": [{"claim_id": "example_genius_3", "source_version_id": 1}]}]},
+        {"subtitle": "증권이 아닌 지급 수단 규율", "body": "허가된 결제용 스테이블코인은 연방 증권법상 증권으로 보지 않습니다. 다만 발행사는 은행비밀법 적용을 받습니다.", "factual_units": [{"text": "허가된 결제용 스테이블코인은 증권으로 보지 않으며 발행사는 은행비밀법 적용을 받습니다.", "references": [{"claim_id": "example_genius_4", "source_version_id": 1}]}]},
+        {"subtitle": "시행은 즉시가 아니다", "body": "법은 제정 18개월 뒤 또는 연방 규제기관의 최종 규칙 공표 120일 뒤 중 더 이른 시점에 효력이 발생합니다.", "factual_units": [{"text": "법률 확정일과 실제 효력 발생일은 동일하지 않습니다.", "references": [{"claim_id": "example_genius_5", "source_version_id": 1}]}]}
+      ],
+      "caption": {"hook": "미국 스테이블코인 시장에 연방 차원의 공통 규칙이 마련됐습니다.", "context": "GENIUS Act는 2025년 7월 18일 법률로 확정됐습니다.", "details": "허가된 발행사만 결제용 스테이블코인을 발행할 수 있으며, 1대1 준비금과 월별 공개가 요구됩니다. 허가된 결제용 스테이블코인은 증권으로 보지 않지만 발행사는 은행비밀법 적용을 받습니다.", "implications": "규제의 초점이 토큰 명칭보다 발행사의 준비금, 상환 정책, 공시와 감독에 놓였습니다.", "questions": "명확한 규칙은 스테이블코인 확산을 촉진할까요, 발행사의 진입 장벽을 높일까요?", "hashtags": ["#Blockchain", "#Stablecoin", "#GENIUSAct", "#CryptoRegulation"]}
+    }
+  },
+  {
+    "example_id": "ai_funding_openai",
+    "article_type": "funding",
+    "keywords": ["OpenAI", "투자", "자금 조달", "기업가치", "소프트뱅크", "AI 인프라"],
+    "input_evidence": [
+      {"id": "example_openai_funding_1", "source_version_id": 1, "evidence": "OpenAI는 2025년 3월 31일 3,000억 달러의 투자 후 기업가치로 400억 달러를 조달한다고 발표했다."},
+      {"id": "example_openai_funding_2", "source_version_id": 1, "evidence": "OpenAI는 조달 자금을 AI 연구 확대와 컴퓨팅 인프라 확장에 사용한다고 밝혔다. 발표 당시 ChatGPT 주간 이용자는 5억 명이라고 설명했다."},
+      {"id": "example_openai_funding_3", "source_version_id": 1, "evidence": "OpenAI는 이번 자금 조달에서 소프트뱅크그룹과 협력한다고 발표했다."}
+    ],
+    "expected_output": {
+      "draft": true,
+      "source_reported": true,
+      "category": "AI",
+      "cover": {"title": "OpenAI, 400억 달러 투자 유치", "subtitle": "3,000억 달러 기업가치로 인프라 확장", "factual_units": [{"text": "OpenAI는 3,000억 달러의 투자 후 기업가치로 400억 달러를 조달한다고 발표했습니다.", "references": [{"claim_id": "example_openai_funding_1", "source_version_id": 1}]}]},
+      "bodies": [
+        {"subtitle": "자금의 목적은 연구와 컴퓨트", "body": "OpenAI는 조달 자금을 AI 연구 확대와 컴퓨팅 인프라 확장에 사용한다고 밝혔습니다. 발표 당시 ChatGPT의 주간 이용자는 5억 명이라고 설명했습니다.", "factual_units": [{"text": "OpenAI는 자금을 AI 연구와 컴퓨팅 인프라 확장에 사용한다고 밝혔습니다.", "references": [{"claim_id": "example_openai_funding_2", "source_version_id": 1}]}]},
+        {"subtitle": "파트너는 소프트뱅크", "body": "OpenAI는 이번 자금 조달에서 소프트뱅크그룹과 협력한다고 발표했습니다.", "factual_units": [{"text": "OpenAI는 자금 조달 파트너로 소프트뱅크그룹을 발표했습니다.", "references": [{"claim_id": "example_openai_funding_3", "source_version_id": 1}]}]}
+      ],
+      "caption": {"hook": "OpenAI가 400억 달러 규모의 자금 조달 계획을 발표했습니다.", "context": "OpenAI는 2025년 3월 31일 3,000억 달러의 투자 후 기업가치로 자금을 조달한다고 밝혔습니다.", "details": "회사는 자금 사용처로 AI 연구와 컴퓨팅 인프라 확장을 제시했고, 소프트뱅크그룹과의 협력을 발표했습니다. 발표 당시 ChatGPT 주간 이용자는 5억 명이었습니다.", "implications": "대규모 AI 서비스 운영에서 모델 연구와 컴퓨팅 인프라 확보가 함께 추진되고 있음을 보여주는 투자 발표입니다.", "questions": "AI 기업의 경쟁력을 가르는 요소는 모델 성능과 컴퓨팅 인프라 중 무엇이라고 보시나요?", "hashtags": ["#AI", "#OpenAI", "#SoftBank", "#AIFunding"]}
+    }
+  },
+  {
+    "example_id": "blockchain_security_bybit",
+    "article_type": "security_incident",
+    "keywords": ["Bybit", "해킹", "탈취", "지갑 침해", "멀티시그", "북한", "보안 사고"],
+    "input_evidence": [
+      {"id": "example_bybit_1", "source_version_id": 1, "evidence": "2025년 2월 21일 Bybit의 Ethereum 콜드월렛 한 개에서 약 14억6,000만 달러의 자산이 유출됐다. 다른 콜드월렛은 영향을 받지 않았다."},
+      {"id": "example_bybit_2", "source_version_id": 1, "evidence": "Bybit는 공격자가 Safe 멀티시그 지갑 화면에서 실제 거래 내용을 가려 서명 과정을 속였다고 설명했다. 승인 뒤 콜드월렛의 스마트컨트랙트 로직이 변경됐다."},
+      {"id": "example_bybit_3", "source_version_id": 1, "evidence": "FBI는 공격 주체를 북한과 연계된 TraderTraitor로 지목했다."},
+      {"id": "example_bybit_4", "source_version_id": 1, "evidence": "FBI는 탈취 자산 일부가 비트코인과 다른 가상자산으로 전환돼 여러 블록체인의 수천 개 주소로 분산됐다고 밝혔다."},
+      {"id": "example_bybit_5", "source_version_id": 1, "evidence": "Bybit는 사건 발생 72시간 안에 대상 자산의 준비금 비율을 1대1로 복구했다고 발표했다."}
+    ],
+    "expected_output": {
+      "draft": true,
+      "source_reported": true,
+      "category": "Blockchain",
+      "cover": {"title": "바이비트에서 14억6,000만 달러 유출", "subtitle": "FBI, 북한 연계 조직 소행 지목", "factual_units": [{"text": "Bybit의 Ethereum 콜드월렛 한 개에서 약 14억6,000만 달러의 자산이 유출됐습니다.", "references": [{"claim_id": "example_bybit_1", "source_version_id": 1}]}]},
+      "bodies": [
+        {"subtitle": "콜드월렛 하나가 뚫렸다", "body": "Bybit는 Ethereum 콜드월렛 한 개에서 약 14억6,000만 달러의 자산이 유출됐다고 설명했습니다. 다른 콜드월렛은 영향을 받지 않았다고 밝혔습니다.", "factual_units": [{"text": "Ethereum 콜드월렛 한 개가 침해됐으며 다른 콜드월렛은 영향을 받지 않았습니다.", "references": [{"claim_id": "example_bybit_1", "source_version_id": 1}]}]},
+        {"subtitle": "거래 화면을 속인 공격", "body": "Bybit는 공격자가 Safe 멀티시그 지갑 화면에서 실제 거래 내용을 가려 서명 과정을 속였다고 설명했습니다. 승인 뒤 콜드월렛의 스마트컨트랙트 로직이 변경됐습니다.", "factual_units": [{"text": "공격자는 멀티시그 서명 화면을 위장했고 승인 뒤 지갑 로직이 변경됐습니다.", "references": [{"claim_id": "example_bybit_2", "source_version_id": 1}]}]},
+        {"subtitle": "FBI는 북한 연계를 지목", "body": "FBI는 공격 주체를 북한과 연계된 TraderTraitor로 지목했습니다.", "factual_units": [{"text": "FBI는 공격 주체를 TraderTraitor로 지목했습니다.", "references": [{"claim_id": "example_bybit_3", "source_version_id": 1}]}]},
+        {"subtitle": "자금은 여러 체인으로 분산", "body": "FBI에 따르면 탈취 자산 일부는 비트코인과 다른 가상자산으로 전환돼 여러 블록체인의 수천 개 주소로 분산됐습니다.", "factual_units": [{"text": "탈취 자산 일부는 여러 블록체인의 수천 개 주소로 분산됐습니다.", "references": [{"claim_id": "example_bybit_4", "source_version_id": 1}]}]},
+        {"subtitle": "72시간 내 준비금 복구", "body": "Bybit는 사건 발생 72시간 안에 대상 자산의 준비금 비율을 1대1로 복구했다고 발표했습니다.", "factual_units": [{"text": "Bybit는 72시간 안에 대상 자산의 준비금 비율을 1대1로 복구했다고 발표했습니다.", "references": [{"claim_id": "example_bybit_5", "source_version_id": 1}]}]}
+      ],
+      "caption": {"hook": "Bybit의 콜드월렛 한 개에서 약 14억6,000만 달러의 가상자산이 유출됐습니다.", "context": "사건은 2025년 2월 21일 Bybit의 Ethereum 콜드월렛에서 발생했습니다.", "details": "Bybit는 멀티시그 서명 화면을 위장한 공격으로 지갑 로직이 변경됐다고 설명했습니다. FBI는 북한과 연계된 TraderTraitor를 공격 주체로 지목했습니다.", "implications": "콜드월렛 사용 여부뿐 아니라 서명 화면과 승인 절차, 스마트컨트랙트 변경 권한까지 함께 관리해야 한다는 보안 사례입니다.", "questions": "거래소를 선택할 때 준비금과 지갑 운영 보안 중 무엇을 먼저 확인하시나요?", "hashtags": ["#Blockchain", "#Bybit", "#CryptoSecurity", "#WalletSecurity"]}
+    }
+  }
+]
