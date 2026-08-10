@@ -55,20 +55,46 @@ research counterpart with `the_block_crypto`. The private VPS profile must make
 the same one-for-one replacement before a cutover. Keep the legacy timers and
 legacy database read-only while validating V2.
 
-Before switching production traffic, run exclusion fixtures, a complete
-collection-to-Sheets approval test, and three consecutive clean runs. A V2
-cutover is a forward switch; rollback means switching back to the previously
-verified runtime without editing either database.
+Before switching production traffic, run exclusion fixtures and a complete
+collection-to-Sheets approval test. During the stopped-owner cutover, seed the
+V2 Telegram cursor from the final legacy cursor and run the installed V2
+collection, Telegram, Codex, and Sheets services successfully three consecutive
+times. Only then enable their timers. Rollback means stopping all V2 timers
+before restoring the previously verified legacy units; never run both Telegram
+poll owners or edit either database.
 
 The operational surface always requires the explicit V2 database path:
 
 ```bash
-newsbot-v2 --db /var/lib/newsbot-v2/newsbot-v2.sqlite status
-newsbot-v2 --db /var/lib/newsbot-v2/newsbot-v2.sqlite collect-fixture --fixture <fixture.json>
-newsbot-v2 --db /var/lib/newsbot-v2/newsbot-v2.sqlite collect-live --lookback-hours 24 --limit 20
+/usr/local/bin/newsbot v2-status --db /var/lib/newsbot-v2/newsbot-v2.sqlite
+newsbot-v2 --db ./fixture-v2.sqlite collect-fixture --fixture <fixture.json>
+/usr/local/bin/newsbot v2-collect-live --db /var/lib/newsbot-v2/newsbot-v2.sqlite --lookback-hours 24 --limit 20
 sudo systemctl start newsbot-generate-codex.service
-newsbot-v2 --db /var/lib/newsbot-v2/newsbot-v2.sqlite deliver-google-sheets <draft-id> --deadline 120
+/usr/local/bin/newsbot v2-telegram-tick --db /var/lib/newsbot-v2/newsbot-v2.sqlite --deadline 60 --timeout 10
+/usr/local/bin/newsbot v2-deliver-google-sheets-next --db /var/lib/newsbot-v2/newsbot-v2.sqlite --deadline 90
 ```
+
+The final cursor handoff and service switch are performed while every legacy
+worker is inactive:
+
+```bash
+legacy_offset="$(sqlite3 -readonly /var/lib/newsbot/newsbot.db \
+  "SELECT next_offset FROM telegram_update_cursors WHERE stream='approval';")"
+/usr/local/bin/newsbot v2-seed-telegram-cursor \
+  --db /var/lib/newsbot-v2/newsbot-v2.sqlite --next-offset "$legacy_offset"
+sudo install -o root -g root -m 0644 deploy/systemd/newsbot-{collect,telegram,sheets}.service \
+  /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl start newsbot-collect.service
+sudo systemctl start newsbot-telegram.service
+sudo systemctl start newsbot-generate-codex.service
+sudo systemctl start newsbot-sheets.service
+```
+
+All four starts must complete cleanly in that order for three consecutive
+cycles. Enable the timers in approval-first order:
+`newsbot-telegram.timer`, `newsbot-sheets.timer`,
+`newsbot-generate-codex.timer`, then `newsbot-collect.timer`.
 
 `collect-live` uses the private `NEWSBOT_V2_TELETHON_*` variables and
 `NEWSBOT_V2_TELEGRAM_HANDLES`. Production generation is not a manual
@@ -81,14 +107,15 @@ and the `draft_pending_approval` transition commit atomically. An interrupted
 attempt enters `manual_review`; only busy, timeout, outer-timeout, and nonzero
 failures may use the one remaining identical-request attempt.
 
-The sole legacy Telegram poll owner sends one newly committed exact V2 draft
-and records its callback capability before polling. `deliver-google-sheets` is
-admitted only after the second exact-draft approval; it reads
-`GOOGLE_SERVICE_ACCOUNT_FILE` and `GOOGLE_SHEETS_SPREADSHEET_ID`, projects the
-immutable draft onto the frozen A:V schema, and uses the existing
-prepared-mutation idempotency marker. A confirmed receipt is completed locally
-after restart, while an ambiguous receipt enters `manual_review` without a
-resend. None of these commands infer or open the legacy database.
+The V2 Telegram worker is the sole Bot API poll owner after cutover. Its cursor
+is stored only in the V2 database; it sends at most one draft-or-candidate
+approval per tick, consumes only authorized V2 capabilities, and advances the
+cursor monotonically. `deliver-google-sheets-next` selects at most one
+second-approved draft, projects the immutable content onto the frozen A:V
+schema, and uses the existing prepared-mutation idempotency marker. A confirmed
+receipt is completed locally after restart, while an ambiguous receipt enters
+`manual_review` without a resend. The production collection, Telegram, Codex,
+and Sheets units do not infer or open the legacy database.
 
 ## Legacy VPS automation compatibility
 

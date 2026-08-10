@@ -4,7 +4,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from newsbot import cli as legacy_cli
 from newsbot import v2_cli
 from newsbot.approval.base import hash_callback_token
 from newsbot.collectors.base import SourceObservation, UrlCandidate
@@ -181,90 +180,6 @@ def test_live_collection_is_bounded(monkeypatch, tmp_path):
     assert [handle for handle, _kwargs in calls] == ["first", "second"]
     assert all(kwargs["limit"] == 7 for _handle, kwargs in calls)
     assert all(datetime.now(UTC) - kwargs["lower_bound"] < timedelta(hours=13) for _handle, kwargs in calls)
-
-
-def test_legacy_poll_owner_routes_authorized_v2_callback(monkeypatch, tmp_path):
-    db = tmp_path / "v2.sqlite"
-    token = "A" * 43
-    with V2Workflow(db) as workflow:
-        candidate = workflow.record_observation(observation())
-        assert candidate is not None
-        workflow.issue_callback(
-            hash_callback_token(token),
-            candidate.id,
-            "candidate",
-            (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
-        )
-
-    monkeypatch.setenv("NEWSBOT_V2_DATABASE", str(db))
-    monkeypatch.setenv("NEWSBOT_APPROVER_CHAT_ID", "100")
-    monkeypatch.setenv("NEWSBOT_APPROVER_USER_IDS", "200,201")
-    update = {
-        "callback_query": {
-            "data": token,
-            "message": {"chat": {"id": 100}},
-            "from": {"id": 200},
-        }
-    }
-    assert legacy_cli._settle_v2_callback_update(update, token) == "v2_candidate_approved"
-    assert legacy_cli._settle_v2_callback_update(update, token) is None
-    with V2Workflow(db) as workflow:
-        assert workflow.get_candidate(candidate.id).state == V2State.CANDIDATE_APPROVED
-
-
-def test_legacy_poll_owner_rejects_unauthorized_v2_callback(monkeypatch, tmp_path):
-    db = tmp_path / "v2.sqlite"
-    token = "B" * 43
-    with V2Workflow(db) as workflow:
-        candidate = workflow.record_observation(observation())
-        assert candidate is not None
-        workflow.issue_callback(
-            hash_callback_token(token),
-            candidate.id,
-            "candidate",
-            (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
-        )
-
-    monkeypatch.setenv("NEWSBOT_V2_DATABASE", str(db))
-    monkeypatch.setenv("NEWSBOT_APPROVER_CHAT_ID", "100")
-    monkeypatch.setenv("NEWSBOT_APPROVER_USER_IDS", "200")
-    update = {
-        "callback_query": {
-            "data": token,
-            "message": {"chat": {"id": 100}},
-            "from": {"id": 999},
-        }
-    }
-    assert legacy_cli._settle_v2_callback_update(update, token) is None
-    with V2Workflow(db) as workflow:
-        assert workflow.get_candidate(candidate.id).state == V2State.PENDING_CANDIDATE
-
-
-def test_telegram_tick_notifies_one_new_v2_draft_without_regeneration(monkeypatch, tmp_path):
-    db = tmp_path / "v2.sqlite"
-    with V2Workflow(db) as workflow:
-        candidate = workflow.record_observation(observation())
-        assert candidate is not None
-        workflow.approve_candidate(candidate.id)
-        draft = workflow.create_draft(candidate.id, exact_draft_content())
-
-    sent = []
-
-    class Adapter:
-        def send_message_once(self, text, *, markup, deadline):
-            sent.append((text, markup, deadline))
-            return SimpleNamespace(accepted=True, message_id=91, safe_code=None)
-
-    monkeypatch.setenv("NEWSBOT_V2_DATABASE", str(db))
-    assert legacy_cli._notify_v2_draft_once(Adapter()) == V2State.DRAFT_PENDING_APPROVAL
-    assert legacy_cli._notify_v2_draft_once(Adapter()) is None
-    assert len(sent) == 1
-    assert draft.id in sent[0][0]
-    with V2Workflow(db) as workflow:
-        receipt = workflow.remote_effect(draft.id, "draft_notification")
-        assert receipt is not None
-        assert receipt["status"] == "confirmed"
-        assert receipt["receipt_id"] == "91"
 
 
 class ScriptedSheetsAdapter:
@@ -509,3 +424,186 @@ def test_confirmed_sheets_receipt_finishes_local_transition_after_reopen(tmp_pat
         result = live.run(candidate.id)
         assert result.state == V2State.SHEET_DELIVERED
         assert sends == []
+
+
+def test_v2_telegram_tick_authorizes_callbacks_and_advances_cursor(monkeypatch, tmp_path):
+    db = tmp_path / "v2.sqlite"
+    token = "C" * 43
+    with V2Workflow(db) as workflow:
+        candidate = workflow.record_observation(observation())
+        assert candidate is not None
+        workflow.issue_callback(
+            hash_callback_token(token),
+            candidate.id,
+            "candidate",
+            (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+        )
+        workflow.handoff_telegram_cursor(40)
+
+    calls = []
+
+    class Adapter:
+        def __init__(self, *_args):
+            pass
+
+        def send_message_once(self, *_args, **_kwargs):
+            calls.append(("sendMessage", {}))
+            return SimpleNamespace(accepted=True, message_id=1, safe_code=None)
+
+        def _request(self, method, payload, **_kwargs):
+            calls.append((method, payload))
+            if method == "getUpdates":
+                return {
+                    "result": [
+                        {
+                            "update_id": 41,
+                            "callback_query": {
+                                "id": "callback-id",
+                                "data": token,
+                                "message": {"chat": {"id": 100}},
+                                "from": {"id": 200},
+                            },
+                        },
+                        {
+                            "update_id": 42,
+                            "callback_query": {
+                                "data": token,
+                                "message": {"chat": {"id": 100}},
+                                "from": {"id": 999},
+                            },
+                        },
+                    ]
+                }
+            return {"result": True}
+
+    monkeypatch.setattr(v2_cli, "TelegramApprovalAdapter", Adapter)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token")
+    monkeypatch.setenv("NEWSBOT_APPROVER_CHAT_ID", "100")
+    monkeypatch.setenv("NEWSBOT_APPROVER_USER_IDS", "200")
+    args = SimpleNamespace(db=db, deadline=5.0, timeout=0)
+    assert v2_cli.telegram_tick(args) == 0
+    assert [method for method, _payload in calls] == ["sendMessage", "getUpdates", "answerCallbackQuery"]
+    with V2Workflow(db) as workflow:
+        assert workflow.get_candidate(candidate.id).state == V2State.CANDIDATE_APPROVED
+        assert workflow.telegram_next_offset() == 43
+
+
+def test_v2_callback_settlement_rejects_unauthorized_and_duplicates(tmp_path):
+    token = "D" * 43
+    with V2Workflow(tmp_path / "v2.sqlite") as workflow:
+        candidate = workflow.record_observation(observation())
+        assert candidate is not None
+        workflow.issue_callback(
+            hash_callback_token(token),
+            candidate.id,
+            "candidate",
+            (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+        )
+        update = {
+            "callback_query": {
+                "data": token,
+                "message": {"chat": {"id": 100}},
+                "from": {"id": 200},
+            }
+        }
+        assert v2_cli._telegram_callback_status(workflow, update, chat_id=100, user_ids={999}) is None
+        assert (
+            v2_cli._telegram_callback_status(workflow, update, chat_id=100, user_ids={200}) == "v2_candidate_approved"
+        )
+        assert v2_cli._telegram_callback_status(workflow, update, chat_id=100, user_ids={200}) is None
+
+
+def test_v2_telegram_tick_prioritizes_draft_notifications(monkeypatch, tmp_path):
+    db = tmp_path / "v2.sqlite"
+    with V2Workflow(db) as workflow:
+        pending = workflow.record_observation(observation())
+        assert pending is not None
+        approved = workflow.record_observation(
+            SourceObservation(
+                channel_id="channel",
+                channel_handle="configured",
+                external_post_id="2",
+                published_at=datetime.now(UTC),
+                text=observation().text,
+                urls=(UrlCandidate("https://example.test/source-2"),),
+            )
+        )
+        assert approved is not None
+        workflow.approve_candidate(approved.id)
+        draft = workflow.create_draft(approved.id, exact_draft_content())
+        workflow.handoff_telegram_cursor(0)
+
+    selected = []
+
+    class Adapter:
+        def __init__(self, *_args):
+            pass
+
+        def _request(self, _method, _payload, **_kwargs):
+            return {"result": []}
+
+    class Live:
+        def __init__(self, _workflow, **_kwargs):
+            pass
+
+        def run(self, candidate_id):
+            selected.append(candidate_id)
+
+    monkeypatch.setattr(v2_cli, "TelegramApprovalAdapter", Adapter)
+    monkeypatch.setattr(v2_cli, "V2LiveWorkflow", Live)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token")
+    monkeypatch.setenv("NEWSBOT_APPROVER_CHAT_ID", "100")
+    monkeypatch.setenv("NEWSBOT_APPROVER_USER_IDS", "200")
+    assert v2_cli.telegram_tick(SimpleNamespace(db=db, deadline=5.0, timeout=0)) == 0
+    assert selected == [draft.candidate_id]
+    assert selected != [pending.id]
+
+
+def test_v2_telegram_tick_refuses_before_cursor_handoff(monkeypatch, tmp_path):
+    db = tmp_path / "v2.sqlite"
+    with V2Workflow(db) as workflow:
+        candidate = workflow.record_observation(observation())
+        assert candidate is not None
+
+    calls = []
+
+    class Adapter:
+        def __init__(self, *_args):
+            pass
+
+        def send_message_once(self, *_args, **_kwargs):
+            calls.append("send")
+            raise AssertionError("notification must not run")
+
+        def _request(self, *_args, **_kwargs):
+            calls.append("poll")
+            raise AssertionError("poll must not run")
+
+    monkeypatch.setattr(v2_cli, "TelegramApprovalAdapter", Adapter)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token")
+    monkeypatch.setenv("NEWSBOT_APPROVER_CHAT_ID", "100")
+    monkeypatch.setenv("NEWSBOT_APPROVER_USER_IDS", "200")
+    with pytest.raises(V2WorkflowError, match="handoff is required"):
+        v2_cli.telegram_tick(SimpleNamespace(db=db, deadline=5.0, timeout=0))
+    assert calls == []
+
+
+def test_deliver_google_sheets_next_reports_no_work(tmp_path, capsys):
+    assert v2_cli.deliver_google_sheets_next(SimpleNamespace(db=tmp_path / "v2.sqlite", deadline=120.0)) == 0
+    assert json.loads(capsys.readouterr().out) == {"status": "no_work"}
+
+
+def test_deliver_google_sheets_next_selects_one_approved_draft(monkeypatch, tmp_path):
+    db = tmp_path / "v2.sqlite"
+    with V2Workflow(db) as workflow:
+        _candidate, draft = approved_draft(workflow)
+
+    delivered = []
+
+    def deliver(workflow, selected, deadline):
+        delivered.append((selected.id, deadline))
+        return selected
+
+    monkeypatch.setattr(v2_cli, "_deliver_google_sheets_draft", deliver)
+    assert v2_cli.deliver_google_sheets_next(SimpleNamespace(db=db, deadline=12.0)) == 0
+    assert delivered == [(draft.id, 12.0)]

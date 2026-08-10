@@ -16,26 +16,24 @@ CODEX_UNIT_HASHES = {
 
 SERVICES = {
     "newsbot-sheets.service": {
-        "exec_start": "/usr/local/bin/newsbot sheets-deliver-pending-once --config /etc/newsbot/config.toml --db /var/lib/newsbot/newsbot.db --max-handoffs 1 --deadline-seconds 90 --lease-seconds 135 --sheet-lease-seconds 300",
+        "exec_start": "/usr/local/bin/newsbot v2-deliver-google-sheets-next --db /var/lib/newsbot-v2/newsbot-v2.sqlite --deadline 90",
         "deadline": 90,
         "timeout": 120,
-        "lease": 135,
-        "sheet_lease": 300,
         "memory": "768M",
+        "workdir": "/var/lib/newsbot-v2",
     },
     "newsbot-telegram.service": {
-        "exec_start": "/usr/local/bin/newsbot telegram-tick --config /etc/newsbot/config.toml --db /var/lib/newsbot/newsbot.db --poll-timeout 10 --max-updates 50 --max-notifications 1 --deadline-seconds 60 --lease-seconds 90",
+        "exec_start": "/usr/local/bin/newsbot v2-telegram-tick --db /var/lib/newsbot-v2/newsbot-v2.sqlite --deadline 60 --timeout 10",
         "deadline": 60,
         "timeout": 75,
-        "lease": 90,
         "memory": "512M",
+        "workdir": "/var/lib/newsbot-v2",
     },
     "newsbot-collect.service": {
-        "exec_start": "/usr/local/bin/newsbot automation-collect-once --config /etc/newsbot/config.toml --db /var/lib/newsbot/newsbot.db --lookback-hours 24 --page-size 50 --max-pages 2 --deadline-seconds 180 --lease-seconds 225",
-        "deadline": 180,
+        "exec_start": "/usr/local/bin/newsbot v2-collect-live --db /var/lib/newsbot-v2/newsbot-v2.sqlite --lookback-hours 24 --limit 100",
         "timeout": 210,
-        "lease": 225,
         "memory": "4G",
+        "workdir": "/var/lib/newsbot-v2",
     },
 }
 
@@ -119,7 +117,7 @@ def test_automation_services_have_exact_isolated_oneshot_contract(name: str, con
         "Type": "oneshot",
         "User": "newsbot",
         "Group": "newsbot",
-        "WorkingDirectory": "/var/lib/newsbot",
+        "WorkingDirectory": contract["workdir"],
         "EnvironmentFile": "/etc/newsbot/newsbot.env",
         "UMask": "0077",
         "NoNewPrivileges": "true",
@@ -134,12 +132,15 @@ def test_automation_services_have_exact_isolated_oneshot_contract(name: str, con
         "MemorySwapMax": "0",
         "CPUQuota": "100%",
     }
-    assert int(contract["deadline"]) < int(contract["timeout"]) < int(contract["lease"])
-    if "sheet_lease" in contract:
-        assert int(contract["lease"]) < int(contract["sheet_lease"])
+    if "deadline" in contract:
+        assert int(contract["deadline"]) < int(contract["timeout"])
 
     contents = path.read_text(encoding="utf-8")
-    from newsbot.cli import build_parser
+    executable = shlex.split(str(contract["exec_start"]))[0]
+    if executable.endswith("newsbot-v2"):
+        from newsbot.v2_cli import build_parser
+    else:
+        from newsbot.cli import build_parser
 
     argv = shlex.split(str(contract["exec_start"]))[1:]
     parsed = build_parser().parse_args(argv)

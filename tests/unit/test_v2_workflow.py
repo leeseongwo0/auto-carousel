@@ -176,3 +176,46 @@ def test_codex_success_is_atomic_with_draft_and_receipts(tmp_path):
         assert workflow.list_codex_attempts(candidate.id)[0].status == "succeeded"
         with pytest.raises(V2WorkflowError):
             workflow.commit_codex_success(attempt.id, output, hashlib.sha256(output).hexdigest())
+
+
+def test_telegram_cursor_handoff_merges_and_runtime_advances_monotonically(tmp_path):
+    with V2Workflow(tmp_path / "v2.sqlite") as workflow:
+        assert workflow.telegram_next_offset() is None
+        assert workflow.handoff_telegram_cursor(10) == 10
+        assert workflow.handoff_telegram_cursor(12) == 12
+        assert workflow.handoff_telegram_cursor(11) == 12
+        assert workflow.advance_telegram_cursor(9) == 12
+        assert workflow.advance_telegram_cursor(13) == 13
+        with pytest.raises(ValueError):
+            workflow.handoff_telegram_cursor(-1)
+
+    with (
+        V2Workflow(tmp_path / "unseeded.sqlite") as unseeded,
+        pytest.raises(V2WorkflowError, match="handoff is required"),
+    ):
+        unseeded.advance_telegram_cursor(1)
+
+
+def test_remote_effect_selectors_only_return_safe_retry_work(tmp_path):
+    with V2Workflow(tmp_path / "v2.sqlite") as workflow:
+        candidate = workflow.record_observation(observation())
+        assert candidate is not None
+        assert workflow.next_candidate_pending_notification().id == candidate.id
+        workflow.record_remote_attempt(candidate.id, "candidate_notification")
+        assert workflow.next_candidate_pending_notification() is None
+        workflow.settle_remote_effect(candidate.id, "candidate_notification", "failed")
+        assert workflow.next_candidate_pending_notification().id == candidate.id
+
+        workflow.approve_candidate(candidate.id)
+        draft = workflow.create_draft(candidate.id, "copy")
+        assert workflow.next_draft_pending_notification().id == draft.id
+        workflow.record_remote_attempt(draft.id, "draft_notification")
+        assert workflow.next_draft_pending_notification() is None
+        workflow.settle_remote_effect(draft.id, "draft_notification", "ambiguous")
+        assert workflow.next_draft_pending_notification() is None
+        workflow.approve_draft(draft.id)
+        assert workflow.next_draft_approved_sheets_delivery().id == draft.id
+        workflow.record_remote_attempt(draft.id, "sheets_delivery")
+        assert workflow.next_draft_approved_sheets_delivery() is None
+        workflow.settle_remote_effect(draft.id, "sheets_delivery", "ambiguous")
+        assert workflow.next_draft_approved_sheets_delivery() is None

@@ -103,16 +103,38 @@ sudo -u newsbot /usr/local/bin/newsbot automation-release-activate \
 </section>
 
 <section>
-<h2>6. no-work canary, timer enable 순서, E2E 확인</h2>
-<pre><code>sudo systemctl start newsbot-telegram.service
-sudo systemctl start newsbot-sheets.service
-sudo systemctl start newsbot-collect.service
+<h2>6. V2 cursor handoff, 3회 clean run, timer enable</h2>
+<pre><code># legacy/V2 timer와 service가 모두 inactive인 상태에서 실행
+LEGACY_OFFSET="$(sudo -u newsbot sqlite3 -readonly /var/lib/newsbot/newsbot.db \
+  "SELECT next_offset FROM telegram_update_cursors WHERE stream='approval';")"
+test "$LEGACY_OFFSET" -ge 0
+sudo -u newsbot /usr/local/bin/newsbot v2-seed-telegram-cursor \
+  --db /var/lib/newsbot-v2/newsbot-v2.sqlite --next-offset "$LEGACY_OFFSET"
+
+sudo install -o root -g root -m 0644 \
+  "/opt/newsbot/releases/$RELEASE_GIT_SHA/src/deploy/systemd/newsbot-collect.service" \
+  "/opt/newsbot/releases/$RELEASE_GIT_SHA/src/deploy/systemd/newsbot-telegram.service" \
+  "/opt/newsbot/releases/$RELEASE_GIT_SHA/src/deploy/systemd/newsbot-sheets.service" \
+  /etc/systemd/system/
+sudo systemctl daemon-reload
+
+for run in 1 2 3; do
+  sudo systemctl start newsbot-collect.service
+  sudo systemctl start newsbot-telegram.service
+  sudo systemctl start newsbot-generate-codex.service
+  sudo systemctl start newsbot-sheets.service
+  for unit in newsbot-collect.service newsbot-telegram.service newsbot-generate-codex.service newsbot-sheets.service; do
+    test "$(systemctl show "$unit" -p Result --value)" = success
+  done
+done
+
 sudo systemctl enable --now newsbot-telegram.timer
 sudo systemctl enable --now newsbot-sheets.timer
+sudo systemctl enable --now newsbot-generate-codex.timer
 sudo systemctl enable --now newsbot-collect.timer
-sudo systemctl status newsbot-telegram.timer newsbot-sheets.timer newsbot-collect.timer
-sudo -u newsbot /usr/local/bin/newsbot automation-status --db /var/lib/newsbot/newsbot.db</code></pre>
-<p>enable 순서는 반드시 Telegram → Sheets → collection입니다. collection timer는 매시간 실행됩니다. E2E에서는 실제 뉴스에만 표시되는 <code>[제작]</code> 승인, 사람의 정확한 draft 승인/재생성/거절, workplace 한 행 append와 metadata idempotency, 그리고 `[12:00:00,13:00:00)` Asia/Seoul에 commit되는 callback 없는 제목 전용 ambiguous digest를 확인합니다. 정확히 13:00까지 intent가 없으면 그 날짜는 catch-up 없이 skipped여야 합니다.</p>
+sudo systemctl status newsbot-telegram.timer newsbot-sheets.timer newsbot-generate-codex.timer newsbot-collect.timer
+sudo -u newsbot /usr/local/bin/newsbot v2-status --db /var/lib/newsbot-v2/newsbot-v2.sqlite</code></pre>
+<p>cursor seed 전에 legacy poll owner를 반드시 중지합니다. 이후 collection, Telegram, Codex, Sheets production unit은 V2 DB만 사용하며 같은 Telegram bot의 두 번째 poller를 실행하지 않습니다. 세 clean run이 모두 성공한 뒤에만 approval-first 순서로 timer를 활성화합니다. 기존 DB·config·release receipt는 root-owned read-only archive로 복사하고 SHA-256 manifest를 남깁니다.</p>
 </section>
 
 <section>
