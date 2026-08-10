@@ -173,17 +173,50 @@ def create_draft(args: argparse.Namespace) -> int:
     return 0
 
 
-def approve_draft(args: argparse.Namespace) -> int:
+def deliver_google_sheets(args: argparse.Namespace) -> int:
+    """Deliver one second-approved V2 draft through the existing idempotent Sheets adapter."""
+    import time
+    from zoneinfo import ZoneInfo
+
+    from .secrets import read_service_account_info
+    from .sheets.google import GoogleSheetsAdapter
+    from .v2_live import deliver_v2_google_sheets, v2_draft_handoff_values
+    from .v2_workflow import V2State, V2WorkflowError
+
     with V2Workflow(args.db) as workflow:
-        draft = workflow.approve_draft(args.draft_id)
-        print(json.dumps({"id": draft.id, "state": draft.state}))
+        draft = workflow.get_draft(args.draft_id)
+        if draft.state == V2State.SHEET_DELIVERED:
+            print(json.dumps({"id": draft.id, "state": draft.state}))
+            return 0
+        if draft.state != V2State.DRAFT_APPROVED:
+            raise V2WorkflowError("V2 Google Sheets delivery requires draft_approved")
+        if args.deadline <= 0:
+            raise ValueError("--deadline must be positive")
+        approved_at = datetime.fromisoformat(workflow.draft_updated_at(draft.id))
+        if approved_at.tzinfo is None:
+            approved_at = approved_at.replace(tzinfo=UTC)
+        approved_date = approved_at.astimezone(ZoneInfo("Asia/Seoul")).date().isoformat()
+        values = v2_draft_handoff_values(draft, approved_date)
+        credentials = read_service_account_info(os.environ["GOOGLE_SERVICE_ACCOUNT_FILE"])
+        adapter = GoogleSheetsAdapter.from_credentials(
+            credential_info=credentials,
+            spreadsheet_id=os.environ["GOOGLE_SHEETS_SPREADSHEET_ID"],
+            deadline_monotonic=time.monotonic() + args.deadline,
+        )
+        result = deliver_v2_google_sheets(
+            workflow,
+            draft,
+            adapter,
+            values,
+            lease_seconds=args.deadline + 30,
+        )
+        print(json.dumps({"id": result.id, "state": result.state}))
     return 0
 
 
-def deliver_sheet(args: argparse.Namespace) -> int:
-    """Advance only after the Sheets adapter has confirmed delivery."""
+def approve_draft(args: argparse.Namespace) -> int:
     with V2Workflow(args.db) as workflow:
-        draft = workflow.mark_sheet_delivered(args.draft_id)
+        draft = workflow.approve_draft(args.draft_id)
         print(json.dumps({"id": draft.id, "state": draft.state}))
     return 0
 
@@ -228,9 +261,10 @@ def build_parser() -> argparse.ArgumentParser:
     approve.add_argument("draft_id")
     approve.set_defaults(handler=approve_draft)
 
-    deliver = commands.add_parser("deliver-sheet")
-    deliver.add_argument("draft_id")
-    deliver.set_defaults(handler=deliver_sheet)
+    sheets = commands.add_parser("deliver-google-sheets", help="deliver one second-approved V2 draft")
+    sheets.add_argument("draft_id")
+    sheets.add_argument("--deadline", type=float, default=120.0)
+    sheets.set_defaults(handler=deliver_google_sheets)
     return parser
 
 

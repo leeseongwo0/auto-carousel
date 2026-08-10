@@ -60,16 +60,25 @@ collection-to-Sheets approval test, and three consecutive clean runs. A V2
 cutover is a forward switch; rollback means switching back to the previously
 verified runtime without editing either database.
 
-The credential-free operational surface is available as:
+The operational surface always requires the explicit V2 database path:
 
 ```bash
 newsbot-v2 --db /var/lib/newsbot-v2/newsbot-v2.sqlite status
 newsbot-v2 --db /var/lib/newsbot-v2/newsbot-v2.sqlite collect-fixture --fixture <fixture.json>
+newsbot-v2 --db /var/lib/newsbot-v2/newsbot-v2.sqlite collect-live --lookback-hours 24 --limit 20
+newsbot-v2 --db /var/lib/newsbot-v2/newsbot-v2.sqlite generate-codex <candidate-id>
+newsbot-v2 --db /var/lib/newsbot-v2/newsbot-v2.sqlite deliver-google-sheets <draft-id> --deadline 120
 ```
 
-These commands never infer a legacy database path. Live Telegram, generation,
-and Sheets adapters must be wired by the deployment release using private
-credentials and explicit remote-effect inspection.
+`collect-live` uses the private `NEWSBOT_V2_TELETHON_*` variables and
+`NEWSBOT_V2_TELEGRAM_HANDLES`. `generate-codex` is admitted only after the first
+Telegram approval and uses the fixed privilege-separated Codex runner.
+`deliver-google-sheets` is admitted only after the second exact-draft approval;
+it reads `GOOGLE_SERVICE_ACCOUNT_FILE` and `GOOGLE_SHEETS_SPREADSHEET_ID`,
+projects the immutable draft onto the frozen A:V schema, and uses the existing
+prepared-mutation idempotency marker. A confirmed receipt is completed locally
+after restart, while an ambiguous receipt enters `manual_review` without a
+resend. None of these commands infer or open the legacy database.
 
 ## Legacy VPS automation compatibility
 

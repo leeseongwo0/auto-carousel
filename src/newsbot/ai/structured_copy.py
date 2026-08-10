@@ -231,6 +231,11 @@ def _units(value: object) -> tuple[FactualUnit, ...]:
     )
 
 
+def draft_from_mapping(value: object) -> CopyDraft:
+    """Parse the exact provider CopyDraft shape without changing its content."""
+    return _draft_from_mapping(value)
+
+
 def _draft_from_mapping(value: object) -> CopyDraft:
     root = _strict_mapping(
         value,

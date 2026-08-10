@@ -2,6 +2,8 @@ import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
+import pytest
+
 from newsbot import cli as legacy_cli
 from newsbot import v2_cli
 from newsbot.approval.base import hash_callback_token
@@ -14,8 +16,21 @@ from newsbot.copywriting import (
     FactReference,
     FactualUnit,
 )
-from newsbot.v2_live import TelethonV2Collector, V2CodexGenerator, V2LiveWorkflow
-from newsbot.v2_workflow import V2State, V2Workflow
+from newsbot.sheets.base import (
+    DeliveryOutcome,
+    DispatchCredentialAttestation,
+    MetadataState,
+    PreparedSheetMutation,
+    SheetDelivery,
+)
+from newsbot.v2_live import (
+    TelethonV2Collector,
+    V2CodexGenerator,
+    V2LiveWorkflow,
+    deliver_v2_google_sheets,
+    v2_draft_handoff_values,
+)
+from newsbot.v2_workflow import V2State, V2Workflow, V2WorkflowError
 
 
 def observation() -> SourceObservation:
@@ -27,6 +42,55 @@ def observation() -> SourceObservation:
         text="OpenAI announced an enterprise infrastructure integration available to customers worldwide today with documented production rollout details.",
         urls=(UrlCandidate("https://example.test/source"),),
     )
+
+
+def exact_draft_content() -> str:
+    return json.dumps(
+        {
+            "cover": {
+                "title": "규제 변화",
+                "subtitle": "송금 대기 제도",
+                "factual_units": [
+                    {
+                        "text": "검증된 규제 변화입니다.",
+                        "references": [{"claim_id": "claim-1", "source_version_id": 1}],
+                    }
+                ],
+            },
+            "bodies": [
+                {
+                    "subtitle": "핵심 내용",
+                    "body": "검증된 규제 변화입니다.",
+                    "factual_units": [
+                        {
+                            "text": "검증된 규제 변화입니다.",
+                            "references": [{"claim_id": "claim-1", "source_version_id": 1}],
+                        }
+                    ],
+                }
+            ],
+            "caption": {
+                "hook": "새로운 규제입니다.",
+                "context": "브라질의 제도 변화입니다.",
+                "details": "송금에 대기 시간이 적용됩니다.",
+                "implications": "이용자 보호에 영향을 줍니다.",
+                "questions": "다른 국가에도 확산될까요?",
+                "hashtags": ["#블록체인"],
+            },
+            "category": "Blockchain",
+            "draft": True,
+            "source_reported": True,
+        },
+        ensure_ascii=False,
+    )
+
+
+def approved_draft(workflow: V2Workflow):
+    candidate = workflow.record_observation(observation())
+    assert candidate is not None
+    workflow.approve_candidate(candidate.id)
+    pending = workflow.create_draft(candidate.id, exact_draft_content())
+    return candidate, workflow.approve_draft(pending.id)
 
 
 def test_authenticated_callbacks_gate_generation_and_sheets(tmp_path):
@@ -219,3 +283,235 @@ def test_v2_codex_generator_builds_evidence_bound_request(tmp_path):
     assert value["cover"]["title"] == "브라질 암호화폐 규제"
     assert requests[0].facts[0].evidence == observation().text
     assert requests[0].facts[0].source_url == "https://example.test/source"
+
+
+class ScriptedSheetsAdapter:
+    def __init__(
+        self,
+        metadata: MetadataState,
+        outcome: DeliveryOutcome = DeliveryOutcome.APPLIED,
+    ):
+        self.metadata = metadata
+        self.outcome = outcome
+        self.prepared = False
+        self.armed = False
+        self.dispatched = False
+
+    def prepare_delivery(self, *, export_id, canonical_sha256, values):
+        self.prepared = True
+        assert export_id
+        assert len(canonical_sha256) == 64
+        assert len(values) == 22
+        return PreparedSheetMutation(
+            {},
+            "request-sha",
+            metadata=self.metadata,
+            metadata_value=f"newsbot-v2:{export_id}",
+        )
+
+    def dispatch_credential_attestation(self):
+        return DispatchCredentialAttestation(
+            refreshed_at="2026-08-09T00:00:00+00:00",
+            expires_at="2026-08-09T01:00:00+00:00",
+            scope_ok=True,
+        )
+
+    def arm_prepared_dispatch(self):
+        self.armed = True
+
+    def dispatch_prepared(self, _prepared):
+        self.dispatched = True
+        return SheetDelivery(self.outcome)
+
+
+@pytest.mark.parametrize(
+    ("metadata", "expected_state", "armed", "dispatched"),
+    [
+        (MetadataState.EXACT, V2State.SHEET_DELIVERED, False, False),
+        (MetadataState.ABSENT, V2State.SHEET_DELIVERED, True, True),
+        (MetadataState.CONFLICT, V2State.MANUAL_REVIEW, False, False),
+    ],
+)
+def test_v2_sheets_delivery_honors_prepared_metadata(
+    metadata,
+    expected_state,
+    armed,
+    dispatched,
+    tmp_path,
+):
+    with V2Workflow(tmp_path / "v2.sqlite") as workflow:
+        candidate = workflow.record_observation(observation())
+        assert candidate is not None
+        workflow.approve_candidate(candidate.id)
+        pending = workflow.create_draft(candidate.id, exact_draft_content())
+        draft = workflow.approve_draft(pending.id)
+        values = v2_draft_handoff_values(draft, "2026-08-09")
+        assert len(values) == 22
+
+        adapter = ScriptedSheetsAdapter(metadata)
+        result = deliver_v2_google_sheets(
+            workflow,
+            draft,
+            adapter,
+            values,
+            lease_seconds=120,
+        )
+        assert result.state == expected_state
+        assert adapter.armed is armed
+        assert adapter.dispatched is dispatched
+        receipt = workflow.remote_effect(draft.id, "sheets_delivery")
+        assert receipt is not None
+        detail = json.loads(str(receipt["detail"]))
+        assert detail["request_sha256"] == "request-sha"
+        assert detail["metadata_value"].startswith("newsbot-v2:")
+        assert detail["owner"]
+        if metadata is MetadataState.ABSENT:
+            assert detail["attestation"]["scope_ok"] is True
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [DeliveryOutcome.AMBIGUOUS, DeliveryOutcome.BLOCKED, DeliveryOutcome.NOT_APPLIED],
+)
+def test_non_applied_sheets_outcome_is_durably_ambiguous(outcome, tmp_path):
+    with V2Workflow(tmp_path / "v2.sqlite") as workflow:
+        _candidate, draft = approved_draft(workflow)
+        values = v2_draft_handoff_values(draft, "2026-08-09")
+        result = deliver_v2_google_sheets(
+            workflow,
+            draft,
+            ScriptedSheetsAdapter(MetadataState.ABSENT, outcome),
+            values,
+            lease_seconds=120,
+        )
+        assert result.state == V2State.MANUAL_REVIEW
+        receipt = workflow.remote_effect(draft.id, "sheets_delivery")
+        assert receipt is not None
+        assert receipt["status"] == "ambiguous"
+        detail = json.loads(str(receipt["detail"]))
+        assert detail["request_sha256"] == "request-sha"
+        assert detail["metadata_value"].startswith("newsbot-v2:")
+        assert detail["owner"]
+        assert detail["attestation"]["scope_ok"] is True
+
+
+def test_expired_pending_sheets_claim_becomes_manual_without_resend(tmp_path):
+    with V2Workflow(tmp_path / "v2.sqlite") as workflow:
+        _candidate, draft = approved_draft(workflow)
+        detail = json.dumps(
+            {
+                "lease_expires_at": (datetime.now(UTC) - timedelta(seconds=1)).isoformat(),
+                "phase": "possibly_sent",
+            },
+            sort_keys=True,
+        )
+        assert workflow.claim_remote_effect(draft.id, "sheets_delivery", detail)
+        adapter = ScriptedSheetsAdapter(MetadataState.ABSENT)
+        result = deliver_v2_google_sheets(
+            workflow,
+            draft,
+            adapter,
+            v2_draft_handoff_values(draft, "2026-08-09"),
+            lease_seconds=120,
+        )
+        assert result.state == V2State.MANUAL_REVIEW
+        assert not adapter.prepared
+        assert not adapter.dispatched
+
+
+def test_live_pending_sheets_claim_rejects_competing_sender(tmp_path):
+    with V2Workflow(tmp_path / "v2.sqlite") as workflow:
+        _candidate, draft = approved_draft(workflow)
+        detail = json.dumps(
+            {
+                "lease_expires_at": (datetime.now(UTC) + timedelta(minutes=1)).isoformat(),
+                "phase": "possibly_sent",
+            },
+            sort_keys=True,
+        )
+        assert workflow.claim_remote_effect(draft.id, "sheets_delivery", detail)
+        adapter = ScriptedSheetsAdapter(MetadataState.ABSENT)
+        with pytest.raises(V2WorkflowError, match="already in progress"):
+            deliver_v2_google_sheets(
+                workflow,
+                draft,
+                adapter,
+                v2_draft_handoff_values(draft, "2026-08-09"),
+                lease_seconds=120,
+            )
+        assert not adapter.prepared
+        assert not adapter.dispatched
+
+
+def test_generic_pending_remote_attempt_is_not_resent(tmp_path):
+    with V2Workflow(tmp_path / "v2.sqlite") as workflow:
+        candidate = workflow.record_observation(observation())
+        assert candidate is not None
+        workflow.record_remote_attempt(candidate.id, "candidate_notification")
+        sends = []
+        live = V2LiveWorkflow(
+            workflow,
+            notify_candidate=lambda *_: sends.append(1),
+            generate_draft=lambda _: "unused",
+            notify_draft=lambda *_: True,
+            deliver_sheets=lambda _: True,
+        )
+        result = live.run(candidate.id)
+        assert result.state == V2State.MANUAL_REVIEW
+        assert sends == []
+
+
+def test_generic_sheet_delivery_records_non_applied_as_ambiguous(tmp_path):
+    with V2Workflow(tmp_path / "v2.sqlite") as workflow:
+        candidate, draft = approved_draft(workflow)
+        live = V2LiveWorkflow(
+            workflow,
+            notify_candidate=lambda *_: True,
+            generate_draft=lambda _: "unused",
+            notify_draft=lambda *_: True,
+            deliver_sheets=lambda _: SheetDelivery(DeliveryOutcome.AMBIGUOUS),
+        )
+        result = live.run(candidate.id)
+        assert result.state == V2State.MANUAL_REVIEW
+        receipt = workflow.remote_effect(draft.id, "sheets_delivery")
+        assert receipt is not None
+        assert receipt["status"] == "ambiguous"
+
+
+def test_google_sheets_cli_rejects_unapproved_draft_before_credentials(tmp_path, monkeypatch):
+    db = tmp_path / "v2.sqlite"
+    with V2Workflow(db) as workflow:
+        candidate = workflow.record_observation(observation())
+        assert candidate is not None
+        workflow.approve_candidate(candidate.id)
+        draft = workflow.create_draft(candidate.id, "exact pending draft")
+
+    monkeypatch.delenv("GOOGLE_SERVICE_ACCOUNT_FILE", raising=False)
+    monkeypatch.delenv("GOOGLE_SHEETS_SPREADSHEET_ID", raising=False)
+    with pytest.raises(Exception, match="requires draft_approved"):
+        v2_cli.deliver_google_sheets(SimpleNamespace(db=db, draft_id=draft.id, deadline=120.0))
+
+
+def test_confirmed_sheets_receipt_finishes_local_transition_after_reopen(tmp_path):
+    db = tmp_path / "v2.sqlite"
+    sends = []
+    with V2Workflow(db) as workflow:
+        candidate = workflow.record_observation(observation())
+        assert candidate is not None
+        workflow.approve_candidate(candidate.id)
+        draft = workflow.create_draft(candidate.id, exact_draft_content())
+        workflow.approve_draft(draft.id)
+        workflow.record_remote_attempt(draft.id, "sheets_delivery")
+        workflow.settle_remote_effect(draft.id, "sheets_delivery", "confirmed", receipt_id="sheet-row")
+
+    with V2Workflow(db) as reopened:
+        live = V2LiveWorkflow(
+            reopened,
+            notify_candidate=lambda *_: True,
+            generate_draft=lambda _: "unused",
+            notify_draft=lambda *_: True,
+            deliver_sheets=lambda _: sends.append(1),
+        )
+        result = live.run(candidate.id)
+        assert result.state == V2State.SHEET_DELIVERED
+        assert sends == []
