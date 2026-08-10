@@ -27,6 +27,10 @@ from .v2_runtime import AmbiguousRemoteEffect, ClearNetworkFailure
 from .v2_workflow import V2Candidate, V2Draft, V2State, V2Workflow, V2WorkflowError
 
 
+class SheetsClearPreDispatchNetworkError(RuntimeError):
+    """Sheets transport proved it failed before any remote dispatch."""
+
+
 class CandidateNotificationPort(Protocol):
     def __call__(self, candidate: V2Candidate, callback_token: str) -> str | bool: ...
 
@@ -277,22 +281,13 @@ def deliver_v2_google_sheets(
         return _recover_v2_sheets_receipt(workflow, draft, existing)
 
     canonical_sha256 = hashlib.sha256(draft.content.encode("utf-8")).hexdigest()
-    prepared = adapter.prepare_delivery(
-        export_id=v2_sheet_export_id(draft.id),
-        canonical_sha256=canonical_sha256,
-        values=values,
-    )
-    if not prepared.metadata_value:
-        raise V2WorkflowError("Sheets delivery lacks an idempotency marker")
-
     lease_expires_at = (datetime.now(UTC) + timedelta(seconds=lease_seconds)).isoformat()
     claim_detail = json.dumps(
         {
             "lease_expires_at": lease_expires_at,
-            "metadata_value": prepared.metadata_value,
             "owner": secrets.token_hex(16),
-            "phase": "claimed",
-            "request_sha256": prepared.request_sha256,
+            "phase": "preparing",
+            "request_sha256": canonical_sha256,
         },
         sort_keys=True,
     )
@@ -300,8 +295,44 @@ def deliver_v2_google_sheets(
         receipt = workflow.remote_effect(draft.id, "sheets_delivery")
         if receipt is None:
             raise V2WorkflowError("Sheets delivery claim disappeared")
+        if receipt["status"] == "failed":
+            return cast(
+                V2Draft,
+                workflow.mark_manual_review(draft.id, "sheets_delivery retry is not authorized"),
+            )
         return _recover_v2_sheets_receipt(workflow, draft, receipt)
 
+    try:
+        prepared = adapter.prepare_delivery(
+            export_id=v2_sheet_export_id(draft.id),
+            canonical_sha256=canonical_sha256,
+            values=values,
+        )
+        if not prepared.metadata_value:
+            raise V2WorkflowError("Sheets delivery lacks an idempotency marker")
+    except SheetsClearPreDispatchNetworkError as exc:
+        return _settle_v2_sheets_pre_dispatch_failure(
+            workflow,
+            draft,
+            claim_detail,
+            exc,
+            clear_network=True,
+        )
+    except Exception as exc:
+        return _settle_v2_sheets_pre_dispatch_failure(workflow, draft, claim_detail, exc)
+
+    prepared_detail = _v2_sheets_receipt_detail(
+        claim_detail,
+        "claimed",
+        metadata_value=prepared.metadata_value,
+        request_sha256=prepared.request_sha256,
+    )
+    if not workflow.update_remote_effect_claim(draft.id, "sheets_delivery", claim_detail, prepared_detail):
+        return cast(
+            V2Draft,
+            workflow.mark_manual_review(draft.id, "sheets_delivery interrupted during preparation"),
+        )
+    claim_detail = prepared_detail
     if prepared.metadata is MetadataState.EXACT:
         settled = workflow.settle_remote_effect_claim(
             draft.id,
@@ -312,7 +343,10 @@ def deliver_v2_google_sheets(
             receipt_id=prepared.metadata_value,
         )
         if not settled:
-            raise V2WorkflowError("Sheets delivery claim changed before exact settlement")
+            return cast(
+                V2Draft,
+                workflow.mark_manual_review(draft.id, "sheets_delivery interrupted before exact settlement"),
+            )
         return workflow.mark_sheet_delivered(draft.id)
     if prepared.metadata is not MetadataState.ABSENT:
         return _settle_v2_sheets_ambiguous(
@@ -321,23 +355,19 @@ def deliver_v2_google_sheets(
             claim_detail,
             f"preflight metadata {prepared.metadata.value}",
         )
-
     try:
         attestation = adapter.dispatch_credential_attestation()
         adapter.arm_prepared_dispatch()
-    except Exception as exc:
-        workflow.settle_remote_effect_claim(
-            draft.id,
-            "sheets_delivery",
+    except SheetsClearPreDispatchNetworkError as exc:
+        return _settle_v2_sheets_pre_dispatch_failure(
+            workflow,
+            draft,
             claim_detail,
-            "failed",
-            detail=_v2_sheets_receipt_detail(
-                claim_detail,
-                "pre_dispatch_failed",
-                error=type(exc).__name__,
-            ),
+            exc,
+            clear_network=True,
         )
-        raise
+    except Exception as exc:
+        return _settle_v2_sheets_pre_dispatch_failure(workflow, draft, claim_detail, exc)
 
     possibly_sent_detail = _v2_sheets_receipt_detail(
         claim_detail,
@@ -350,7 +380,10 @@ def deliver_v2_google_sheets(
         claim_detail,
         possibly_sent_detail,
     ):
-        raise V2WorkflowError("Sheets delivery lost its durable dispatch claim")
+        return cast(
+            V2Draft,
+            workflow.mark_manual_review(draft.id, "sheets_delivery interrupted before dispatch"),
+        )
 
     try:
         outcome = cast(SheetDelivery, adapter.dispatch_prepared(prepared))
@@ -450,6 +483,42 @@ def _settle_v2_sheets_ambiguous(
     if not settled:
         raise V2WorkflowError("Sheets delivery claim changed during ambiguous settlement")
     return cast(V2Draft, workflow.mark_manual_review(draft.id, reason))
+
+
+def _settle_v2_sheets_pre_dispatch_failure(
+    workflow: V2Workflow,
+    draft: V2Draft,
+    expected_detail: str,
+    error: Exception,
+    *,
+    clear_network: bool = False,
+) -> V2Draft:
+    """Persist a proven pre-dispatch failure; only its first network failure may retry."""
+    detail = _v2_sheets_receipt_detail(
+        expected_detail,
+        "pre_dispatch_failed",
+        error=type(error).__name__,
+        failure="clear_pre_dispatch_network" if clear_network else "terminal_pre_dispatch_failure",
+    )
+    if not workflow.settle_remote_effect_claim(
+        draft.id,
+        "sheets_delivery",
+        expected_detail,
+        "failed",
+        detail=detail,
+    ):
+        return cast(
+            V2Draft,
+            workflow.mark_manual_review(draft.id, "sheets_delivery interrupted during pre-dispatch failure"),
+        )
+    receipt = workflow.remote_effect(draft.id, "sheets_delivery")
+    attempts = None if receipt is None else receipt.get("attempts")
+    if clear_network and isinstance(attempts, int) and not isinstance(attempts, bool) and attempts < 2:
+        return workflow.get_draft(draft.id)
+    return cast(
+        V2Draft,
+        workflow.mark_manual_review(draft.id, f"sheets_delivery pre-dispatch failed: {type(error).__name__}"),
+    )
 
 
 class TelegramV2Notifier:

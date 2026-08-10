@@ -158,6 +158,30 @@ def status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _settle_google_sheets_bootstrap_failure(workflow: V2Workflow, draft: V2Draft, error: Exception) -> V2Draft:
+    """Terminally record local/configuration failures before a dispatch adapter exists."""
+    receipt = workflow.remote_effect(draft.id, "sheets_delivery")
+    if receipt is None or receipt["status"] == "failed":
+        workflow.record_remote_attempt(draft.id, "sheets_delivery")
+    workflow.settle_remote_effect(
+        draft.id,
+        "sheets_delivery",
+        "failed",
+        detail=json.dumps(
+            {
+                "error": type(error).__name__,
+                "failure": "terminal_pre_dispatch_failure",
+                "phase": "bootstrap_failed",
+            },
+            sort_keys=True,
+        ),
+    )
+    return cast(
+        V2Draft,
+        workflow.mark_manual_review(draft.id, f"sheets_delivery bootstrap failed: {type(error).__name__}"),
+    )
+
+
 def _deliver_google_sheets_draft(workflow: V2Workflow, draft: V2Draft, deadline: float) -> V2Draft:
     """Deliver one approved V2 draft through the existing idempotent Sheets adapter."""
     import time
@@ -173,19 +197,40 @@ def _deliver_google_sheets_draft(workflow: V2Workflow, draft: V2Draft, deadline:
     receipt = workflow.remote_effect(draft.id, "sheets_delivery")
     if receipt is not None and receipt["status"] != "failed":
         return recover_v2_google_sheets_delivery(workflow, draft)
+    if receipt is not None and receipt["status"] == "failed":
+        try:
+            detail = json.loads(str(receipt["detail"]))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            detail = None
+        attempts = receipt.get("attempts")
+        retryable = (
+            isinstance(detail, dict)
+            and detail.get("failure") == "clear_pre_dispatch_network"
+            and isinstance(attempts, int)
+            and not isinstance(attempts, bool)
+            and attempts < 2
+        )
+        if not retryable:
+            return cast(
+                V2Draft,
+                workflow.mark_manual_review(draft.id, "sheets_delivery retry is not authorized"),
+            )
     if deadline <= 0:
         raise ValueError("--deadline must be positive")
-    approved_at = datetime.fromisoformat(workflow.draft_updated_at(draft.id))
-    if approved_at.tzinfo is None:
-        approved_at = approved_at.replace(tzinfo=UTC)
-    approved_date = approved_at.astimezone(ZoneInfo("Asia/Seoul")).date().isoformat()
-    values = v2_draft_handoff_values(draft, approved_date)
-    credentials = read_service_account_info(os.environ["GOOGLE_SERVICE_ACCOUNT_FILE"])
-    adapter = GoogleSheetsAdapter.from_credentials(
-        credential_info=credentials,
-        spreadsheet_id=os.environ["GOOGLE_SHEETS_SPREADSHEET_ID"],
-        deadline_monotonic=time.monotonic() + deadline,
-    )
+    try:
+        approved_at = datetime.fromisoformat(workflow.draft_updated_at(draft.id))
+        if approved_at.tzinfo is None:
+            approved_at = approved_at.replace(tzinfo=UTC)
+        approved_date = approved_at.astimezone(ZoneInfo("Asia/Seoul")).date().isoformat()
+        values = v2_draft_handoff_values(draft, approved_date)
+        credentials = read_service_account_info(os.environ["GOOGLE_SERVICE_ACCOUNT_FILE"])
+        adapter = GoogleSheetsAdapter.from_credentials(
+            credential_info=credentials,
+            spreadsheet_id=os.environ["GOOGLE_SHEETS_SPREADSHEET_ID"],
+            deadline_monotonic=time.monotonic() + deadline,
+        )
+    except Exception as exc:
+        return _settle_google_sheets_bootstrap_failure(workflow, draft, exc)
     return deliver_v2_google_sheets(workflow, draft, adapter, values, lease_seconds=deadline + 30)
 
 

@@ -237,16 +237,33 @@ class V2Workflow:
         return None if row is None else self.get_candidate(str(row["id"]))
 
     def next_draft_approved_sheets_delivery(self) -> V2Draft | None:
-        """Select the oldest approved draft, including one with a durable recovery receipt."""
-        row = self._db.execute(
-            "SELECT draft.id FROM v2_drafts draft "
+        """Select work that can settle locally or make its single permitted retry."""
+        rows = self._db.execute(
+            "SELECT draft.id,effect.attempts,effect.status,effect.detail FROM v2_drafts draft "
             "LEFT JOIN v2_remote_effects effect "
             "ON effect.entity_id=draft.id AND effect.stage='sheets_delivery' "
-            "WHERE draft.state=? "
-            "ORDER BY draft.created_at,draft.id LIMIT 1",
+            "WHERE draft.state=? ORDER BY draft.created_at,draft.id",
             (V2State.DRAFT_APPROVED.value,),
-        ).fetchone()
-        return None if row is None else self.get_draft(str(row["id"]))
+        ).fetchall()
+        for row in rows:
+            status = row["status"]
+            if status is None or status in {"confirmed", "pending"}:
+                return self.get_draft(str(row["id"]))
+            if (
+                status == "failed"
+                and int(row["attempts"]) < 2
+                and self._is_clear_pre_dispatch_sheets_failure(str(row["detail"]))
+            ):
+                return self.get_draft(str(row["id"]))
+        return None
+
+    @staticmethod
+    def _is_clear_pre_dispatch_sheets_failure(detail: str) -> bool:
+        try:
+            parsed = json.loads(detail)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        return isinstance(parsed, dict) and parsed.get("failure") == "clear_pre_dispatch_network"
 
     @staticmethod
     def _identity(observation: SourceObservation) -> str:
@@ -326,7 +343,7 @@ class V2Workflow:
         return int(row["attempts"])
 
     def claim_remote_effect(self, entity_id: str, stage: str, detail: str) -> bool:
-        """Atomically claim an absent or definitively failed remote operation."""
+        """Atomically claim an absent Sheets operation or its one proven-safe retry."""
         now = self._now()
         with self._db:
             inserted = self._db.execute(
@@ -337,6 +354,18 @@ class V2Workflow:
             )
             if inserted.rowcount == 1:
                 return True
+            prior = self._db.execute(
+                "SELECT attempts,status,detail FROM v2_remote_effects WHERE entity_id=? AND stage=?",
+                (str(entity_id), str(stage)),
+            ).fetchone()
+            if (
+                prior is None
+                or str(stage) != "sheets_delivery"
+                or prior["status"] != "failed"
+                or int(prior["attempts"]) >= 2
+                or not self._is_clear_pre_dispatch_sheets_failure(str(prior["detail"]))
+            ):
+                return False
             retried = self._db.execute(
                 "UPDATE v2_remote_effects SET attempts=attempts+1,status='pending',detail=?,"
                 "receipt_id='',updated_at=? WHERE entity_id=? AND stage=? AND status='failed'",
