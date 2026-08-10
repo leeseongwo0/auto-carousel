@@ -18,12 +18,14 @@ from typing import Any, Protocol, cast
 
 from .ai.base import FactClaim, GenerationProvider, GenerationRequest
 from .ai.codex_cli import CodexCliProvider
+from .ai.structured_copy import draft_from_mapping
 from .approval.base import hash_callback_token
 from .collectors.base import SourceObservation
-from .copywriting import CopyDraft
-from .sheets.base import DeliveryOutcome, SheetDelivery
+from .copywriting import CopyDraft, validate_copy
+from .sheets.base import DeliveryOutcome, MetadataState, SheetDelivery
+from .sheets.schema import project_handoff
 from .v2_runtime import AmbiguousRemoteEffect, ClearNetworkFailure
-from .v2_workflow import V2Candidate, V2Draft, V2State, V2Workflow
+from .v2_workflow import V2Candidate, V2Draft, V2State, V2Workflow, V2WorkflowError
 
 
 class CandidateNotificationPort(Protocol):
@@ -140,8 +142,20 @@ class V2LiveWorkflow:
         return self.workflow.get_draft(draft.id)
 
     def _deliver(self, draft: V2Draft) -> V2Draft:
-        if self._prior_remote(draft.id, "sheets_delivery"):
-            return self.workflow.get_draft(draft.id)
+        receipt = self.workflow.remote_effect(draft.id, "sheets_delivery")
+        if receipt is not None:
+            if receipt["status"] == "ambiguous":
+                return cast(
+                    V2Draft,
+                    self.workflow.mark_manual_review(draft.id, "sheets_delivery outcome ambiguous"),
+                )
+            if receipt["status"] == "confirmed":
+                return self.workflow.mark_sheet_delivered(draft.id)
+            if receipt["status"] == "pending":
+                return cast(
+                    V2Draft,
+                    self.workflow.mark_manual_review(draft.id, "sheets_delivery interrupted with unknown outcome"),
+                )
         outcome = self._effect(draft.id, "sheets_delivery", lambda: self.deliver_sheets(draft))
         if outcome is None or outcome is False:
             return cast(V2Draft, self.workflow.mark_manual_review(draft.id, "sheets delivery outcome ambiguous"))
@@ -155,6 +169,9 @@ class V2LiveWorkflow:
             return False
         if receipt["status"] == "ambiguous":
             self.workflow.mark_manual_review(entity_id, f"{stage} outcome ambiguous")
+            return True
+        if receipt["status"] == "pending":
+            self.workflow.mark_manual_review(entity_id, f"{stage} interrupted with unknown outcome")
             return True
         return receipt["status"] == "confirmed"
 
@@ -173,6 +190,14 @@ class V2LiveWorkflow:
                 if value is False:
                     self.workflow.settle_remote_effect(entity_id, stage, "ambiguous")
                     return None
+                if isinstance(value, SheetDelivery) and value.outcome is not DeliveryOutcome.APPLIED:
+                    self.workflow.settle_remote_effect(
+                        entity_id,
+                        stage,
+                        "ambiguous",
+                        detail=f"delivery outcome {value.outcome.value}",
+                    )
+                    return value
                 receipt = value if isinstance(value, str) else "confirmed"
                 self.workflow.settle_remote_effect(entity_id, stage, "confirmed", receipt_id=receipt)
                 return value
@@ -236,31 +261,223 @@ class V2CodexGenerator:
         return int(hashlib.sha256(value.encode()).hexdigest()[:15], 16) or 1
 
 
-class GoogleSheetsV2Delivery:
-    """Adapt the established prepared-mutation contract to a V2 exact draft."""
-
-    def __init__(self, adapter: Any, values: Callable[[V2Draft], Sequence[str]] | None = None) -> None:
-        self.adapter = adapter
-        self.values = values or (lambda draft: (draft.content,))
-
-    def __call__(self, draft: V2Draft) -> SheetDelivery:
-        import hashlib
-
-        canonical = draft.content.encode("utf-8")
-        prepared = self.adapter.prepare_delivery(
-            export_id=draft.id,
-            canonical_sha256=hashlib.sha256(canonical).hexdigest(),
-            values=self.values(draft),
+def v2_draft_handoff_values(draft: V2Draft, approved_date: str) -> tuple[str, ...]:
+    """Project the immutable V2 CopyDraft JSON onto the frozen A:V Sheets schema."""
+    try:
+        parsed = draft_from_mapping(json.loads(draft.content))
+        pages = [(parsed.cover.title, parsed.cover.subtitle)] + [(body.subtitle, body.body) for body in parsed.bodies]
+        allowed_claim_sources = {
+            reference.claim_id: reference.source_version_id
+            for units in (parsed.cover.factual_units, *(body.factual_units for body in parsed.bodies))
+            for factual_unit in units
+            for reference in factual_unit.references
+        }
+        validate_copy(parsed, allowed_claim_sources=allowed_claim_sources)
+        return project_handoff(
+            approved_date=approved_date,
+            page_count=parsed.page_count,
+            category=parsed.category,
+            caption=parsed.caption.text,
+            pages=pages,
         )
-        if not prepared.metadata_value:
-            raise AmbiguousRemoteEffect("Sheets delivery lacks an idempotency marker")
-        probe = self.adapter.probe(metadata_value=prepared.metadata_value)
-        if probe.metadata.value == "exact":
-            return SheetDelivery(DeliveryOutcome.APPLIED)
-        if probe.metadata.value != "absent":
-            return SheetDelivery(DeliveryOutcome.AMBIGUOUS)
-        self.adapter.arm_prepared_dispatch()
-        return cast(SheetDelivery, self.adapter.dispatch_prepared(prepared))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("invalid V2 exact draft projection") from exc
+
+
+def _v2_sheets_receipt_detail(previous: str, phase: str, **updates: object) -> str:
+    try:
+        detail = json.loads(previous)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise V2WorkflowError("invalid Sheets delivery receipt detail") from exc
+    if not isinstance(detail, dict):
+        raise V2WorkflowError("invalid Sheets delivery receipt detail")
+    detail.update(updates)
+    detail["phase"] = phase
+    return json.dumps(detail, sort_keys=True)
+
+
+def deliver_v2_google_sheets(
+    workflow: V2Workflow,
+    draft: V2Draft,
+    adapter: Any,
+    values: Sequence[str],
+    *,
+    lease_seconds: float,
+) -> V2Draft:
+    """Deliver exactly once behind a durable claim and post-marker fencing boundary."""
+    if lease_seconds <= 0:
+        raise ValueError("lease_seconds must be positive")
+    if draft.state == V2State.SHEET_DELIVERED:
+        return draft
+    if draft.state != V2State.DRAFT_APPROVED:
+        raise V2WorkflowError("V2 Google Sheets delivery requires draft_approved")
+
+    existing = workflow.remote_effect(draft.id, "sheets_delivery")
+    if existing is not None and existing["status"] != "failed":
+        return _recover_v2_sheets_receipt(workflow, draft, existing)
+
+    canonical_sha256 = hashlib.sha256(draft.content.encode("utf-8")).hexdigest()
+    prepared = adapter.prepare_delivery(
+        export_id=draft.id,
+        canonical_sha256=canonical_sha256,
+        values=values,
+    )
+    if not prepared.metadata_value:
+        raise V2WorkflowError("Sheets delivery lacks an idempotency marker")
+
+    lease_expires_at = (datetime.now(UTC) + timedelta(seconds=lease_seconds)).isoformat()
+    claim_detail = json.dumps(
+        {
+            "lease_expires_at": lease_expires_at,
+            "metadata_value": prepared.metadata_value,
+            "owner": secrets.token_hex(16),
+            "phase": "claimed",
+            "request_sha256": prepared.request_sha256,
+        },
+        sort_keys=True,
+    )
+    if not workflow.claim_remote_effect(draft.id, "sheets_delivery", claim_detail):
+        receipt = workflow.remote_effect(draft.id, "sheets_delivery")
+        if receipt is None:
+            raise V2WorkflowError("Sheets delivery claim disappeared")
+        return _recover_v2_sheets_receipt(workflow, draft, receipt)
+
+    if prepared.metadata is MetadataState.EXACT:
+        settled = workflow.settle_remote_effect_claim(
+            draft.id,
+            "sheets_delivery",
+            claim_detail,
+            "confirmed",
+            detail=_v2_sheets_receipt_detail(claim_detail, "settled", outcome="exact"),
+            receipt_id=prepared.metadata_value,
+        )
+        if not settled:
+            raise V2WorkflowError("Sheets delivery claim changed before exact settlement")
+        return workflow.mark_sheet_delivered(draft.id)
+    if prepared.metadata is not MetadataState.ABSENT:
+        return _settle_v2_sheets_ambiguous(
+            workflow,
+            draft,
+            claim_detail,
+            f"preflight metadata {prepared.metadata.value}",
+        )
+
+    try:
+        attestation = adapter.dispatch_credential_attestation()
+        adapter.arm_prepared_dispatch()
+    except Exception as exc:
+        workflow.settle_remote_effect_claim(
+            draft.id,
+            "sheets_delivery",
+            claim_detail,
+            "failed",
+            detail=_v2_sheets_receipt_detail(
+                claim_detail,
+                "pre_dispatch_failed",
+                error=type(exc).__name__,
+            ),
+        )
+        raise
+
+    possibly_sent_detail = _v2_sheets_receipt_detail(
+        claim_detail,
+        "possibly_sent",
+        attestation=asdict(attestation),
+    )
+    if not workflow.update_remote_effect_claim(
+        draft.id,
+        "sheets_delivery",
+        claim_detail,
+        possibly_sent_detail,
+    ):
+        raise V2WorkflowError("Sheets delivery lost its durable dispatch claim")
+
+    try:
+        outcome = cast(SheetDelivery, adapter.dispatch_prepared(prepared))
+    except Exception as exc:
+        return _settle_v2_sheets_ambiguous(
+            workflow,
+            draft,
+            possibly_sent_detail,
+            f"dispatch raised {type(exc).__name__}",
+        )
+    if outcome.outcome is not DeliveryOutcome.APPLIED:
+        return _settle_v2_sheets_ambiguous(
+            workflow,
+            draft,
+            possibly_sent_detail,
+            f"dispatch returned {outcome.outcome.value}",
+        )
+    settled = workflow.settle_remote_effect_claim(
+        draft.id,
+        "sheets_delivery",
+        possibly_sent_detail,
+        "confirmed",
+        detail=_v2_sheets_receipt_detail(
+            possibly_sent_detail,
+            "settled",
+            outcome=outcome.outcome.value,
+        ),
+        receipt_id=prepared.metadata_value,
+    )
+    if not settled:
+        raise V2WorkflowError("Sheets delivery claim changed after dispatch")
+    return workflow.mark_sheet_delivered(draft.id)
+
+
+def _recover_v2_sheets_receipt(
+    workflow: V2Workflow,
+    draft: V2Draft,
+    receipt: dict[str, object],
+) -> V2Draft:
+    status = str(receipt["status"])
+    if status == "confirmed":
+        return workflow.mark_sheet_delivered(draft.id)
+    if status == "ambiguous":
+        return cast(
+            V2Draft,
+            workflow.mark_manual_review(draft.id, "sheets_delivery outcome ambiguous"),
+        )
+    if status != "pending":
+        raise V2WorkflowError(f"unsupported Sheets delivery receipt status: {status}")
+    detail = str(receipt["detail"])
+    try:
+        lease_expires_at = datetime.fromisoformat(str(json.loads(detail)["lease_expires_at"]))
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise V2WorkflowError("invalid pending Sheets delivery receipt") from exc
+    if lease_expires_at > datetime.now(UTC):
+        raise V2WorkflowError("Sheets delivery is already in progress")
+    settled = workflow.settle_remote_effect_claim(
+        draft.id,
+        "sheets_delivery",
+        detail,
+        "ambiguous",
+        detail=_v2_sheets_receipt_detail(detail, "expired_pending"),
+    )
+    if not settled:
+        raise V2WorkflowError("Sheets delivery receipt changed during recovery")
+    return cast(
+        V2Draft,
+        workflow.mark_manual_review(draft.id, "sheets_delivery expired while possibly sent"),
+    )
+
+
+def _settle_v2_sheets_ambiguous(
+    workflow: V2Workflow,
+    draft: V2Draft,
+    expected_detail: str,
+    reason: str,
+) -> V2Draft:
+    settled = workflow.settle_remote_effect_claim(
+        draft.id,
+        "sheets_delivery",
+        expected_detail,
+        "ambiguous",
+        detail=_v2_sheets_receipt_detail(expected_detail, "ambiguous", reason=reason),
+    )
+    if not settled:
+        raise V2WorkflowError("Sheets delivery claim changed during ambiguous settlement")
+    return cast(V2Draft, workflow.mark_manual_review(draft.id, reason))
 
 
 class TelegramV2Notifier:

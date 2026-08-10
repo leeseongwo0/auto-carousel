@@ -214,6 +214,70 @@ class V2Workflow:
         ).fetchone()
         return int(row["attempts"])
 
+    def claim_remote_effect(self, entity_id: str, stage: str, detail: str) -> bool:
+        """Atomically claim an absent or definitively failed remote operation."""
+        now = self._now()
+        with self._db:
+            inserted = self._db.execute(
+                "INSERT OR IGNORE INTO v2_remote_effects"
+                "(entity_id,stage,attempts,status,detail,receipt_id,updated_at) "
+                "VALUES(?,?,1,'pending',?,'',?)",
+                (str(entity_id), str(stage), str(detail), now),
+            )
+            if inserted.rowcount == 1:
+                return True
+            retried = self._db.execute(
+                "UPDATE v2_remote_effects SET attempts=attempts+1,status='pending',detail=?,"
+                "receipt_id='',updated_at=? WHERE entity_id=? AND stage=? AND status='failed'",
+                (str(detail), now, str(entity_id), str(stage)),
+            )
+            return retried.rowcount == 1
+
+    def update_remote_effect_claim(
+        self,
+        entity_id: str,
+        stage: str,
+        expected_detail: str,
+        new_detail: str,
+    ) -> bool:
+        """Advance one owned pending operation without permitting a competing writer."""
+        with self._db:
+            updated = self._db.execute(
+                "UPDATE v2_remote_effects SET detail=?,updated_at=? "
+                "WHERE entity_id=? AND stage=? AND status='pending' AND detail=?",
+                (str(new_detail), self._now(), str(entity_id), str(stage), str(expected_detail)),
+            )
+        return updated.rowcount == 1
+
+    def settle_remote_effect_claim(
+        self,
+        entity_id: str,
+        stage: str,
+        expected_detail: str,
+        status: str,
+        *,
+        detail: str,
+        receipt_id: str = "",
+    ) -> bool:
+        """Settle only the exact pending claim held by the caller."""
+        if status not in {"confirmed", "ambiguous", "failed"}:
+            raise ValueError("invalid remote effect status")
+        with self._db:
+            updated = self._db.execute(
+                "UPDATE v2_remote_effects SET status=?,detail=?,receipt_id=?,updated_at=? "
+                "WHERE entity_id=? AND stage=? AND status='pending' AND detail=?",
+                (
+                    status,
+                    str(detail),
+                    str(receipt_id),
+                    self._now(),
+                    str(entity_id),
+                    str(stage),
+                    str(expected_detail),
+                ),
+            )
+        return updated.rowcount == 1
+
     def settle_remote_effect(
         self, entity_id: str, stage: str, status: str, detail: str = "", receipt_id: str = ""
     ) -> None:
@@ -337,6 +401,13 @@ class V2Workflow:
         if not row:
             raise V2WorkflowError(f"unknown draft: {draft_id}")
         return V2Draft(row["id"], row["candidate_id"], row["content"], row["state"])
+
+    def draft_updated_at(self, draft_id: str) -> str:
+        """Return the durable timestamp for the draft's current state."""
+        row = self._db.execute("SELECT updated_at FROM v2_drafts WHERE id=?", (str(draft_id),)).fetchone()
+        if not row:
+            raise V2WorkflowError(f"unknown draft: {draft_id}")
+        return str(row["updated_at"])
 
     def get_draft_for_candidate(self, candidate_id: str) -> V2Draft | None:
         row = self._db.execute("SELECT id FROM v2_drafts WHERE candidate_id=?", (str(candidate_id),)).fetchone()
