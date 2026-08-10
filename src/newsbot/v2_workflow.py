@@ -225,24 +225,24 @@ class V2Workflow:
         return current
 
     def next_candidate_pending_notification(self) -> V2Candidate | None:
-        """Select one candidate whose Telegram notification was never sent or clearly failed."""
+        """Select the oldest candidate whose notification needs safe recovery or dispatch."""
         row = self._db.execute(
             "SELECT candidate.id FROM v2_candidates candidate "
             "LEFT JOIN v2_remote_effects effect "
             "ON effect.entity_id=candidate.id AND effect.stage='candidate_notification' "
-            "WHERE candidate.state=? AND (effect.entity_id IS NULL OR effect.status='failed') "
+            "WHERE candidate.state=? AND (effect.status IS NULL OR effect.status!='confirmed') "
             "ORDER BY candidate.created_at,candidate.id LIMIT 1",
             (V2State.PENDING_CANDIDATE.value,),
         ).fetchone()
         return None if row is None else self.get_candidate(str(row["id"]))
 
     def next_draft_approved_sheets_delivery(self) -> V2Draft | None:
-        """Select one approved draft with no non-retryable Sheets receipt."""
+        """Select the oldest approved draft, including one with a durable recovery receipt."""
         row = self._db.execute(
             "SELECT draft.id FROM v2_drafts draft "
             "LEFT JOIN v2_remote_effects effect "
             "ON effect.entity_id=draft.id AND effect.stage='sheets_delivery' "
-            "WHERE draft.state=? AND (effect.entity_id IS NULL OR effect.status='failed') "
+            "WHERE draft.state=? "
             "ORDER BY draft.created_at,draft.id LIMIT 1",
             (V2State.DRAFT_APPROVED.value,),
         ).fetchone()
@@ -492,6 +492,57 @@ class V2Workflow:
             self._db.execute("UPDATE v2_callbacks SET consumed_at=? WHERE token_hash=?", (now, token_hash))
         return entity_id, stage
 
+    def reconcile_expired_approval_capabilities(self, now: str) -> int:
+        """Move gates with no live approval capability to manual review."""
+        reconciled = 0
+        with self._db:
+            expired = self._db.execute(
+                "SELECT DISTINCT entity_id,stage FROM v2_callbacks callback "
+                "WHERE consumed_at IS NULL AND expires_at<=? "
+                "AND NOT EXISTS ("
+                "SELECT 1 FROM v2_callbacks live WHERE live.entity_id=callback.entity_id "
+                "AND live.stage=callback.stage AND live.consumed_at IS NULL AND live.expires_at>?"
+                ")",
+                (now, now),
+            ).fetchall()
+            for callback in expired:
+                entity_id, stage = str(callback["entity_id"]), str(callback["stage"])
+                if stage == "candidate":
+                    updated = self._db.execute(
+                        "UPDATE v2_candidates SET state=?,updated_at=? WHERE id=? AND state=?",
+                        (V2State.MANUAL_REVIEW.value, now, entity_id, V2State.PENDING_CANDIDATE.value),
+                    )
+                elif stage == "draft":
+                    draft = self._db.execute(
+                        "SELECT candidate_id FROM v2_drafts WHERE id=? AND state=?",
+                        (entity_id, V2State.DRAFT_PENDING_APPROVAL.value),
+                    ).fetchone()
+                    if draft is None:
+                        continue
+                    updated = self._db.execute(
+                        "UPDATE v2_candidates SET state=?,updated_at=? WHERE id=? AND state=?",
+                        (
+                            V2State.MANUAL_REVIEW.value,
+                            now,
+                            str(draft["candidate_id"]),
+                            V2State.DRAFT_PENDING_APPROVAL.value,
+                        ),
+                    )
+                    if updated.rowcount == 1:
+                        self._db.execute(
+                            "UPDATE v2_drafts SET state=?,updated_at=? WHERE id=?",
+                            (V2State.MANUAL_REVIEW.value, now, entity_id),
+                        )
+                else:
+                    continue
+                if updated.rowcount == 1:
+                    self._db.execute(
+                        "INSERT OR IGNORE INTO v2_manual_reviews(entity_id,reason,created_at) VALUES(?,?,?)",
+                        (entity_id, f"{stage} approval capability expired", now),
+                    )
+                    reconciled += 1
+        return reconciled
+
     def get_candidate(self, candidate_id: str) -> V2Candidate:
         row = self._candidate_row(candidate_id)
         payload = json.loads(row["payload"])
@@ -525,12 +576,12 @@ class V2Workflow:
         return None if row is None else self.get_draft(row["id"])
 
     def next_draft_pending_notification(self) -> V2Draft | None:
-        """Select one exact draft whose Telegram notification has not been attempted."""
+        """Select the oldest draft whose notification needs safe recovery or dispatch."""
         row = self._db.execute(
             "SELECT draft.id FROM v2_drafts draft "
             "LEFT JOIN v2_remote_effects effect "
             "ON effect.entity_id=draft.id AND effect.stage='draft_notification' "
-            "WHERE draft.state=? AND (effect.entity_id IS NULL OR effect.status='failed') "
+            "WHERE draft.state=? AND (effect.status IS NULL OR effect.status!='confirmed') "
             "ORDER BY draft.created_at,draft.id LIMIT 1",
             (V2State.DRAFT_PENDING_APPROVAL.value,),
         ).fetchone()
@@ -659,6 +710,7 @@ class V2Workflow:
         return V2CodexAttempt(int(inserted.lastrowid), digest, number, "pending", None)
 
     def settle_codex_attempt_failure(self, attempt_id: int, error_code: str, *, retryable: bool) -> str:
+        """Settle an attempt; only a proven pre-dispatch network failure may retry."""
         if not error_code or any(character.isspace() for character in error_code):
             raise ValueError("Codex error code must be a nonempty safe token")
         with self._db:
@@ -671,7 +723,11 @@ class V2Workflow:
             ).fetchone()
             if attempt is None:
                 raise V2WorkflowError("Codex attempt is not pending")
-            status = "retryable_failed" if retryable and int(attempt["number"]) < 2 else "terminal_failed"
+            status = (
+                "retryable_failed"
+                if retryable and error_code == "clear_pre_dispatch_network" and int(attempt["number"]) < 2
+                else "terminal_failed"
+            )
             now = self._now()
             self._db.execute(
                 "UPDATE v2_codex_attempts SET status=?,error_code=?,settled_at=? WHERE id=?",

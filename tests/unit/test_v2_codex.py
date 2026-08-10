@@ -9,11 +9,19 @@ from types import SimpleNamespace
 import pytest
 
 from newsbot import cli
-from newsbot.ai.codex_cli import CodexBusyError, CodexRunnerConfigError
+from newsbot.ai.codex_cli import (
+    CodexBusyError,
+    CodexCliProvider,
+    CodexNonzeroError,
+    CodexOuterTimeoutError,
+    CodexRunnerConfigError,
+    CodexTimeoutError,
+)
 from newsbot.collectors.base import SourceObservation, UrlCandidate
 from newsbot.config import ConfigError
 from newsbot.copywriting import Caption, CopyDraft, CoverPage, FactReference, FactualUnit
 from newsbot.v2_codex import (
+    CodexClearPreDispatchNetworkError,
     V2CodexErrorCode,
     V2CodexWorker,
     build_generation_request,
@@ -59,17 +67,137 @@ def test_preparation_is_deterministic_full_width_and_keeps_observation_as_eviden
 
 
 def test_provider_error_classification_is_bounded_and_secret_free() -> None:
-    assert classify_provider_error(CodexBusyError()).code is V2CodexErrorCode.BUSY
-    assert classify_provider_error(CodexBusyError()).retryable
+    assert not classify_provider_error(CodexBusyError()).retryable
     assert classify_provider_error(CodexRunnerConfigError()).code is V2CodexErrorCode.RUNNER_CONFIG
     assert not classify_provider_error(CodexRunnerConfigError()).retryable
     assert classify_provider_error(RuntimeError("password=secret")).code is V2CodexErrorCode.UNEXPECTED
+    assert classify_provider_error(CodexClearPreDispatchNetworkError()).retryable
 
 
 def test_exact_review_must_fit_one_telegram_message() -> None:
     assert exact_review_text("draft", "content") == "V2 exact draft draft\ncontent"
     with pytest.raises(ValueError, match="exceeds one Telegram message"):
         validate_exact_review_content("가" * 4096)
+
+
+def _approved_candidate(workflow: V2Workflow, post_id: str) -> V2Candidate:
+    candidate = workflow.record_observation(
+        SourceObservation(
+            channel_id="channel",
+            channel_handle="channel",
+            external_post_id=post_id,
+            published_at=datetime.now(UTC),
+            text=(
+                "OpenAI announced an enterprise AI infrastructure integration available to customers today. "
+                "The documented production rollout changes security controls and data processing for global users."
+            ),
+            urls=(UrlCandidate("https://example.test/source"),),
+        )
+    )
+    assert candidate is not None
+    return workflow.approve_candidate(candidate.id)
+
+
+class _FailingProvider:
+    def __init__(self, error: BaseException) -> None:
+        self.error = error
+        self.launches: list[bytes] = []
+
+    def prepare(self, request):
+        return CodexCliProvider().prepare(request)
+
+    async def generate_prepared(self, prepared):
+        self.launches.append(prepared.payload)
+        raise self.error
+
+
+@pytest.mark.parametrize(
+    ("error", "code"),
+    [
+        (CodexBusyError(), V2CodexErrorCode.BUSY),
+        (CodexTimeoutError(), V2CodexErrorCode.TIMEOUT),
+        (CodexOuterTimeoutError(), V2CodexErrorCode.OUTER_TIMEOUT),
+        (CodexNonzeroError(), V2CodexErrorCode.NONZERO),
+        (TimeoutError(), V2CodexErrorCode.UNEXPECTED),
+        (RuntimeError("uncertain provider effect"), V2CodexErrorCode.UNEXPECTED),
+    ],
+)
+def test_non_clear_provider_failures_settle_terminal_without_relaunch(tmp_path, error, code) -> None:
+    with V2Workflow(tmp_path / "v2.sqlite") as workflow:
+        candidate = _approved_candidate(workflow, f"failure-{code.value}")
+        provider = _FailingProvider(error)
+
+        with pytest.raises(type(error)):
+            asyncio.run(V2CodexWorker(workflow, provider).generate_next())
+
+        request = workflow.get_codex_request(candidate.id)
+        assert request is not None
+        assert request.status == "terminal_failed"
+        assert workflow.list_codex_attempts(candidate.id)[0].error_code == code.value
+        assert workflow.get_candidate(candidate.id).state == V2State.MANUAL_REVIEW
+        assert [attempt.status for attempt in workflow.list_codex_attempts(candidate.id)] == ["terminal_failed"]
+        assert asyncio.run(V2CodexWorker(workflow, provider).generate_next()) is None
+        assert len(provider.launches) == 1
+
+
+def test_clear_pre_dispatch_network_failure_retries_once_with_exact_request_bytes(tmp_path) -> None:
+    with V2Workflow(tmp_path / "v2.sqlite") as workflow:
+        candidate = _approved_candidate(workflow, "clear-network")
+        provider = _FailingProvider(CodexClearPreDispatchNetworkError())
+
+        with pytest.raises(CodexClearPreDispatchNetworkError):
+            asyncio.run(V2CodexWorker(workflow, provider).generate_next())
+
+        first_request = workflow.get_codex_request(candidate.id)
+        assert first_request is not None
+        assert first_request.status == "retryable_failed"
+        assert [attempt.status for attempt in workflow.list_codex_attempts(candidate.id)] == ["retryable_failed"]
+
+        with pytest.raises(CodexClearPreDispatchNetworkError):
+            asyncio.run(V2CodexWorker(workflow, provider).generate_next())
+
+        final_request = workflow.get_codex_request(candidate.id)
+        assert final_request is not None
+        assert final_request.request_bytes == first_request.request_bytes
+        assert final_request.digest == first_request.digest
+        assert final_request.status == "terminal_failed"
+        assert workflow.get_candidate(candidate.id).state == V2State.MANUAL_REVIEW
+        assert [attempt.status for attempt in workflow.list_codex_attempts(candidate.id)] == [
+            "retryable_failed",
+            "terminal_failed",
+        ]
+        assert len(provider.launches) == 2
+        assert asyncio.run(V2CodexWorker(workflow, provider).generate_next()) is None
+
+
+def test_interrupted_pending_attempt_is_settled_without_restart_relaunch(tmp_path) -> None:
+    database = tmp_path / "v2.sqlite"
+    with V2Workflow(database) as workflow:
+        candidate = _approved_candidate(workflow, "interrupted")
+        prepared = prepare_generation(candidate)
+        request = workflow.prepare_codex_request(candidate.id, prepared.request_bytes, prepared.request_digest)
+        workflow.begin_codex_attempt(candidate.id, request.digest)
+
+    with V2Workflow(database) as reopened:
+        provider = _FailingProvider(RuntimeError("should not launch"))
+        assert asyncio.run(V2CodexWorker(reopened, provider).generate_next()) is None
+        assert reopened.get_candidate(candidate.id).state == V2State.MANUAL_REVIEW
+        assert reopened.get_codex_request(candidate.id).status == "terminal_failed"
+        assert reopened.list_codex_attempts(candidate.id)[0].error_code == "interrupted"
+        assert provider.launches == []
+
+
+def test_worker_settles_cancellation_as_uncertain_terminal_outcome(tmp_path) -> None:
+    with V2Workflow(tmp_path / "v2.sqlite") as workflow:
+        candidate = _approved_candidate(workflow, "cancelled")
+        provider = _FailingProvider(asyncio.CancelledError())
+
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(V2CodexWorker(workflow, provider).generate_next())
+
+        assert workflow.get_codex_request(candidate.id).status == "terminal_failed"
+        assert workflow.get_candidate(candidate.id).state == V2State.MANUAL_REVIEW
+        assert len(provider.launches) == 1
 
 
 def test_worker_launches_persisted_exact_bytes_and_commits_one_draft(tmp_path) -> None:

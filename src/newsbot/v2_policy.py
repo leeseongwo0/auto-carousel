@@ -43,7 +43,7 @@ _SIGNIFICANT = {
     "regulation": r"\b(regulat(?:ion|ory|ed)|sec|lawsuit|legal action|court|ban)\b|규제|법원|소송|금지",
     "security": r"\b(hack(?:ed|ing)?|exploit(?:ed)?|breach|stolen|vulnerability)\b|해킹|취약점|탈취",
     "outage": r"\b(outage|downtime|halt(?:ed)?|shutdown)\b|장애|중단",
-    "bankruptcy": r"\b(bankrupt(?:cy|ed)?|insolv(?:ent|ency)|liquidat(?:ion|ed))\b|파산|청산",
+    "bankruptcy": r"\b(bankrupt(?:cy|ed)?|insolv(?:ent|ency))\b|파산",
     "etf": r"\b(etf|exchange.traded fund)\b|상장지수펀드",
 }
 _EXCLUSION_PATTERNS = {
@@ -54,6 +54,15 @@ _EXCLUSION_PATTERNS = {
     "opinion_rumor": r"\b(opinion|i think|probably|might|could|rumou?r|unconfirmed|anonymous source|according to commenters|reaction|hype)\b|의견|전망|루머|미확인|익명|커뮤니티 반응|소감|밈|하이프|쫓아야|무시해야",
     "minor_update": r"\b(ui|ux|design|bug fix|minor update|language support|roadmap|rebrand|branding|feature introduction)\b|UI|디자인|버그 수정|언어 지원|로드맵|브랜드명|기능 재소개",
 }
+_CORPORATE_LIQUIDATION = re.compile(
+    r"\b(?:winding up|wind-up|dissolution|dissolved|liquidation proceedings?)\b"
+    r"|(?:\b(?:company|companies|firm|corporation|business|entity|issuer)\b.{0,80}\bliquidat(?:ion|ed)\b)"
+    r"|(?:\bliquidat(?:ion|ed)\b.{0,80}\b(?:company|companies|firm|corporation|business|entity|issuer)\b)"
+    r"|(?:회사|법인|기업).{0,80}청산|청산.{0,80}(?:회사|법인|기업)|청산\s*(?:절차|개시|인|중)|해산",
+    re.I,
+)
+
+
 _UNCERTAIN = re.compile(
     r"\b(rumou?r|unconfirmed|might|could|reportedly|allegedly|anonymous source|예고|미확인|루머|전해졌다)\b|루머|미확인",
     re.I,
@@ -82,6 +91,13 @@ def _material_length(text: str) -> int:
 
 def _matches(text: str, patterns: dict[str, str]) -> list[str]:
     return [category for category, pattern in patterns.items() if re.search(pattern, text, re.I)]
+
+
+def _significant_events(text: str) -> list[str]:
+    significant = _matches(text, _SIGNIFICANT)
+    if _CORPORATE_LIQUIDATION.search(text):
+        significant.append("bankruptcy")
+    return significant
 
 
 def _has_topic(text: str, markers: Iterable[str]) -> bool:
@@ -115,7 +131,7 @@ def evaluate_v2_policy(
     published = observation.published_at.astimezone(UTC)
     text = unicodedata.normalize("NFC", observation.text)
     lowered = text.casefold()
-    significant = [name for name, pattern in _SIGNIFICANT.items() if re.search(pattern, text, re.I)]
+    significant = _significant_events(text)
     uncertain = bool(_UNCERTAIN.search(text))
     integration = bool(_INTEGRATION.search(text))
     if not _has_topic(lowered, topic_markers):

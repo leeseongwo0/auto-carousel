@@ -25,6 +25,7 @@ from .v2_live import (
     TelegramV2Notifier,
     V2LiveWorkflow,
     deliver_v2_google_sheets,
+    recover_v2_google_sheets_delivery,
     v2_draft_handoff_values,
 )
 from .v2_runtime import V2Runtime
@@ -169,6 +170,9 @@ def _deliver_google_sheets_draft(workflow: V2Workflow, draft: V2Draft, deadline:
         return draft
     if draft.state != V2State.DRAFT_APPROVED:
         raise V2WorkflowError("V2 Google Sheets delivery requires draft_approved")
+    receipt = workflow.remote_effect(draft.id, "sheets_delivery")
+    if receipt is not None and receipt["status"] != "failed":
+        return recover_v2_google_sheets_delivery(workflow, draft)
     if deadline <= 0:
         raise ValueError("--deadline must be positive")
     approved_at = datetime.fromisoformat(workflow.draft_updated_at(draft.id))
@@ -257,6 +261,7 @@ def telegram_tick(args: argparse.Namespace) -> int:
         if offset is None:
             raise V2WorkflowError("V2 Telegram cursor handoff is required")
         notifier = TelegramV2Notifier(adapter, deadline_seconds=args.deadline)
+        workflow.reconcile_expired_approval_capabilities(datetime.now(UTC).isoformat())
         live = V2LiveWorkflow(
             workflow,
             notify_candidate=cast(CandidateNotificationPort, notifier.candidate),
