@@ -15,6 +15,7 @@ from newsbot.sheets.base import (
     SheetDelivery,
 )
 from newsbot.v2_live import (
+    SheetsClearPreDispatchNetworkError,
     TelethonV2Collector,
     V2LiveWorkflow,
     deliver_v2_google_sheets,
@@ -360,6 +361,136 @@ def test_live_pending_sheets_claim_rejects_competing_sender(tmp_path):
             )
         assert not adapter.prepared
         assert not adapter.dispatched
+
+
+@pytest.mark.parametrize("phase", ["prepare", "attestation", "arm"])
+def test_sheets_untyped_pre_dispatch_failure_is_terminal_across_restart(phase, tmp_path):
+    db = tmp_path / f"{phase}.sqlite"
+
+    class FailingAdapter(ScriptedSheetsAdapter):
+        def prepare_delivery(self, **kwargs):
+            if phase == "prepare":
+                raise RuntimeError("local failure")
+            return super().prepare_delivery(**kwargs)
+
+        def dispatch_credential_attestation(self):
+            if phase == "attestation":
+                raise RuntimeError("credential failure")
+            return super().dispatch_credential_attestation()
+
+        def arm_prepared_dispatch(self):
+            if phase == "arm":
+                raise RuntimeError("arm failure")
+            return super().arm_prepared_dispatch()
+
+    with V2Workflow(db) as workflow:
+        _candidate, draft = approved_draft(workflow)
+        adapter = FailingAdapter(MetadataState.ABSENT)
+        result = deliver_v2_google_sheets(
+            workflow, draft, adapter, v2_draft_handoff_values(draft, "2026-08-09"), lease_seconds=120
+        )
+        assert result.state == V2State.MANUAL_REVIEW
+        receipt = workflow.remote_effect(draft.id, "sheets_delivery")
+        assert receipt is not None
+        assert receipt["status"] == "failed"
+        assert json.loads(str(receipt["detail"]))["failure"] == "terminal_pre_dispatch_failure"
+        assert not adapter.dispatched
+
+    with V2Workflow(db) as reopened:
+        assert reopened.next_draft_approved_sheets_delivery() is None
+
+
+def test_sheets_typed_clear_pre_dispatch_network_retries_once_without_dispatch(tmp_path):
+    db = tmp_path / "clear-network.sqlite"
+
+    class FailingAdapter(ScriptedSheetsAdapter):
+        def prepare_delivery(self, **kwargs):
+            self.prepared = True
+            raise SheetsClearPreDispatchNetworkError()
+
+    with V2Workflow(db) as workflow:
+        _candidate, draft = approved_draft(workflow)
+        adapter = FailingAdapter(MetadataState.ABSENT)
+        values = v2_draft_handoff_values(draft, "2026-08-09")
+        assert (
+            deliver_v2_google_sheets(workflow, draft, adapter, values, lease_seconds=120).state
+            == V2State.DRAFT_APPROVED
+        )
+        first = workflow.remote_effect(draft.id, "sheets_delivery")
+        assert first is not None and first["attempts"] == 1 and first["status"] == "failed"
+        assert workflow.next_draft_approved_sheets_delivery().id == draft.id
+
+    with V2Workflow(db) as reopened:
+        draft = reopened.next_draft_approved_sheets_delivery()
+        assert draft is not None
+        assert (
+            deliver_v2_google_sheets(
+                reopened,
+                draft,
+                FailingAdapter(MetadataState.ABSENT),
+                v2_draft_handoff_values(draft, "2026-08-09"),
+                lease_seconds=120,
+            ).state
+            == V2State.MANUAL_REVIEW
+        )
+        final = reopened.remote_effect(draft.id, "sheets_delivery")
+        assert final is not None and final["attempts"] == 2 and final["status"] == "failed"
+        assert reopened.next_draft_approved_sheets_delivery() is None
+
+
+@pytest.mark.parametrize(
+    ("status", "detail", "attempts"),
+    [
+        ("ambiguous", "unknown post-dispatch outcome", 1),
+        (
+            "failed",
+            json.dumps({"failure": "terminal_pre_dispatch_failure", "phase": "prepare_failed"}, sort_keys=True),
+            1,
+        ),
+        (
+            "failed",
+            json.dumps({"failure": "clear_pre_dispatch_network", "phase": "pre_dispatch_failed"}, sort_keys=True),
+            2,
+        ),
+    ],
+)
+def test_terminal_sheets_receipt_reconciles_manual_after_crash_without_credentials(
+    status, detail, attempts, monkeypatch, tmp_path, capsys
+):
+    db = tmp_path / f"terminal-{status}-{attempts}.sqlite"
+    with V2Workflow(db) as workflow:
+        _candidate, draft = approved_draft(workflow)
+        for _ in range(attempts):
+            workflow.record_remote_attempt(draft.id, "sheets_delivery")
+        workflow.settle_remote_effect(draft.id, "sheets_delivery", status, detail=detail)
+
+    monkeypatch.delenv("GOOGLE_SERVICE_ACCOUNT_FILE", raising=False)
+    monkeypatch.delenv("GOOGLE_SHEETS_SPREADSHEET_ID", raising=False)
+    with V2Workflow(db) as reopened:
+        selected = reopened.next_draft_approved_sheets_delivery()
+        assert selected is not None
+        assert v2_cli._deliver_google_sheets_draft(reopened, selected, 120).state == V2State.MANUAL_REVIEW
+        receipt = reopened.remote_effect(draft.id, "sheets_delivery")
+        assert receipt is not None and receipt["status"] == status and receipt["attempts"] == attempts
+
+    assert v2_cli.deliver_google_sheets_next(SimpleNamespace(db=db, deadline=120.0)) == 0
+    assert json.loads(capsys.readouterr().out) == {"status": "no_work"}
+
+
+def test_sheets_missing_credentials_settle_terminal_without_timer_loop(monkeypatch, tmp_path, capsys):
+    db = tmp_path / "credentials.sqlite"
+    with V2Workflow(db) as workflow:
+        _candidate, draft = approved_draft(workflow)
+    monkeypatch.delenv("GOOGLE_SERVICE_ACCOUNT_FILE", raising=False)
+    monkeypatch.delenv("GOOGLE_SHEETS_SPREADSHEET_ID", raising=False)
+
+    with V2Workflow(db) as workflow:
+        assert v2_cli._deliver_google_sheets_draft(workflow, draft, 120).state == V2State.MANUAL_REVIEW
+        receipt = workflow.remote_effect(draft.id, "sheets_delivery")
+        assert receipt is not None and receipt["status"] == "failed" and receipt["attempts"] == 1
+
+    assert v2_cli.deliver_google_sheets_next(SimpleNamespace(db=db, deadline=120.0)) == 0
+    assert json.loads(capsys.readouterr().out) == {"status": "no_work"}
 
 
 def test_generic_pending_remote_attempt_is_not_resent(tmp_path):

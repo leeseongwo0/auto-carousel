@@ -103,9 +103,11 @@ candidate-ID command: `newsbot-generate-codex.service` admits only the fixed
 Before launching the fixed Codex child, the `newsbot` parent persists the exact
 canonical request and an attempt receipt; the `newsbot-codex` child never opens
 either database. A successful validated output, its digest, the exact draft,
-and the `draft_pending_approval` transition commit atomically. An interrupted
-attempt enters `manual_review`; only busy, timeout, outer-timeout, and nonzero
-failures may use the one remaining identical-request attempt.
+and the `draft_pending_approval` transition commit atomically. An interrupted,
+busy, timeout, outer-timeout, nonzero, cancelled, or otherwise uncertain attempt
+enters `manual_review` without relaunch. Only the typed
+`clear_pre_dispatch_network` failure, which proves the provider was not invoked,
+may use the one remaining identical-request attempt.
 
 The V2 Telegram worker is the sole Bot API poll owner after cutover. Its cursor
 is stored only in the V2 database; it sends at most one draft-or-candidate
@@ -113,9 +115,13 @@ approval per tick, consumes only authorized V2 capabilities, and advances the
 cursor monotonically. `deliver-google-sheets-next` selects at most one
 second-approved draft, projects the immutable content onto the frozen A:V
 schema, and uses the existing prepared-mutation idempotency marker. A confirmed
-receipt is completed locally after restart, while an ambiguous receipt enters
-`manual_review` without a resend. The production collection, Telegram, Codex,
-and Sheets units do not infer or open the legacy database.
+receipt is completed locally after restart, while an ambiguous or interrupted
+post-dispatch receipt enters `manual_review` without resend. Before dispatch,
+only a typed `clear_pre_dispatch_network` failure may use one remaining attempt.
+Preparation, draft validation, credential/configuration, attestation, claim
+setup, unknown, and exhausted failures become terminal `manual_review` work and
+are not selected by later timer ticks. The production collection, Telegram,
+Codex, and Sheets units do not infer or open the legacy database.
 
 ## Legacy VPS automation compatibility
 
