@@ -13,7 +13,7 @@ import os
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from .collectors.base import SourceObservation, UrlCandidate
 from .collectors.telethon import TelethonCollector
@@ -111,6 +111,47 @@ def run_fixture(args: argparse.Namespace) -> int:
     return 0
 
 
+def generate_codex(args: argparse.Namespace) -> int:
+    """Generate one approved V2 candidate through the fixed Codex runner and notify its exact draft."""
+    from types import SimpleNamespace
+
+    from .approval.telegram import TelegramApprovalAdapter
+    from .sheets.base import SheetDelivery
+    from .v2_live import (
+        CandidateNotificationPort,
+        DraftNotificationPort,
+        SheetsDeliveryPort,
+        TelegramV2Notifier,
+        V2CodexGenerator,
+        V2LiveWorkflow,
+    )
+    from .v2_runtime import AmbiguousRemoteEffect
+    from .v2_workflow import V2Candidate, V2Draft
+
+    def refuse_candidate(_candidate: V2Candidate, _token: str) -> str | bool:
+        raise AmbiguousRemoteEffect("unexpected V2 candidate notification transition")
+
+    def refuse_sheets(_draft: V2Draft) -> SheetDelivery | bool:
+        raise AmbiguousRemoteEffect("unexpected V2 Sheets transition")
+
+    with V2Workflow(args.db) as workflow:
+        adapter = TelegramApprovalAdapter(
+            os.environ["TELEGRAM_BOT_TOKEN"],
+            cast(Any, SimpleNamespace(chat_id=int(os.environ["NEWSBOT_APPROVER_CHAT_ID"]))),
+        )
+        notifier = TelegramV2Notifier(adapter)
+        live = V2LiveWorkflow(
+            workflow,
+            notify_candidate=cast(CandidateNotificationPort, refuse_candidate),
+            generate_draft=V2CodexGenerator(),
+            notify_draft=cast(DraftNotificationPort, notifier.draft),
+            deliver_sheets=cast(SheetsDeliveryPort, refuse_sheets),
+        )
+        result = live.run(args.candidate_id)
+        print(json.dumps({"id": result.id, "state": result.state}))
+    return 0
+
+
 def status(args: argparse.Namespace) -> int:
     with V2Workflow(args.db) as workflow:
         candidates = workflow.list_candidates()
@@ -162,6 +203,10 @@ def build_parser() -> argparse.ArgumentParser:
     live.add_argument("--lookback-hours", type=int, choices=range(1, 169), default=24)
     live.add_argument("--limit", type=int, choices=range(1, 501), default=100)
     live.set_defaults(handler=collect_live)
+
+    codex = commands.add_parser("generate-codex", help="generate and notify one approved V2 candidate")
+    codex.add_argument("candidate_id")
+    codex.set_defaults(handler=generate_codex)
 
     fixture = commands.add_parser("collect-fixture")
     fixture.add_argument("--fixture", type=Path, required=True)
