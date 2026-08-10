@@ -1206,6 +1206,40 @@ def _advance_approval_poll_offset(storage: Storage, update_id: int) -> None:
         )
 
 
+def _settle_v2_callback_update(update: dict[str, Any], token: str) -> str | None:
+    database = os.environ.get("NEWSBOT_V2_DATABASE", "").strip()
+    if not database:
+        return None
+    callback = update.get("callback_query")
+    if not isinstance(callback, dict):
+        return None
+    message = callback.get("message")
+    user = callback.get("from")
+    if not isinstance(message, dict) or not isinstance(user, dict):
+        return None
+    chat = message.get("chat")
+    chat_id = chat.get("id") if isinstance(chat, dict) else None
+    user_id = user.get("id")
+    try:
+        expected_chat_id = int(os.environ["NEWSBOT_APPROVER_CHAT_ID"])
+        authorized_user_ids = {
+            int(value.strip()) for value in os.environ["NEWSBOT_APPROVER_USER_IDS"].split(",") if value.strip()
+        }
+        token_hash = hash_callback_token(token)
+    except (KeyError, ValueError):
+        return None
+    if chat_id != expected_chat_id or user_id not in authorized_user_ids:
+        return None
+    from .v2_workflow import V2Workflow
+
+    with V2Workflow(Path(database)) as workflow:
+        settled = workflow.settle_callback_any(token_hash, datetime.now(UTC).isoformat())
+    if settled is None:
+        return None
+    _entity_id, stage = settled
+    return f"v2_{stage}_approved"
+
+
 def _poll_approvals_unlocked(args: argparse.Namespace) -> int:
     config: AppConfig | None = None
     capabilities: list[Capability] = [Capability.APPROVE_POLL]
@@ -2379,6 +2413,18 @@ def telegram_tick(args: argparse.Namespace) -> int:
                 if admitted:
                     adapter.handle_update(update, automation_lease=poll, deadline=tick_deadline)
                     handled += 1
+                elif isinstance(token, str):
+                    v2_status = _settle_v2_callback_update(update, token)
+                    if v2_status is not None:
+                        callback_id = callback.get("id") if isinstance(callback, dict) else None
+                        if isinstance(callback_id, str):
+                            with suppress(Exception):
+                                adapter._request(
+                                    "answerCallbackQuery",
+                                    {"callback_query_id": callback_id, "text": v2_status},
+                                    deadline=tick_deadline,
+                                )
+                        handled += 1
                 _advance_approval_poll_offset(storage, int(update["update_id"]))
             poll_outcome = "done"
         finally:

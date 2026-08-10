@@ -254,6 +254,69 @@ class V2Workflow:
             self._db.execute("UPDATE v2_callbacks SET consumed_at=? WHERE token_hash=?", (now, token_hash))
         return str(row["entity_id"])
 
+    def consume_callback_any(self, token_hash: str, now: str) -> tuple[str, str] | None:
+        """Atomically consume an unexpired capability and return its bound entity and gate."""
+        with self._db:
+            row = self._db.execute(
+                "SELECT entity_id,stage FROM v2_callbacks WHERE token_hash=? AND consumed_at IS NULL AND expires_at>?",
+                (token_hash, now),
+            ).fetchone()
+            if row is None:
+                return None
+            self._db.execute("UPDATE v2_callbacks SET consumed_at=? WHERE token_hash=?", (now, token_hash))
+        return str(row["entity_id"]), str(row["stage"])
+
+    def settle_callback_any(self, token_hash: str, now: str) -> tuple[str, str] | None:
+        """Consume and apply one bound approval gate in the same transaction."""
+        with self._db:
+            callback = self._db.execute(
+                "SELECT entity_id,stage FROM v2_callbacks WHERE token_hash=? AND consumed_at IS NULL AND expires_at>?",
+                (token_hash, now),
+            ).fetchone()
+            if callback is None:
+                return None
+            entity_id = str(callback["entity_id"])
+            stage = str(callback["stage"])
+            if stage == "candidate":
+                updated = self._db.execute(
+                    "UPDATE v2_candidates SET state=?,updated_at=? WHERE id=? AND state=?",
+                    (
+                        V2State.CANDIDATE_APPROVED.value,
+                        now,
+                        entity_id,
+                        V2State.PENDING_CANDIDATE.value,
+                    ),
+                )
+                if updated.rowcount != 1:
+                    return None
+            elif stage == "draft":
+                draft = self._db.execute(
+                    "SELECT candidate_id FROM v2_drafts WHERE id=? AND state=?",
+                    (entity_id, V2State.DRAFT_PENDING_APPROVAL.value),
+                ).fetchone()
+                if draft is None:
+                    return None
+                candidate_id = str(draft["candidate_id"])
+                updated = self._db.execute(
+                    "UPDATE v2_candidates SET state=?,updated_at=? WHERE id=? AND state=?",
+                    (
+                        V2State.DRAFT_APPROVED.value,
+                        now,
+                        candidate_id,
+                        V2State.DRAFT_PENDING_APPROVAL.value,
+                    ),
+                )
+                if updated.rowcount != 1:
+                    return None
+                self._db.execute(
+                    "UPDATE v2_drafts SET state=?,updated_at=? WHERE id=?",
+                    (V2State.DRAFT_APPROVED.value, now, entity_id),
+                )
+            else:
+                return None
+            self._db.execute("UPDATE v2_callbacks SET consumed_at=? WHERE token_hash=?", (now, token_hash))
+        return entity_id, stage
+
     def get_candidate(self, candidate_id: str) -> V2Candidate:
         row = self._candidate_row(candidate_id)
         payload = json.loads(row["payload"])
