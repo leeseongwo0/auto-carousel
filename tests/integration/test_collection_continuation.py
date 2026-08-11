@@ -272,17 +272,19 @@ def test_mocked_telethon_provenance_mapping_is_complete():
         action=SimpleNamespace(kind="service"),
     )
 
-    observation = _observation_from_message(message, "channel-1", "channel_one")
+    observation = _observation_from_message(message, "channel-1", "channel_one", NOW + timedelta(minutes=2))
 
     assert observation.channel_id == "channel-1"
     assert observation.external_post_id == "7"
     assert observation.published_at == NOW
     assert observation.edited_at == NOW + timedelta(minutes=1)
+    assert observation.observed_at == NOW + timedelta(minutes=2)
     assert observation.kind == "service"
     assert observation.sponsored
     assert {(url.url, url.source, url.title, url.description) for url in observation.urls} == {
         ("https://hidden.example", "entity", None, None),
         ("https://shown.example", "entity", None, None),
+        ("https://shown.example", "bare", None, None),
         ("https://bare.example", "bare", None, None),
         ("https://preview.example", "preview", "Preview title", "Preview description"),
     }

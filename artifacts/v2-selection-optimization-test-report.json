@@ -1,0 +1,80 @@
+{
+  "schemaVersion": 1,
+  "kind": "api-package-test-report",
+  "scope": "Newsbot V2 selection optimization priorities 1-5, 7, 9, and 11; non-goals 6, 8, and 10",
+  "commands": [
+    {
+      "command": ".venv/bin/pytest -q",
+      "exitCode": 0,
+      "result": "679 passed, 1 skipped in 11.64s"
+    },
+    {
+      "command": "PYTHONPATH=.:src .venv/bin/pytest -q tests/unit/test_v2_*.py tests/unit/test_telethon_collector.py tests/integration/test_v2_*.py tests/integration/test_collection_continuation.py tests/e2e/test_v2_cutover.py --junitxml=artifacts/v2-selection-optimization-junit.xml",
+      "exitCode": 0,
+      "result": "255 passed in 2.67s",
+      "artifact": "artifacts/v2-selection-optimization-junit.xml"
+    },
+    {
+      "command": ".venv/bin/ruff format --check . && .venv/bin/ruff check .",
+      "exitCode": 0,
+      "result": "109 files already formatted; all checks passed"
+    },
+    {
+      "command": ".venv/bin/mypy src",
+      "exitCode": 0,
+      "result": "Success: no issues found in 41 source files"
+    }
+  ],
+  "contractEvidence": {
+    "urlAndBodyIdentity": [
+      "tests.unit.test_v2_article",
+      "tests.integration.test_v2_selection_flow",
+      "tests.integration.test_v2_selection_retention"
+    ],
+    "titleDatePolicyAndKorean": [
+      "tests.unit.test_v2_policy",
+      "tests.integration.test_v2_selection_flow"
+    ],
+    "ssrfTransport": [
+      "tests.unit.test_v2_article",
+      "tests.integration.test_v2_article_security"
+    ],
+    "editsCasRetriesAndBackpressure": [
+      "tests.unit.test_v2_workflow",
+      "tests.unit.test_telethon_collector",
+      "tests.integration.test_collection_continuation",
+      "tests.integration.test_v2_selection_flow"
+    ],
+    "approvalsEffectsAndMessage": [
+      "tests.unit.test_v2_live",
+      "tests.unit.test_v2_workflow",
+      "tests.e2e.test_v2_cutover"
+    ],
+    "migrationRetentionStatusAndCutover": [
+      "tests.integration.test_v2_migrations",
+      "tests.integration.test_v2_selection_retention",
+      "tests.integration.test_v2_selection_flow",
+      "tests.e2e.test_v2_cutover"
+    ],
+    "observability": [
+      "tests.unit.test_v2_observability",
+      "tests.unit.test_v2_article.test_private_harness_rejection_emits_only_bounded_alert"
+    ],
+    "reviewBlockerRepairs": [
+      "tests.unit.test_v2_workflow.test_manual_review_wins_before_every_outbound_claim",
+      "tests.unit.test_v2_workflow.test_migrate_mode_refuses_missing_database_without_creating_it",
+      "tests.unit.test_v2_live.test_failed_notification_is_terminally_reconciled_after_reopen",
+      "tests.unit.test_v2_live.test_failed_draft_notification_is_terminally_reconciled_after_reopen",
+      "tests.integration.test_v2_migrations.test_predecessor_schema_versions_migrate_to_current_schema",
+      "tests.integration.test_v2_migrations.test_migration_preflight_checks_backup_capacity_on_distinct_filesystem",
+      "tests.integration.test_v2_article_security.test_each_redirect_is_resolved_and_private_rebinding_never_connects"
+    ],
+    "explicitNonGoals": {
+      "6": "tests.unit.test_v2_live.test_candidate_notifier_sends_one_approve_action_from_bound_evidence",
+      "8": "Schema exactness and required-column tests contain no policy-version/history table or API; only current outcome/reason remain",
+      "10": "tests.unit.test_v2_workflow.test_post_claim_edit_is_retained_without_reevaluation_or_resend"
+    }
+  },
+  "productionMutation": false,
+  "notes": "The JUnit artifact contains every focused V2 test node and terminal result. Production migration and cutover remain separately authorized release operations."
+}
