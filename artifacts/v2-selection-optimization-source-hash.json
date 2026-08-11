@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "kind": "source-change-set-hash",
+  "algorithm": "For each sorted path: SHA-256 update(path UTF-8), NUL, then file bytes and NUL; for a deleted path use literal UTF-8 <deleted> and NUL instead of file bytes.",
+  "sourceHash": "sha256:2d349ca1891952adf94c85e30bc63b724a4ce738437375faef16a52801a33e41",
+  "paths": [
+    "artifacts/v2-selection-optimization-junit.xml",
+    "artifacts/v2-selection-optimization-test-report.json",
+    "docs/operations.md",
+    "pyproject.toml",
+    "src/newsbot/cli.py",
+    "src/newsbot/collectors/base.py",
+    "src/newsbot/collectors/telethon.py",
+    "src/newsbot/v2_article.py",
+    "src/newsbot/v2_cli.py",
+    "src/newsbot/v2_live.py",
+    "src/newsbot/v2_observability.py",
+    "src/newsbot/v2_policy.py",
+    "src/newsbot/v2_runtime.py",
+    "src/newsbot/v2_workflow.py",
+    "tests/e2e/test_v2_cutover.py",
+    "tests/integration/test_collection_continuation.py",
+    "tests/integration/test_v2_article_security.py",
+    "tests/integration/test_v2_migrations.py",
+    "tests/integration/test_v2_selection_flow.py",
+    "tests/integration/test_v2_selection_retention.py",
+    "tests/unit/test_telethon_collector.py",
+    "tests/unit/test_v2_article.py",
+    "tests/unit/test_v2_codex.py",
+    "tests/unit/test_v2_live.py",
+    "tests/unit/test_v2_observability.py",
+    "tests/unit/test_v2_policy.py",
+    "tests/unit/test_v2_runtime.py",
+    "tests/unit/test_v2_workflow.py",
+    "tests/v2_support.py",
+    "uv.lock"
+  ],
+  "deletedPaths": [
+    "src/newsbot/v2_runtime.py",
+    "tests/unit/test_v2_runtime.py"
+  ],
+  "excluded": [
+    ".gjc/**",
+    "artifacts/v2-selection-optimization-source-hash.json",
+    "artifacts/v2-selection-optimization-security-report.json"
+  ]
+}

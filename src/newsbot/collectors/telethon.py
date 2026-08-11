@@ -6,8 +6,9 @@ import asyncio
 import re
 import time
 from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar, cast
 
 from .base import Engagement, Media, SourceObservation, UrlCandidate
 
@@ -16,6 +17,13 @@ _Result = TypeVar("_Result")
 
 class TelethonRetryError(RuntimeError):
     """A bounded live-collection retry was exhausted or unsafe to wait for."""
+
+
+@dataclass(frozen=True)
+class EditSweepPage:
+    observations: tuple[SourceObservation, ...]
+    next_before_message_id: int | None
+    complete: bool
 
 
 class TelethonCollector:
@@ -103,18 +111,113 @@ class TelethonCollector:
             client = await self._client_instance()
             await client.connect()
             rows: list[SourceObservation] = []
+            observed_at = datetime.now(UTC)
             async for message in client.iter_messages(handle, **request):
-                date = _as_utc(message.date)
+                date = _as_utc(getattr(message, "date", None), fallback=observed_at)
                 if upper_bound is not None and date > upper_bound.astimezone(UTC):
                     break
                 if lower_bound is not None and date < lower_bound.astimezone(UTC):
                     continue
                 if after is not None and (date.isoformat(), str(message.id)) <= after:
                     continue
-                rows.append(_observation_from_message(message, channel_id, handle))
+                rows.append(_observation_from_message(message, channel_id, handle, observed_at))
                 if limit is not None and len(rows) >= limit:
                     break
             return tuple(rows)
+
+        return await self._with_retry(fetch)
+
+    async def collect_ascending(
+        self,
+        channel: object,
+        *,
+        after_message_id: int | None,
+        upper_message_id: int,
+        limit: int,
+        lower_bound: datetime | None = None,
+    ) -> Sequence[SourceObservation]:
+        """Return one bounded, ascending new-message page within a fixed ID range."""
+        if after_message_id is not None and after_message_id < 0:
+            raise ValueError("after_message_id must be nonnegative")
+        if upper_message_id < 1:
+            raise ValueError("upper_message_id must be positive")
+        if after_message_id is not None and after_message_id >= upper_message_id:
+            return ()
+        _require_page_limit(limit)
+        return await self.collect(
+            channel,
+            min_message_id=after_message_id,
+            max_message_id=upper_message_id,
+            lower_bound=lower_bound,
+            limit=limit,
+        )
+
+    async def collect_edit_sweep(
+        self,
+        channel: object,
+        *,
+        after: tuple[datetime, int] | None,
+        before_message_id: int | None,
+        lower_bound: datetime,
+        limit: int,
+    ) -> EditSweepPage:
+        """Inspect one bounded newest-to-oldest page in a rotating history sweep."""
+        _require_page_limit(limit)
+        if lower_bound.tzinfo is None:
+            raise ValueError("edit sweep lower bound must be timezone-aware")
+        if before_message_id is not None and before_message_id <= 0:
+            raise ValueError("edit sweep cursor must be a positive message ID")
+        if after is not None:
+            after_at, after_message_id = after
+            if after_at.tzinfo is None or after_message_id < 0:
+                raise ValueError("edit cursor must contain an aware timestamp and nonnegative message ID")
+            cursor = (after_at.astimezone(UTC), after_message_id)
+        else:
+            cursor = None
+        cutoff = lower_bound.astimezone(UTC)
+        handle = getattr(channel, "handle", str(channel)).lstrip("@")
+        channel_id = str(getattr(channel, "id", handle))
+
+        async def fetch() -> EditSweepPage:
+            client = await self._client_instance()
+            await client.connect()
+            observed_at = datetime.now(UTC)
+            request: dict[str, object] = {"limit": limit}
+            if before_message_id is not None:
+                request["offset_id"] = before_message_id
+            inspected_ids: list[int] = []
+            observations: list[SourceObservation] = []
+            complete = False
+            async for message in client.iter_messages(handle, **request):
+                message_id = int(message.id)
+                inspected_ids.append(message_id)
+                published_at = _as_utc(
+                    getattr(message, "date", None),
+                    fallback=observed_at,
+                )
+                if published_at < cutoff:
+                    complete = True
+                    break
+                observation = _observation_from_message(
+                    message,
+                    channel_id,
+                    handle,
+                    observed_at,
+                )
+                if observation.edited_at is None:
+                    continue
+                if cursor is not None and _revision_cursor(observation) <= cursor:
+                    continue
+                observations.append(observation)
+            if len(inspected_ids) < limit:
+                complete = True
+            observations.sort(key=_revision_cursor)
+            next_before = None if complete or not inspected_ids else min(inspected_ids)
+            return EditSweepPage(
+                tuple(observations),
+                next_before,
+                complete,
+            )
 
         return await self._with_retry(fetch)
 
@@ -182,20 +285,32 @@ def _is_retryable(error: Exception) -> bool:
 _URL_PATTERN = re.compile(r"https?://[^\s<>()\[\]{}\"']+", re.IGNORECASE)
 
 
-def _observation_from_message(message: Any, channel_id: str, handle: str) -> SourceObservation:
+def _observation_from_message(
+    message: Any,
+    channel_id: str,
+    handle: str,
+    observed_at: datetime,
+) -> SourceObservation:
     text = str(getattr(message, "message", None) or "")
     action = getattr(message, "action", None)
+    deleted = _is_deleted_message(message)
+    preview = _preview_from_message(message)
+    preview_title = _string_or_none(getattr(preview, "title", None))
+    preview_description = _string_or_none(getattr(preview, "description", None))
+    published_at = _as_utc(getattr(message, "date", None), fallback=observed_at)
     return SourceObservation(
         channel_id=channel_id,
         channel_handle=handle,
         external_post_id=str(message.id),
-        published_at=_as_utc(message.date),
+        published_at=published_at,
         text=text,
-        edited_at=_as_utc(message.edit_date) if getattr(message, "edit_date", None) else None,
-        observed_at=None,
-        kind="service" if action is not None else "message",
+        edited_at=_datetime_or_none(getattr(message, "edit_date", None)),
+        observed_at=observed_at,
+        preview_title=preview_title,
+        preview_description=preview_description,
+        kind="deleted" if deleted else "service" if action is not None else "message",
         sponsored=bool(getattr(message, "sponsored", False)),
-        urls=_urls_from_message(message, text),
+        urls=_urls_from_message(message, text, preview),
         media=_media_from_message(message, text, action is not None),
         engagement=Engagement(
             views=_integer_or_none(getattr(message, "views", None)),
@@ -205,42 +320,64 @@ def _observation_from_message(message: Any, channel_id: str, handle: str) -> Sou
     )
 
 
-def _urls_from_message(message: Any, text: str) -> tuple[UrlCandidate, ...]:
-    urls: list[UrlCandidate] = []
-    entity_urls: set[str] = set()
-    for entity in getattr(message, "entities", None) or ():
-        value = getattr(entity, "url", None)
-        if not value:
-            offset = getattr(entity, "offset", None)
-            length = getattr(entity, "length", None)
-            if isinstance(offset, int) and isinstance(length, int):
-                value = _entity_text(text, offset, length)
-        if isinstance(value, str) and value.startswith(("http://", "https://")):
-            entity_urls.add(value)
-            urls.append(UrlCandidate(value, source="entity"))
-
-    for match in _URL_PATTERN.finditer(text):
-        value = match.group(0).rstrip(".,!?:;")
-        if value not in entity_urls:
-            urls.append(UrlCandidate(value, source="bare"))
-    preview = getattr(message, "web_preview", None)
-    if not getattr(preview, "url", None):
-        preview = getattr(getattr(message, "media", None), "webpage", None)
+def _urls_from_message(message: Any, text: str, preview: Any | None = None) -> tuple[UrlCandidate, ...]:
+    candidates: list[tuple[Literal["preview", "entity", "bare"], str, str | None, str | None]] = []
+    if preview is None:
+        preview = _preview_from_message(message)
     preview_url = getattr(preview, "url", None)
-    if isinstance(preview_url, str) and preview_url.startswith(("http://", "https://")):
-        urls.append(
-            UrlCandidate(
-                preview_url,
-                source="preview",
-                title=_string_or_none(getattr(preview, "title", None)),
-                description=_string_or_none(getattr(preview, "description", None)),
+    if _is_http_url(preview_url):
+        candidates.append(
+            (
+                "preview",
+                cast(str, preview_url),
+                _string_or_none(getattr(preview, "title", None)),
+                _string_or_none(getattr(preview, "description", None)),
             )
         )
-    return tuple(urls)
+
+    entities: list[tuple[int, int, str]] = []
+    for index, entity in enumerate(getattr(message, "entities", None) or ()):
+        value = getattr(entity, "url", None)
+        offset = getattr(entity, "offset", None)
+        length = getattr(entity, "length", None)
+        if not _is_http_url(value) and isinstance(offset, int) and isinstance(length, int):
+            value = _entity_text(text, offset, length)
+        if _is_http_url(value):
+            entities.append(
+                (
+                    offset if isinstance(offset, int) else len(text.encode("utf-16-le")) // 2,
+                    index,
+                    cast(str, value),
+                )
+            )
+    for _, _, value in sorted(entities):
+        candidates.append(("entity", value, None, None))
+
+    for match in _URL_PATTERN.finditer(text):
+        candidates.append(("bare", match.group(0).rstrip(".,!?:;"), None, None))
+
+    return tuple(
+        UrlCandidate(url=value, source=source, title=title, description=description, occurrence=index)
+        for index, (source, value, title, description) in enumerate(candidates)
+    )
+
+
+def _preview_from_message(message: Any) -> Any | None:
+    preview = getattr(message, "web_preview", None)
+    return preview if getattr(preview, "url", None) else getattr(getattr(message, "media", None), "webpage", None)
+
+
+def _is_http_url(value: Any) -> bool:
+    return isinstance(value, str) and value.startswith(("http://", "https://"))
 
 
 def _entity_text(text: str, offset: int, length: int) -> str:
-    return text.encode("utf-16-le")[offset * 2 : (offset + length) * 2].decode("utf-16-le")
+    if offset < 0 or length < 0:
+        return ""
+    try:
+        return text.encode("utf-16-le")[offset * 2 : (offset + length) * 2].decode("utf-16-le")
+    except UnicodeDecodeError:
+        return ""
 
 
 def _media_from_message(message: Any, caption: str, is_service: bool) -> tuple[Media, ...]:
@@ -288,5 +425,26 @@ def _string_or_none(value: Any) -> str | None:
     return value if isinstance(value, str) else None
 
 
-def _as_utc(value: datetime) -> datetime:
+def _require_page_limit(limit: int) -> None:
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+        raise ValueError("page limit must be a positive integer")
+
+
+def _revision_cursor(observation: SourceObservation) -> tuple[datetime, int]:
+    return (observation.edited_at or observation.published_at, int(observation.external_post_id))
+
+
+def _is_deleted_message(message: Any) -> bool:
+    return type(message).__name__ in {"MessageDeleted", "MessageEmpty"}
+
+
+def _datetime_or_none(value: Any) -> datetime | None:
+    return _as_utc(value) if isinstance(value, datetime) else None
+
+
+def _as_utc(value: datetime | None, *, fallback: datetime | None = None) -> datetime:
+    if value is None:
+        if fallback is None:
+            raise ValueError("Telegram message timestamp is missing")
+        return fallback.astimezone(UTC)
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)

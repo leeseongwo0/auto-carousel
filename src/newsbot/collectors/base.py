@@ -18,6 +18,7 @@ class UrlCandidate:
     source: Literal["preview", "entity", "bare"] = "bare"
     title: str | None = None
     description: str | None = None
+    occurrence: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +55,8 @@ class SourceObservation:
     text: str = ""
     edited_at: datetime | None = None
     observed_at: datetime | None = None
+    preview_title: str | None = None
+    preview_description: str | None = None
     kind: MessageKind = "message"
     sponsored: bool = False
     urls: tuple[UrlCandidate, ...] = ()
@@ -64,8 +67,10 @@ class SourceObservation:
     def __post_init__(self) -> None:
         if not self.channel_id or not self.external_post_id:
             raise ValueError("channel_id and external_post_id are required")
-        if self.published_at.tzinfo is None:
-            raise ValueError("published_at must be timezone-aware")
+        for name in ("published_at", "edited_at", "observed_at"):
+            value = getattr(self, name)
+            if value is not None and value.tzinfo is None:
+                raise ValueError(f"{name} must be timezone-aware")
 
 
 class Collector(Protocol):

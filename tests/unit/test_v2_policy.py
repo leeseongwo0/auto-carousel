@@ -3,7 +3,13 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from newsbot.collectors.base import SourceObservation, UrlCandidate
-from newsbot.v2_policy import V2Outcome, evaluate_v2_policy
+from newsbot.v2_policy import (
+    SourceDisposition,
+    V2Outcome,
+    V2PolicyInput,
+    evaluate_v2_content,
+    evaluate_v2_policy,
+)
 
 NOW = datetime(2026, 8, 9, tzinfo=UTC)
 
@@ -134,5 +140,182 @@ def test_analyst_investment_cycle_outlook_is_non_news() -> None:
 def test_analyst_attribution_does_not_mask_completed_factual_news(text: str) -> None:
     result = evaluate_v2_policy(obs(text + "verified deployment facts " * 20), now=NOW)
 
+    assert result.outcome is V2Outcome.CANDIDATE
+    assert result.reason == "clear_candidate"
+
+
+def content(text: str, *, body: str | None = None) -> V2PolicyInput:
+    return V2PolicyInput(text, NOW - timedelta(hours=1), "https://publisher.example/story", article_body=body)
+
+
+def test_titles_do_not_satisfy_article_body_gate() -> None:
+    result = evaluate_v2_content(content("AI blockchain", body=None), now=NOW)
+    assert result == evaluate_v2_content(content("AI blockchain", body="short body"), now=NOW)
+    assert result.category == "body"
+
+
+@pytest.mark.parametrize(
+    ("text", "outcome", "reason"),
+    [
+        (
+            "블록체인 기업은 해킹되지 않았으며 서비스 장애도 없다. " + "확인된 사실 " * 30,
+            V2Outcome.CANDIDATE,
+            "clear_candidate",
+        ),
+        (
+            "블록체인 해킹이 발생했다는 루머가 전해졌다. " + "확인된 사실 " * 30,
+            V2Outcome.AMBIGUOUS,
+            "important_unconfirmed",
+        ),
+        (
+            "AI 블록체인 기업이 파트너십을 발표했지만 구체적 도입 계획은 없다. " + "설명 " * 30,
+            V2Outcome.NON_NEWS,
+            "partnership",
+        ),
+        (
+            "AI blockchain partnership integrates payments for named customers today. " + "facts " * 30,
+            V2Outcome.CANDIDATE,
+            "clear_candidate",
+        ),
+    ],
+)
+def test_clause_aware_korean_and_mixed_context(text: str, outcome: V2Outcome, reason: str) -> None:
+    result = evaluate_v2_content(content(text), now=NOW)
+    assert (result.outcome, result.reason) == (outcome, reason)
+
+
+def test_trusted_date_conflict_is_ambiguous_before_context_routing() -> None:
+    value = V2PolicyInput(
+        "AI blockchain outage confirmed. " + "facts " * 20,
+        NOW - timedelta(hours=1),
+        "https://publisher.example/story",
+        source_date_conflict=True,
+    )
+    assert evaluate_v2_content(value, now=NOW).reason == "date_conflict"
+
+
+def test_date_conflict_uses_fresh_telegram_date_not_stale_source_date() -> None:
+    value = V2PolicyInput(
+        "AI blockchain outage confirmed. " + "facts " * 20,
+        NOW - timedelta(hours=1),
+        "https://publisher.example/story",
+        article_body="AI blockchain outage evidence. " + "facts " * 20,
+        source_date=NOW - timedelta(days=3),
+        source_date_conflict=True,
+        source_disposition=SourceDisposition.SUCCESS,
+    )
+    result = evaluate_v2_content(value, now=NOW)
+    assert (result.outcome, result.reason) == (
+        V2Outcome.AMBIGUOUS,
+        "date_conflict",
+    )
+
+
+@pytest.mark.parametrize(
+    "sponsored,text",
+    (
+        (
+            True,
+            "AI blockchain company announced a confirmed security breach. ",
+        ),
+        (
+            False,
+            "Sponsored AI blockchain partnership deployed payments for named customers. ",
+        ),
+    ),
+)
+def test_promotion_and_material_exception_conflicts_are_ambiguous(
+    sponsored: bool,
+    text: str,
+) -> None:
+    value = V2PolicyInput(
+        text + "verified facts " * 20,
+        NOW - timedelta(hours=1),
+        "https://publisher.example/story",
+        article_body=text + "verified facts " * 20,
+        sponsored=sponsored,
+        source_disposition=SourceDisposition.SUCCESS,
+    )
+    result = evaluate_v2_content(value, now=NOW)
+    assert (result.outcome, result.reason) == (
+        V2Outcome.AMBIGUOUS,
+        "context_conflict",
+    )
+
+
+@pytest.mark.parametrize(
+    ("disposition", "expected"),
+    (
+        (
+            SourceDisposition.SUCCESS,
+            (V2Outcome.AMBIGUOUS, "source_body_insufficient"),
+        ),
+        (
+            SourceDisposition.SOURCE_UNAVAILABLE,
+            (V2Outcome.AMBIGUOUS, "source_unavailable"),
+        ),
+        (
+            SourceDisposition.UNSAFE_SOURCE_URL,
+            (V2Outcome.NON_NEWS, "unsafe_source_url"),
+        ),
+        (
+            SourceDisposition.NO_ELIGIBLE_URL,
+            (V2Outcome.NON_NEWS, "url_gate"),
+        ),
+    ),
+)
+def test_source_disposition_body_matrix_is_total(
+    disposition: SourceDisposition,
+    expected: tuple[V2Outcome, str],
+) -> None:
+    telegram = "AI blockchain network confirmed a product deployment. " + "facts " * 20
+    value = V2PolicyInput(
+        telegram,
+        NOW - timedelta(hours=1),
+        "https://publisher.example/story",
+        article_body="tiny heading",
+        source_disposition=disposition,
+    )
+    result = evaluate_v2_content(value, now=NOW)
+    assert (result.outcome, result.reason) == expected
+
+
+def test_korean_topic_boundaries_allow_particles_not_unrelated_compounds() -> None:
+    accepted = evaluate_v2_content(
+        content("블록체인은 규제기관의 승인을 받았다. " + "사실 " * 30),
+        now=NOW,
+    )
+    rejected = evaluate_v2_content(
+        content("이 문서는 블록체인화를 비유로 설명한다. " + "일반 내용 " * 30),
+        now=NOW,
+    )
+    assert accepted.category != "topic"
+    assert rejected.category == "topic"
+
+
+def test_korean_topic_boundaries_allow_stacked_particles() -> None:
+    result = evaluate_v2_content(
+        content("가상자산에서도 규제기관의 승인이 발표됐다. " + "확인된 사실 " * 30),
+        now=NOW,
+    )
+    assert result.category != "topic"
+
+
+def test_all_structured_text_fields_are_nfc_normalized() -> None:
+    decomposed = "인공지능"
+    value = V2PolicyInput(
+        "일반 기술 발표 " + "확인된 사실 " * 30,
+        NOW - timedelta(hours=1),
+        "https://publisher.example/story",
+        preview_title=decomposed,
+    )
+    assert evaluate_v2_content(value, now=NOW).category != "topic"
+
+
+def test_negation_is_scoped_to_the_nearby_event() -> None:
+    result = evaluate_v2_content(
+        content("블록체인 서비스 장애는 없었다. 규제기관이 비트코인 ETF를 승인했다. " + "확인된 사실 " * 30),
+        now=NOW,
+    )
     assert result.outcome is V2Outcome.CANDIDATE
     assert result.reason == "clear_candidate"

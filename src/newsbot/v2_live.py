@@ -6,25 +6,31 @@ It records a send receipt before any later approval callback can advance the sta
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
-import inspect
+import html
 import json
 import secrets
-from collections.abc import Callable, Sequence
+import unicodedata
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol, cast
 
 from .ai.structured_copy import draft_from_mapping
 from .approval.base import hash_callback_token
-from .collectors.base import SourceObservation
 from .copywriting import validate_copy
 from .sheets.base import DeliveryOutcome, MetadataState, SheetDelivery
 from .sheets.schema import project_handoff
 from .v2_codex import exact_review_text
-from .v2_runtime import AmbiguousRemoteEffect, ClearNetworkFailure
 from .v2_workflow import V2Candidate, V2Draft, V2State, V2Workflow, V2WorkflowError
+
+
+class ClearNetworkFailure(RuntimeError):
+    """A typed failure proven to have occurred before remote dispatch."""
+
+
+class AmbiguousRemoteEffect(RuntimeError):
+    """A remote outcome that must never be retried blindly."""
 
 
 class SheetsClearPreDispatchNetworkError(RuntimeError):
@@ -39,179 +45,181 @@ class DraftNotificationPort(Protocol):
     def __call__(self, draft: V2Draft, callback_token: str) -> str | bool: ...
 
 
-class GenerationPort(Protocol):
-    def __call__(self, candidate: V2Candidate) -> str: ...
-
-
-class SheetsDeliveryPort(Protocol):
-    def __call__(self, draft: V2Draft) -> SheetDelivery | bool: ...
-
-
 class V2LiveWorkflow:
-    """Stateful V2 adapter coordinator with asynchronous capability settlement."""
+    """Notification-only coordinator for the two human approval gates."""
 
     def __init__(
         self,
         workflow: V2Workflow,
         *,
         notify_candidate: CandidateNotificationPort,
-        generate_draft: GenerationPort,
         notify_draft: DraftNotificationPort,
-        deliver_sheets: SheetsDeliveryPort,
-        max_retries: int = 1,
         callback_ttl: timedelta = timedelta(days=1),
     ) -> None:
-        if max_retries < 0 or callback_ttl <= timedelta():
+        if callback_ttl <= timedelta():
             raise ValueError("invalid live workflow limits")
         self.workflow = workflow
         self.notify_candidate = notify_candidate
-        self.generate_draft = generate_draft
         self.notify_draft = notify_draft
-        self.deliver_sheets = deliver_sheets
-        self.max_retries = max_retries
         self.callback_ttl = callback_ttl
-
-    def process_observation(self, observation: SourceObservation) -> V2Candidate | V2Draft | None:
-        candidate = self.workflow.record_observation(observation)
-        return None if candidate is None else self.run(candidate.id)
 
     def run(self, candidate_id: str) -> V2Candidate | V2Draft:
         candidate = self.workflow.get_candidate(candidate_id)
-        if candidate.state in {V2State.PENDING_CANDIDATE, V2State.MANUAL_REVIEW, V2State.SHEET_DELIVERED}:
-            if candidate.state == V2State.PENDING_CANDIDATE:
-                return self._notify_candidate(candidate)
-            return candidate
-        if candidate.state == V2State.CANDIDATE_APPROVED:
-            generated = self._generate(candidate)
-            if isinstance(generated, V2Candidate):
-                return generated
-            draft = generated
-        else:
-            existing_draft = self.workflow.get_draft_for_candidate(candidate_id)
-            if existing_draft is None:
-                return self.workflow.mark_manual_review(candidate_id, "approved candidate has no draft")
-            draft = existing_draft
-        if draft.state == V2State.DRAFT_PENDING_APPROVAL:
+        if candidate.state == V2State.PENDING_CANDIDATE:
+            return self._notify_candidate(candidate)
+        draft = self.workflow.get_draft_for_candidate(candidate_id)
+        if (
+            candidate.state == V2State.DRAFT_PENDING_APPROVAL
+            and draft is not None
+            and draft.state == V2State.DRAFT_PENDING_APPROVAL
+        ):
             return self._notify_draft(draft)
-        if draft.state == V2State.DRAFT_APPROVED:
-            return self._deliver(draft)
-        return draft
+        return draft or candidate
 
-    def settle_callback(self, token: str, stage: str) -> V2Candidate | V2Draft | None:
-        """Authenticate and consume a capability; plaintext entity IDs never settle V2."""
+    def settle_callback(
+        self,
+        token: str,
+        stage: str,
+    ) -> V2Candidate | V2Draft | None:
+        """Authenticate and atomically settle one approval capability."""
         if stage not in {"candidate", "draft"}:
             return None
         try:
             token_hash = hash_callback_token(token)
         except ValueError:
             return None
-        entity_id = self.workflow.consume_callback(token_hash, stage, self._now())
-        if entity_id is None:
+        settled = self.workflow.settle_callback_any(
+            token_hash,
+            self._now(),
+            expected_stage=stage,
+        )
+        if settled is None:
             return None
-        if stage == "candidate":
-            self.workflow.approve_candidate(entity_id)
-            return self.run(entity_id)
-        draft = self.workflow.approve_draft(entity_id)
-        return self.run(draft.candidate_id)
+        entity_id, settled_stage = settled
+        if settled_stage == "candidate":
+            return self.workflow.get_candidate(entity_id)
+        return self.workflow.get_draft(entity_id)
 
     def _notify_candidate(self, candidate: V2Candidate) -> V2Candidate:
         if self._prior_remote(candidate.id, "candidate_notification"):
             return self.workflow.get_candidate(candidate.id)
-        token = self._issue_callback(candidate.id, "candidate")
-        outcome = self._effect(candidate.id, "candidate_notification", lambda: self.notify_candidate(candidate, token))
+        outcome = self._notify_with_capability(
+            candidate.id,
+            "candidate",
+            "candidate_notification",
+            lambda token: self.notify_candidate(candidate, token),
+        )
         if outcome is None:
             return cast(
                 V2Candidate,
-                self.workflow.mark_manual_review(candidate.id, "candidate notification outcome ambiguous"),
+                self.workflow.mark_manual_review(
+                    candidate.id,
+                    "candidate notification outcome ambiguous",
+                ),
             )
         return self.workflow.get_candidate(candidate.id)
-
-    def _generate(self, candidate: V2Candidate) -> V2Candidate | V2Draft:
-        if self._prior_remote(candidate.id, "draft_generation"):
-            draft = self.workflow.get_draft_for_candidate(candidate.id)
-            return draft or self.workflow.mark_manual_review(candidate.id, "generation receipt has no draft")
-        outcome = self._effect(candidate.id, "draft_generation", lambda: self.generate_draft(candidate))
-        if outcome is None or not isinstance(outcome, str) or not outcome:
-            return self.workflow.mark_manual_review(candidate.id, "draft generation outcome ambiguous")
-        return self.workflow.create_draft(candidate.id, outcome)
 
     def _notify_draft(self, draft: V2Draft) -> V2Draft:
         if self._prior_remote(draft.id, "draft_notification"):
             return self.workflow.get_draft(draft.id)
-        token = self._issue_callback(draft.id, "draft")
-        outcome = self._effect(draft.id, "draft_notification", lambda: self.notify_draft(draft, token))
+        outcome = self._notify_with_capability(
+            draft.id,
+            "draft",
+            "draft_notification",
+            lambda token: self.notify_draft(draft, token),
+        )
         if outcome is None:
-            return cast(V2Draft, self.workflow.mark_manual_review(draft.id, "draft notification outcome ambiguous"))
+            return cast(
+                V2Draft,
+                self.workflow.mark_manual_review(
+                    draft.id,
+                    "draft notification outcome ambiguous",
+                ),
+            )
         return self.workflow.get_draft(draft.id)
-
-    def _deliver(self, draft: V2Draft) -> V2Draft:
-        receipt = self.workflow.remote_effect(draft.id, "sheets_delivery")
-        if receipt is not None:
-            if receipt["status"] == "ambiguous":
-                return cast(
-                    V2Draft,
-                    self.workflow.mark_manual_review(draft.id, "sheets_delivery outcome ambiguous"),
-                )
-            if receipt["status"] == "confirmed":
-                return self.workflow.mark_sheet_delivered(draft.id)
-            if receipt["status"] == "pending":
-                return cast(
-                    V2Draft,
-                    self.workflow.mark_manual_review(draft.id, "sheets_delivery interrupted with unknown outcome"),
-                )
-        outcome = self._effect(draft.id, "sheets_delivery", lambda: self.deliver_sheets(draft))
-        if outcome is None or outcome is False:
-            return cast(V2Draft, self.workflow.mark_manual_review(draft.id, "sheets delivery outcome ambiguous"))
-        if isinstance(outcome, SheetDelivery) and outcome.outcome is not DeliveryOutcome.APPLIED:
-            return cast(V2Draft, self.workflow.mark_manual_review(draft.id, f"sheets delivery {outcome.outcome}"))
-        return self.workflow.mark_sheet_delivered(draft.id)
 
     def _prior_remote(self, entity_id: str, stage: str) -> bool:
         receipt = self.workflow.remote_effect(entity_id, stage)
         if receipt is None:
             return False
-        if receipt["status"] == "ambiguous":
+        status = receipt["status"]
+        if status == "ambiguous":
             self.workflow.mark_manual_review(entity_id, f"{stage} outcome ambiguous")
             return True
-        if receipt["status"] == "pending":
+        if status == "pending":
             self.workflow.mark_manual_review(entity_id, f"{stage} interrupted with unknown outcome")
             return True
-        return receipt["status"] == "confirmed"
+        if status == "failed":
+            self.workflow.mark_manual_review(entity_id, f"{stage} failed before dispatch")
+            return True
+        return status == "confirmed"
 
-    def _issue_callback(self, entity_id: str, stage: str) -> str:
+    def _notify_with_capability(
+        self,
+        entity_id: str,
+        callback_stage: str,
+        remote_stage: str,
+        call: Callable[[str], Any],
+    ) -> Any | None:
         token = secrets.token_urlsafe(32)
-        self.workflow.issue_callback(
-            hash_callback_token(token), entity_id, stage, (datetime.now(UTC) + self.callback_ttl).isoformat()
+        token_hash = hash_callback_token(token)
+        claim_detail = json.dumps(
+            {
+                "operation": remote_stage,
+                "owner": secrets.token_hex(16),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
         )
-        return token
-
-    def _effect(self, entity_id: str, stage: str, call: Callable[[], Any]) -> Any | None:
-        for attempt in range(self.max_retries + 1):
-            self.workflow.record_remote_attempt(entity_id, stage)
-            try:
-                value = call()
-                if value is False:
-                    self.workflow.settle_remote_effect(entity_id, stage, "ambiguous")
-                    return None
-                if isinstance(value, SheetDelivery) and value.outcome is not DeliveryOutcome.APPLIED:
-                    self.workflow.settle_remote_effect(
-                        entity_id,
-                        stage,
-                        "ambiguous",
-                        detail=f"delivery outcome {value.outcome.value}",
-                    )
-                    return value
-                receipt = value if isinstance(value, str) else "confirmed"
-                self.workflow.settle_remote_effect(entity_id, stage, "confirmed", receipt_id=receipt)
-                return value
-            except ClearNetworkFailure as exc:
-                self.workflow.settle_remote_effect(entity_id, stage, "failed", str(exc))
-                if attempt == self.max_retries:
-                    return None
-            except Exception as exc:
-                self.workflow.settle_remote_effect(entity_id, stage, "ambiguous", type(exc).__name__)
+        claimed = self.workflow.claim_notification(
+            entity_id=entity_id,
+            callback_stage=callback_stage,
+            token_hash=token_hash,
+            expires_at=(datetime.now(UTC) + self.callback_ttl).isoformat(),
+            claim_detail=claim_detail,
+        )
+        if not claimed:
+            return False
+        try:
+            value = call(token)
+            if value is False:
+                self.workflow.settle_remote_effect_claim(
+                    entity_id,
+                    remote_stage,
+                    claim_detail,
+                    "ambiguous",
+                    detail="remote_outcome_unconfirmed",
+                )
                 return None
-        return None
+            receipt_id = value if isinstance(value, str) else "confirmed"
+            if not self.workflow.settle_remote_effect_claim(
+                entity_id,
+                remote_stage,
+                claim_detail,
+                "confirmed",
+                detail="remote_outcome_confirmed",
+                receipt_id=receipt_id,
+            ):
+                return None
+            return value
+        except ClearNetworkFailure:
+            self.workflow.settle_remote_effect_claim(
+                entity_id,
+                remote_stage,
+                claim_detail,
+                "failed",
+                detail="clear_pre_dispatch_network",
+            )
+            return None
+        except Exception:
+            self.workflow.settle_remote_effect_claim(
+                entity_id,
+                remote_stage,
+                claim_detail,
+                "ambiguous",
+                detail="unexpected_remote_exception",
+            )
+            return None
 
     @staticmethod
     def _now() -> str:
@@ -521,17 +529,94 @@ def _settle_v2_sheets_pre_dispatch_failure(
     )
 
 
+def _safe_telegram_text(value: object) -> str:
+    """Render untrusted evidence as inert plain text for Telegram."""
+    text = str(value or "")
+    text = "".join(char for char in text if char in "\n\t" or not unicodedata.category(char).startswith("C"))
+    return html.escape(text, quote=False)
+
+
+def _truncate_utf8(text: str, limit: int = 3_800) -> str:
+    if limit < 0:
+        raise ValueError("limit must be nonnegative")
+    encoded = text.encode("utf-8")
+    if len(encoded) <= limit:
+        return text
+    if limit == 0:
+        return ""
+    suffix = "…"
+    if limit < len(suffix.encode("utf-8")):
+        return encoded[:limit].decode("utf-8", errors="ignore")
+    budget = limit - len(suffix.encode("utf-8"))
+    clipped = encoded[:budget].decode("utf-8", errors="ignore").rstrip()
+    return f"{clipped}{suffix}"
+
+
+def _bounded_metadata(value: object, limit: int) -> str:
+    return _truncate_utf8(_safe_telegram_text(value), limit)
+
+
+def render_v2_candidate_message(candidate: V2Candidate, evidence: Mapping[str, object]) -> str:
+    """Format only the immutable revision/snapshot bound to a candidate."""
+    revision = evidence.get("revision")
+    snapshot = evidence.get("snapshot")
+    if not isinstance(revision, Mapping) or not isinstance(snapshot, Mapping):
+        raise V2WorkflowError("candidate notification requires bound revision and snapshot evidence")
+    observation = revision.get("payload")
+    if not isinstance(observation, Mapping):
+        raise V2WorkflowError("candidate notification has invalid bound revision evidence")
+    provenance = snapshot.get("provenance")
+    source_date = snapshot.get("source_date")
+    date_status = "conflict" if snapshot.get("source_date_conflict") else (source_date or "Telegram fallback")
+    source = observation.get("channel_handle") or observation.get("channel_id") or candidate.channel_id
+    title = snapshot.get("title") or observation.get("preview_title") or "No title"
+    body = snapshot.get("body") or observation.get("preview_description") or observation.get("text") or "No body"
+    link = (
+        snapshot.get("canonical_url") or snapshot.get("final_url") or snapshot.get("requested_url") or "No public URL"
+    )
+    provenance_text = (
+        json.dumps(provenance, ensure_ascii=False, sort_keys=True) if isinstance(provenance, Mapping) else "unavailable"
+    )
+    duplicate = evidence.get("duplicate") or snapshot.get("duplicate") or "none"
+    metadata = (
+        ("Candidate", candidate.id, 128),
+        ("Outcome", candidate.policy_outcome, 128),
+        ("Reason", candidate.policy_reason, 256),
+        ("Duplicate", duplicate, 256),
+        ("Source", source, 512),
+        ("Link", link, 1_024),
+        ("Telegram date", observation.get("published_at") or "unknown", 128),
+        ("Source date", date_status, 128),
+        ("Provenance", provenance_text, 768),
+    )
+    fixed = "\n".join(f"{label}: {_bounded_metadata(value, limit)}" for label, value, limit in metadata)
+    remaining = 3_800 - len(fixed.encode("utf-8")) - len(b"\nTitle: \nBody: ")
+    if remaining < 0:
+        raise V2WorkflowError("candidate notification metadata exceeds Telegram limit")
+    bounded_title = _truncate_utf8(_safe_telegram_text(title), min(768, remaining))
+    remaining -= len(bounded_title.encode("utf-8"))
+    bounded_body = _truncate_utf8(_safe_telegram_text(body), remaining)
+    return f"{fixed}\nTitle: {bounded_title}\nBody: {bounded_body}"
+
+
 class TelegramV2Notifier:
     """One-attempt V2 approval sender backed by the existing Telegram transport."""
 
-    def __init__(self, adapter: Any, *, deadline_seconds: float = 30) -> None:
+    def __init__(
+        self,
+        adapter: Any,
+        *,
+        candidate_evidence: Callable[[str], Mapping[str, object]],
+        deadline_seconds: float = 30,
+    ) -> None:
         if deadline_seconds <= 0:
             raise ValueError("deadline_seconds must be positive")
         self.adapter = adapter
+        self.candidate_evidence = candidate_evidence
         self.deadline_seconds = deadline_seconds
 
     def candidate(self, candidate: V2Candidate, token: str) -> str:
-        return self._send(f"V2 candidate {candidate.id}\n{candidate.observation['text']}", token)
+        return self._send(render_v2_candidate_message(candidate, self.candidate_evidence(candidate.id)), token)
 
     def draft(self, draft: V2Draft, token: str) -> str:
         return self._send(exact_review_text(draft.id, draft.content), token)
@@ -544,29 +629,6 @@ class TelegramV2Notifier:
             markup={"inline_keyboard": [[{"text": "Approve", "callback_data": token}]]},
             deadline=TelegramDeadline.after(self.deadline_seconds),
         )
-        if not result.accepted:
+        if not result.accepted or result.message_id is None:
             raise AmbiguousRemoteEffect(result.safe_code or "Telegram send not confirmed")
-        assert result.message_id is not None
         return str(result.message_id)
-
-
-class TelethonV2Collector:
-    """Collect exactly the configured handles through the existing Telethon adapter."""
-
-    def __init__(self, collector: Any, handles: Sequence[str]) -> None:
-        self.collector = collector
-        self.handles = tuple(handle.lstrip("@") for handle in handles if handle.strip())
-        if not self.handles:
-            raise ValueError("at least one configured Telegram handle is required")
-
-    async def collect(self) -> tuple[SourceObservation, ...]:
-        observations: list[SourceObservation] = []
-        for handle in self.handles:
-            result = self.collector.collect(handle)
-            if inspect.isawaitable(result):
-                result = await result
-            observations.extend(result)
-        return tuple(observations)
-
-    def collect_sync(self) -> tuple[SourceObservation, ...]:
-        return asyncio.run(self.collect())

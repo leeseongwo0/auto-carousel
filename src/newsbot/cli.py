@@ -842,7 +842,7 @@ def generate_codex_v2_once(args: argparse.Namespace) -> int:
     from .v2_codex import V2CodexWorker
     from .v2_workflow import V2Workflow
 
-    with V2Workflow(database) as workflow:
+    with V2Workflow(database, mode="runtime") as workflow:
         interrupted = workflow.reconcile_interrupted_codex_requests()
         if interrupted:
             _print({"manual_review": interrupted, "status": "interrupted"})

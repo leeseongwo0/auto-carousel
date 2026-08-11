@@ -38,90 +38,145 @@ The manual/local workflow does not require a VPS, Telegram, Google Sheets,
 Codex, a scheduler, or Asia/Seoul time.
 Every existing ancestor of a state or output path must be owned by the current user or `root`, must not be a symbolic link, and must not be writable by group or other users. Shared and sticky paths such as `/tmp` are outside the supported manual/local trust boundary.
 
-## Newsbot V2 cutover
+## Newsbot V2 operational validation
 
-V2 is an independent workflow and database. It does not migrate, delete, or write
-legacy Newsbot records. Provision a separate database such as
-`/var/lib/newsbot-v2/newsbot-v2.sqlite`, and run the V2 entrypoint with that path.
+V2 uses an isolated database and never opens, migrates, deletes, or writes the
+legacy Newsbot database. The legacy database is a read-only archive. This
+document describes copy-only validation; it does not authorize a production
+migration, service change, timer enablement, or cutover.
 
-The V2 order is fixed: Telegram collection → exclusion-first policy → first
-candidate approval → draft generation → second exact-draft approval → Sheets
-delivery. The only automatic retries are bounded retries for clear collection
-network failures. An unclear Telegram or Sheets result is `manual_review`; do not
-blindly resend it.
+The fixed workflow remains: durable Telegram revision intent → bounded article
+enrichment → current-generation policy/claim → candidate approval → draft
+generation → second exact-draft approval → Sheets delivery. An unclear Telegram
+or Sheets effect, a conflicting claim, and every untyped failure become
+`manual_review`; no sender retries an ambiguous effect. The Telegram worker is
+the sole poll owner and sends at most one draft-or-candidate approval per tick.
 
-The tracked channel profile keeps six enabled sources and replaces the old
-research counterpart with `the_block_crypto`. The private VPS profile must make
-the same one-for-one replacement before a cutover. Keep the legacy timers and
-legacy database read-only while validating V2.
+Collection persists immutable Telegram revisions before enrichment. Unchanged
+observations advance last-seen state without another fetch or policy evaluation.
+Edits received after a candidate claim are retained for audit but do not replace,
+re-evaluate, or resend the approved evidence. Article enrichment uses direct,
+proxy-free DNS/socket/TLS requests with bounded redirects, response sizes, and
+deadlines; unsafe, private, or ambiguous network targets never fall back to an
+unrestricted client.
+Set `NEWSBOT_V2_BLOCKED_ARTICLE_HOSTS` to a comma-separated private deployment
+denylist (for example, internal service and control-plane hostnames). The direct
+transport applies the denylist before DNS and again on every redirect; entries
+also block their subdomains.
 
-Before switching production traffic, run exclusion fixtures and a complete
-collection-to-Sheets approval test. During the stopped-owner cutover, seed the
-V2 Telegram cursor from the final legacy cursor and run the installed V2
-collection, Telegram, Codex, and Sheets services successfully three consecutive
-times. Only then enable their timers. Rollback means stopping all V2 timers
-before restoring the previously verified legacy units; never run both Telegram
-poll owners or edit either database.
+Candidate identity is story-centric. Only the selected requested URL, validated
+final URL, accepted same-registrable-domain canonical URL, and an exact
+meaningful-body digest can become aliases. A delivered, quarantined, held, or
+effectful story remains suppressed after hot payload compaction.
+Collection applies one global due-work budget across all configured handles.
+When the enrichment backlog reaches `--limit`, it drains existing work without
+accepting more Telegram observations. New-message pages share that budget with
+a persisted newest-to-oldest edit scan. The edit scan rotates through the last
+24 hours across runs, resumes from its durable message-ID cursor after a crash,
+and promotes its edit watermark only after the full history sweep completes.
 
-The operational surface always requires the explicit V2 database path:
+Use an explicit disposable V2 path for every rehearsal:
 
 ```bash
-/usr/local/bin/newsbot v2-status --db /var/lib/newsbot-v2/newsbot-v2.sqlite
-newsbot-v2 --db ./fixture-v2.sqlite collect-fixture --fixture <fixture.json>
-/usr/local/bin/newsbot v2-collect-live --db /var/lib/newsbot-v2/newsbot-v2.sqlite --lookback-hours 24 --limit 20
-sudo systemctl start newsbot-generate-codex.service
-/usr/local/bin/newsbot v2-telegram-tick --db /var/lib/newsbot-v2/newsbot-v2.sqlite --deadline 60 --timeout 10
-/usr/local/bin/newsbot v2-deliver-google-sheets-next --db /var/lib/newsbot-v2/newsbot-v2.sqlite --deadline 90
+newsbot-v2 --db ./fresh-v2.sqlite create-db
+newsbot-v2 --db ./fresh-v2.sqlite runtime-db
+newsbot-v2 --db ./fresh-v2.sqlite verify-db
+newsbot-v2 --db ./fresh-v2.sqlite v2-status --limit 50
+newsbot-v2 --db ./fresh-v2.sqlite compact --batch-size 500 --dry-run
+newsbot-v2 --db ./fresh-v2.sqlite compact --batch-size 500
 ```
 
-The final cursor handoff and service switch are performed while every legacy
-worker is inactive:
+For a schema migration rehearsal, stop every V2 writer and compaction owner,
+then run the guarded command on an exact disposable copy:
 
 ```bash
-legacy_offset="$(sqlite3 -readonly /var/lib/newsbot/newsbot.db \
-  "SELECT next_offset FROM telegram_update_cursors WHERE stream='approval';")"
-/usr/local/bin/newsbot v2-seed-telegram-cursor \
-  --db /var/lib/newsbot-v2/newsbot-v2.sqlite --next-offset "$legacy_offset"
-sudo install -o root -g root -m 0644 deploy/systemd/newsbot-{collect,telegram,sheets}.service \
-  /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl start newsbot-collect.service
-sudo systemctl start newsbot-telegram.service
-sudo systemctl start newsbot-generate-codex.service
-sudo systemctl start newsbot-sheets.service
+newsbot-v2 --db ./v2-copy.sqlite migrate-db \
+  --backup ./v2-copy.before-schema-7.sqlite \
+  --timeout-seconds 120
+newsbot-v2 --db ./v2-copy.sqlite verify-db
 ```
 
-All four starts must complete cleanly in that order for three consecutive
-cycles. Enable the timers in approval-first order:
-`newsbot-telegram.timer`, `newsbot-sheets.timer`,
-`newsbot-generate-codex.timer`, then `newsbot-collect.timer`.
+`create-db` refuses an existing database. `runtime-db` and `migrate-db` both
+require an existing file; neither creates a missing database. `runtime-db` only
+accepts a complete V2 schema. `migrate-db` is the one atomic migration boundary.
+Its preflight requires a new backup path, valid SQLite integrity and foreign
+keys, and a non-busy WAL checkpoint. When source and backup share a filesystem,
+that filesystem must have free space of at least four times the
+database-plus-WAL size. On separate filesystems, the source must have three
+times that size for migration working headroom and the backup filesystem must
+have one complete snapshot's capacity. The exclusive migration transaction
+holds every clean notification-eligible predecessor candidate before its sole
+commit, enforces the deadline, and rolls back on failure; preserve the
+hash-reported backup.
+`verify-db` opens read-only and must leave the file unchanged. Compaction has
+no network work, is bounded to 500 rows, and should be dry-run, applied,
+reapplied, and then verified on a copy. Stop the rehearsal on any invariant
+mismatch. The current migration target is schema `7`, following deployed
+predecessor schemas `3`–`6`; it is intentionally monotonic even though the
+original planning draft used an abstract schema-v2 label. Before its sole
+commit, migration checks the exact table/column/index contract, foreign keys,
+SQLite integrity, duplicate truth lattice, and workflow invariants. The
+version marker is its final write.
 
-`collect-live` uses the private `NEWSBOT_V2_TELETHON_*` variables and
-`NEWSBOT_V2_TELEGRAM_HANDLES`. Production generation is not a manual
-candidate-ID command: `newsbot-generate-codex.service` admits only the fixed
-`generate-codex-v2-once --db /var/lib/newsbot-v2/newsbot-v2.sqlite` command.
-Before launching the fixed Codex child, the `newsbot` parent persists the exact
-canonical request and an attempt receipt; the `newsbot-codex` child never opens
-either database. A successful validated output, its digest, the exact draft,
-and the `draft_pending_approval` transition commit atomically. An interrupted,
-busy, timeout, outer-timeout, nonzero, cancelled, or otherwise uncertain attempt
-enters `manual_review` without relaunch. Only the typed
-`clear_pre_dispatch_network` failure, which proves the provider was not invoked,
-may use the one remaining identical-request attempt.
+Retention is persistent rather than a daily reset. The default hot window is
+30 days for delivered and current non-candidate payloads and 7 days for
+unbound superseded revisions. Compaction keeps fixed identity, story keys and
+claims, delivery/effect receipts, ambiguity, active/manual-review evidence,
+and digest-only provenance. Expired terminal callbacks are removed; old
+delivered draft and successful Codex payload bytes become digest markers
+without weakening replay suppression. One apply transaction shares the
+requested batch budget across every compacted table and aborts on an invariant
+mismatch. `v2-status` returns a dynamic keyset page (default 50, maximum 200);
+use its opaque `next_cursor` rather than requesting an unbounded dump.
+Each status response also includes capped aggregate state/queue counts, the
+completed 15-minute fetch window, database and WAL sizes, oldest queue ages,
+`aggregate_cap`, `aggregate_truncated`, and active threshold alerts. Set
+`NEWSBOT_V2_SEVEN_DAY_STORAGE_BASELINE_BYTES` to the reviewed seven-day
+storage model in production; the command fails closed when it is absent.
+Blocked/transient fetch rates above 20%, combined storage above twice that
+baseline, and queue/manual-review age above 24 hours emit redacted structured
+alerts.
+Immediate safety alerts are emitted as redacted critical events for
+`private_harness_hit`, `duplicate_claim`, `confirmed_effect_reattempt`, and
+`migration_retention_mismatch`; `identity_conflict` is also a paging event.
+Treat any of these as a stop signal: preserve the V2 database, disable the
+affected owner, and reconcile durable story/effect evidence before resuming.
 
-The V2 Telegram worker is the sole Bot API poll owner after cutover. Its cursor
-is stored only in the V2 database; it sends at most one draft-or-candidate
-approval per tick, consumes only authorized V2 capabilities, and advances the
-cursor monotonically. `deliver-google-sheets-next` selects at most one
-second-approved draft, projects the immutable content onto the frozen A:V
-schema, and uses the existing prepared-mutation idempotency marker. A confirmed
-receipt is completed locally after restart, while an ambiguous or interrupted
-post-dispatch receipt enters `manual_review` without resend. Before dispatch,
-only a typed `clear_pre_dispatch_network` failure may use one remaining attempt.
-Preparation, draft validation, credential/configuration, attestation, claim
-setup, unknown, and exhausted failures become terminal `manual_review` work and
-are not selected by later timer ticks. The production collection, Telegram,
-Codex, and Sheets units do not infer or open the legacy database.
+No-send validation uses fake Telegram, generation, and Sheets ports. Supply a
+reviewed fixture and run three copy-only cycles:
+
+```bash
+newsbot-v2 --db ./v2-copy.sqlite validate-selection \
+  --no-send --fixture ./reviewed-v2-fixture.json
+```
+
+The first cycle may create review rows, while the next two must create zero
+revisions, claims, callbacks, effects, and fake sends. The validator uses the
+SQLite backup API so committed WAL state is included. Do not point this command
+at production or the legacy database.
+
+A post-migration backlog is held by default. Produce and review its manifest
+before an explicit release:
+
+```bash
+newsbot-v2 --db ./v2-copy.sqlite hold-backlog > held-manifest.json
+newsbot-v2 --db ./v2-copy.sqlite release-backlog --manifest held-manifest.json
+```
+
+The release command requires the manifest's canonical evidence items, digest,
+and sorted IDs. The digest binds each candidate to its immutable revision,
+article snapshot, story, and story keys; any evidence change invalidates the
+release. It also rejects delivered, quarantined, manual-review, callback-bearing,
+or effectful rows. Re-run read-only verification and compare the reviewed
+manifest digest before any separately approved production action.
+A production cutover additionally requires the recorded release
+approval, owner quiescence, a snapshot, cursor handoff, reconciliation, and
+one Telegram poll owner; none of those actions is authorized here.
+
+Before any new external effect, rollback is restoration of the verified V1
+snapshot and prior runtime. After any external effect, never restore or replay
+automatically: stop owners, preserve both databases, and reconcile Telegram and
+Sheets truth manually. Do not edit either database to force a resend.
 
 ## Legacy VPS automation compatibility
 

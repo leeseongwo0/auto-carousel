@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "kind": "security-test-report",
+  "sourceHash": "sha256:2d349ca1891952adf94c85e30bc63b724a4ce738437375faef16a52801a33e41",
+  "commands": [
+    {
+      "command": ".venv/bin/bandit -q -r src -lll -iii",
+      "exitCode": 0,
+      "result": "No high-severity, high-confidence findings"
+    },
+    {
+      "command": ".venv/bin/pip-audit",
+      "exitCode": 0,
+      "result": "No known vulnerabilities found; local telegram-news-bot project is not published on PyPI and was skipped"
+    }
+  ],
+  "productionMutation": false,
+  "notes": "Security commands were run after the frozen source verification without changing any source path in the hash manifest. This report and the source-hash receipt itself are evidence-only exclusions from the frozen hash."
+}
