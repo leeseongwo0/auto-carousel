@@ -98,8 +98,8 @@ CREATE TABLE v2_codex_attempts (
 
 
 def _create_receipt_first_baseline(path) -> tuple[str, str]:
-    delivered = "365610e753af078c5674d2fb"
-    pending = "1f3276d77e1a591a27933864"
+    delivered = "365610e753af078c5674d2fb"  # pragma: allowlist secret
+    pending = "1f3276d77e1a591a27933864"  # pragma: allowlist secret
     timestamp = "2026-08-09T01:00:00+00:00"
     canonical_url = "https://example.test/brazil-transfer-controls?utm_source=telegram"
     payloads = {

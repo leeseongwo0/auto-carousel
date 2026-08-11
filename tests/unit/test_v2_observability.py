@@ -55,7 +55,7 @@ def test_metric_labels_have_only_declared_finite_values() -> None:
 
 
 def test_serialized_events_redact_hostile_values() -> None:
-    secret = "https://user:token-123@127.0.0.1/private?telegram=message&password=secret"
+    secret = "https://user:token-123@127.0.0.1/private?telegram=message&password=secret"  # pragma: allowlist secret
     error = RuntimeError(f"authorization: Bearer top-secret; url={secret}")
     recorded = event(
         MetricName.FETCH,
@@ -79,7 +79,7 @@ def test_serialized_events_redact_hostile_values() -> None:
 
 def test_logging_sink_serializes_only_redacted_event(caplog) -> None:
     sink = LoggingObservabilitySink()
-    secret = "https://user:password@127.0.0.1/private?token=secret"
+    secret = "https://user:password@127.0.0.1/private?token=secret"  # pragma: allowlist secret
     with caplog.at_level(
         logging.INFO,
         logger="newsbot.v2.observability",

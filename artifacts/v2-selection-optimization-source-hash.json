@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "kind": "source-change-set-hash",
   "algorithm": "For each sorted path: SHA-256 update(path UTF-8), NUL, then file bytes and NUL; for a deleted path use literal UTF-8 <deleted> and NUL instead of file bytes.",
-  "sourceHash": "sha256:55bef90987fc691ef1965f9aa3a970228f02b9425cc5bc1ab3e5c8689e4539e1",
+  "sourceHash": "sha256:cccf84e45ccf934a310d54a32c0383fceeb93f19fd67e1e41670599ce1ca87a7",
   "paths": [
     "artifacts/v2-selection-optimization-junit.xml",
     "artifacts/v2-selection-optimization-test-report.json",

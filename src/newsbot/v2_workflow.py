@@ -1315,8 +1315,8 @@ class V2Workflow:
                         (V2State.SHEET_DELIVERED.value, now, winner),
                     )
 
-        brazil_delivered = "365610e753af078c5674d2fb"
-        brazil_pending = "1f3276d77e1a591a27933864"
+        brazil_delivered = "365610e753af078c5674d2fb"  # pragma: allowlist secret
+        brazil_pending = "1f3276d77e1a591a27933864"  # pragma: allowlist secret
         brazil_rows = self._db.execute(
             "SELECT c.id,b.story_id,b.held,claim.candidate_id winner,"
             "s.delivered_at FROM v2_candidates c "
