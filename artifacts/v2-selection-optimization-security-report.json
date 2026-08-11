@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "kind": "security-test-report",
-  "sourceHash": "sha256:2d349ca1891952adf94c85e30bc63b724a4ce738437375faef16a52801a33e41",
+  "sourceHash": "sha256:55bef90987fc691ef1965f9aa3a970228f02b9425cc5bc1ab3e5c8689e4539e1",
   "commands": [
     {
       "command": ".venv/bin/bandit -q -r src -lll -iii",

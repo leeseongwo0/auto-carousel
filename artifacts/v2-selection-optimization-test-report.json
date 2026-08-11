@@ -4,9 +4,9 @@
   "scope": "Newsbot V2 selection optimization priorities 1-5, 7, 9, and 11; non-goals 6, 8, and 10",
   "commands": [
     {
-      "command": "PYTHONPATH=.:src .venv/bin/pytest -q",
+      "command": ".venv/bin/pytest -q",
       "exitCode": 0,
-      "result": "679 passed, 1 skipped in 11.53s"
+      "result": "679 passed, 1 skipped in 11.64s"
     },
     {
       "command": "PYTHONPATH=.:src .venv/bin/pytest -q tests/unit/test_v2_*.py tests/unit/test_telethon_collector.py tests/integration/test_v2_*.py tests/integration/test_collection_continuation.py tests/e2e/test_v2_cutover.py --junitxml=artifacts/v2-selection-optimization-junit.xml",
